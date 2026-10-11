@@ -1,0 +1,19 @@
+# lscs 本地配置模板。复制为 config.toml 后填写（config.toml 已加入 .gitignore，不会进入仓库）。
+
+[llm]
+enabled = true
+provider = "deepseek"
+model = "deepseek-flash"
+base_url = ""                  # 留空表示 https://api.deepseek.com
+api_key = ""                   # 你的 DeepSeek Key
+thinking = "disabled"          # 请保持 disabled；low/high 很慢（约 18 秒），而且经常返回空内容
+timeout_seconds = 20
+max_calls_per_game = 60
+max_output_tokens = 800
+
+[overlay]
+enabled = true                 # 游戏上的悬浮面板；false 只用终端（也可以用 lscs watch --no-overlay）
+position = "right"             # 贴在炉石窗口的 right（右侧）、left（左侧）或 top（顶部）
+opacity = 0.85                 # 不透明度，0.3~1.0
+font_size = 0                  # 字号（像素）：0 表示按炉石窗口大小自动，或填 10~40
+click_through = true           # 鼠标点击穿透面板，不影响游戏操作（只在 Windows 上有效）

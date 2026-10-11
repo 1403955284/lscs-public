@@ -1,0 +1,185 @@
+"""维护实体状态，在 flush 时生成 GameState 快照和事件。"""
+
+from __future__ import annotations
+
+from collections.abc import Iterable
+
+from hearthstone.enums import CardType, GameTag, Step, Zone
+
+from lscs.parsing.feed import GameStarted, PowerChange, TagSet
+from lscs.state.build import (
+    BOB_HERO_PREFIX,
+    HERO_PLACEHOLDER,
+    bg_turn,
+    bob_player_id,
+    build_state,
+    me_player_id,
+    minion,
+    opponents,
+    raw_turn,
+    shop_items,
+    sorted_zone,
+)
+from lscs.state.entities import EntityStore
+from lscs.state.models import Event, EventType, GameState, Minion, Phase
+from lscs.state.pool import PoolConfig
+from lscs.state.tribes import TribeInference
+
+
+class StateTracker:
+    def __init__(self, pool_config: PoolConfig) -> None:
+        self._pool_config = pool_config
+        self._store = EntityStore()
+        self._seq = 0
+        self._dirty = False
+        self._reset_game()
+
+    @property
+    def state(self) -> GameState:
+        return self._state
+
+    def _reset_game(self) -> None:
+        self._state = GameState(seq=self._seq)
+        self._tribes = TribeInference(self._pool_config.tribe_count)
+        self._last_boards: dict[int, tuple[tuple[Minion, ...], int]] = {}
+        self._pending: list[Event] = []
+        self._in_combat = False
+        self._combat_opponent: int | None = None
+        self._board_captured = True
+        self._uncertain = False
+
+    def mark_uncertain(self) -> None:
+        self._uncertain = True
+        self._dirty = True
+
+    def apply(self, changes: Iterable[PowerChange]) -> None:
+        for change in changes:
+            if isinstance(change, GameStarted):
+                self._reset_game()
+            if isinstance(change, TagSet):
+                self._before_tag(change)
+            self._store.apply(change)
+            if isinstance(change, TagSet):
+                self._after_tag(change)
+            self._dirty = True
+
+    def flush(self) -> tuple[GameState, list[Event]] | None:
+        if not self._dirty:
+            return None
+        self._dirty = False
+        for item in shop_items(self._store):
+            self._tribes.observe(item.races)
+        self._seq += 1
+        new = build_state(
+            self._store,
+            seq=self._seq,
+            last_boards=self._last_boards,
+            tribes=self._tribes.tribes,
+            tribes_confidence=self._tribes.confidence,
+            pool_config=self._pool_config,
+            uncertain=self._uncertain,
+        )
+        before, after = _diff_events(self._state, new)
+        pending = self._pending if new.phase != Phase.WAITING else []  # 非酒馆战棋对局不发事件
+        events = before + pending + after
+        self._pending = []
+        self._state = new
+        return new, events
+
+    def _before_tag(self, change: TagSet) -> None:
+        # 第一次攻击之前截取对手阵容，这时还没有随从死亡
+        if change.tag == GameTag.ATTACKING and change.value and not self._board_captured:
+            self._capture_combat_board()
+
+    def _after_tag(self, change: TagSet) -> None:
+        store = self._store
+        if change.entity_id == store.game_entity_id:
+            if (
+                change.tag == GameTag.STEP
+                and change.value == Step.MAIN_ACTION
+                and raw_turn(store) % 2 == 1
+            ):
+                self._pending.append(Event(type=EventType.RECRUIT_STARTED, turn=bg_turn(store)))
+            return
+        if change.tag != GameTag.HERO_ENTITY:
+            return
+        hero_card = store.card_id(change.value)
+        if change.entity_id == store.player_entity(me_player_id(store)):
+            if raw_turn(store) == 0 and hero_card and hero_card != HERO_PLACEHOLDER:
+                self._pending.append(
+                    Event(type=EventType.HERO_CHOSEN, turn=0, data={"hero": hero_card})
+                )
+        elif change.entity_id == store.player_entity(bob_player_id(store)):
+            if raw_turn(store) == 0 or hero_card is None:
+                return  # 开局时 Bob 的英雄实体还没创建
+            if hero_card.startswith(BOB_HERO_PREFIX):
+                self._end_combat()
+            else:
+                self._start_combat(hero_card)
+
+    def _start_combat(self, hero_card: str) -> None:
+        self._in_combat = True
+        self._combat_opponent = self._identify_opponent(hero_card)
+        self._board_captured = False
+        self._pending.append(
+            Event(
+                type=EventType.COMBAT_STARTED,
+                turn=bg_turn(self._store),
+                data={"opponent": self._combat_opponent, "hero": hero_card},
+            )
+        )
+
+    def _end_combat(self) -> None:
+        if not self._in_combat:
+            return
+        if not self._board_captured:
+            self._capture_combat_board()
+        self._pending.append(
+            Event(
+                type=EventType.COMBAT_ENDED,
+                turn=bg_turn(self._store),
+                data={"opponent": self._combat_opponent},
+            )
+        )
+        self._in_combat = False
+        self._combat_opponent = None
+
+    def _identify_opponent(self, hero_card: str) -> int | None:
+        for player_id, opp in opponents(self._store, {}).items():
+            if opp.hero_card_id == hero_card:
+                return player_id
+        me = self._store.player_entity(me_player_id(self._store))
+        return self._store.tag(me, GameTag.NEXT_OPPONENT_PLAYER_ID) or None
+
+    def _capture_combat_board(self) -> None:
+        self._board_captured = True
+        bob = bob_player_id(self._store)
+        if self._combat_opponent is None or bob is None:
+            return
+        board = tuple(
+            minion(self._store, e)
+            for e in sorted_zone(self._store, bob, Zone.PLAY, (CardType.MINION,))
+        )
+        self._last_boards[self._combat_opponent] = (board, bg_turn(self._store))
+
+
+def _diff_events(old: GameState, new: GameState) -> tuple[list[Event], list[Event]]:
+    before: list[Event] = []
+    after: list[Event] = []
+    if old.phase == Phase.WAITING and new.phase != Phase.WAITING:
+        before.append(Event(type=EventType.GAME_STARTED, turn=new.turn))
+    if new.phase == Phase.RECRUIT and new.me is not None:
+        old_me = old.me
+        if old.shop != new.shop:
+            after.append(Event(type=EventType.SHOP_CHANGED, turn=new.turn))
+        if old_me is None or old_me.board != new.me.board:
+            after.append(Event(type=EventType.BOARD_CHANGED, turn=new.turn))
+        if old_me is None or old_me.hand != new.me.hand:
+            after.append(Event(type=EventType.HAND_CHANGED, turn=new.turn))
+        if old_me is None or old_me.gold != new.me.gold:
+            after.append(Event(type=EventType.GOLD_CHANGED, turn=new.turn))
+    if new.phase == Phase.GAME_OVER and old.phase != Phase.GAME_OVER:
+        after.append(
+            Event(type=EventType.GAME_ENDED, turn=new.turn, data={"place": new.final_place})
+        )
+    return before, after

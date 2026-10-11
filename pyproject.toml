@@ -1,0 +1,42 @@
+[project]
+name = "lscs"
+version = "0.1.0"
+description = "酒馆战棋 AI 助手"
+requires-python = ">=3.12"
+dependencies = [
+    "hslog>=1.20",
+    "hearthstone>=9.21",
+    "pydantic>=2.7",
+    "openai>=3.28.0",
+]
+
+[project.scripts]
+lscs = "lscs.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lscs"]
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q -m 'not live and not gui'"
+markers = [
+    "live: 真实调用外部服务（需要 config.toml 里的 api_key），用 -m live 运行",
+    "gui: 打开真实的悬浮面板窗口（需要显示器），用 -m gui 运行",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E501"]  # 测试里的日志行原样保留，方便对照

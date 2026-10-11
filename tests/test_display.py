@@ -1,0 +1,121 @@
+from factory import make_state, minion, shop_minion, shop_spell
+
+from lscs.advisor.display import AdviceDisplay, describe_action, format_plan
+from lscs.advisor.models import Action, Advice, Plan
+
+NAMES = {"A": "小鬼", "B": "海盗", "S": "香蕉"}
+
+
+def name(card_id):
+    return NAMES.get(card_id, card_id)
+
+
+STATE = make_state(
+    tier=2,
+    board=[minion(10, "A", 1, 1)],
+    shop=[shop_minion(20, "B", 3, 2), shop_spell(30, "S", cost=1)],
+)
+
+
+def test_describe_each_action_type():
+    assert describe_action(Action(type="buy", entity_id=20, reason="好"), STATE, name) == (
+        "买 海盗 3/2（好）"
+    )
+    assert describe_action(Action(type="buy", entity_id=30), STATE, name) == "买 香蕉（法术，1 金）"
+    assert describe_action(Action(type="buy", entity_id=99), STATE, name) == "买 #99"
+    assert describe_action(Action(type="sell", entity_id=10, reason="弱"), STATE, name) == (
+        "卖 小鬼 1/1（弱）"
+    )
+    assert (
+        describe_action(Action(type="upgrade", reason="节奏"), STATE, name) == "升本 → 3 本（节奏）"
+    )
+    assert describe_action(Action(type="refresh"), STATE, name) == "刷新"
+    assert describe_action(Action(type="freeze", reason="留牌"), STATE, name) == "冻结（留牌）"
+
+
+def test_format_plan_numbers_steps_and_handles_empty_plan():
+    plan = Plan(source="rules", actions=(Action(type="buy", entity_id=20), Action(type="refresh")))
+    assert format_plan(plan, STATE, name) == ["① 买 海盗 3/2", "② 刷新"]
+    empty = Plan(source="rules", summary="本回合不需要操作")
+    assert format_plan(empty, STATE, name) == ["无需操作（本回合不需要操作）"]
+
+
+def test_show_rules_prints_block_once_per_plan():
+    out = []
+    display = AdviceDisplay(name, out.append)
+    plan = Plan(
+        source="rules",
+        actions=(Action(type="buy", entity_id=20, reason="好"), Action(type="refresh")),
+        direction="海盗",
+    )
+    advice = Advice(state_seq=1, turn=3, plan=plan)
+    display.show_rules(STATE, advice)
+    display.show_rules(STATE, advice)  # 同一方案不重复打印
+    assert out == ["  📋 规则：① 买 海盗 3/2（好）", "          ② 刷新   方向：海盗"]
+
+
+def test_show_rules_marks_uncertain_state():
+    out = []
+    state = STATE.model_copy(update={"uncertain": True})
+    AdviceDisplay(name, out.append).show_rules(
+        state,
+        Advice(state_seq=1, turn=3, plan=Plan(source="rules", actions=(Action(type="refresh"),))),
+    )
+    assert out[-1] == "          ⚠ 状态可能不准"
+
+
+def test_format_plan_without_reasons():
+    plan = Plan(
+        source="rules",
+        actions=(
+            Action(type="buy", entity_id=20, reason="好"),
+            Action(type="upgrade", reason="节奏"),
+        ),
+    )
+    assert format_plan(plan, STATE, name, reasons=False) == ["① 买 海盗 3/2", "② 升本 → 3 本"]
+    assert (
+        describe_action(Action(type="freeze", reason="留牌"), STATE, name, reasons=False) == "冻结"
+    )
+    empty = Plan(source="rules", summary="本回合不需要操作")
+    assert format_plan(empty, STATE, name, reasons=False) == ["无需操作"]
+
+
+class Recorder:
+    def __init__(self):
+        self.calls = []
+
+    def __getattr__(self, method):
+        return lambda *args: self.calls.append((method, args))
+
+
+class Broken:
+    def __getattr__(self, method):
+        def boom(*_args):
+            raise RuntimeError(f"{method} 坏了")
+
+        return boom
+
+
+def test_display_group_forwards_every_method_and_isolates_errors(caplog):
+    from lscs.advisor.display import DisplayGroup
+
+    first, last = Recorder(), Recorder()
+    group = DisplayGroup(first, Broken(), last)
+    advice = Advice(state_seq=1, turn=3, plan=Plan(source="rules"))
+    group.show_rules(STATE, advice)
+    group.rules_error()
+    group.ai_pending()
+    group.ai_text("AI 超时")
+    group.show_ai(STATE, advice, True)
+    group.ai_summary(2, 300, 40)
+    expected = [
+        ("show_rules", (STATE, advice)),
+        ("rules_error", ()),
+        ("ai_pending", ()),
+        ("ai_text", ("AI 超时",)),
+        ("show_ai", (STATE, advice, True)),
+        ("ai_summary", (2, 300, 40)),
+    ]
+    assert first.calls == expected
+    assert last.calls == expected
+    assert "show_rules 坏了" in caplog.text and "ai_summary 坏了" in caplog.text

@@ -1,0 +1,141 @@
+[
+ {
+  "id": "BG21_029",
+  "dbfId": 74910,
+  "name": "粗鄙小鬼",
+  "text": "<b>亡语：</b>召唤两个1/1的小鬼。",
+  "type": "MINION",
+  "techLevel": 1,
+  "races": [
+   "DEMON"
+  ],
+  "race": "DEMON",
+  "attack": 1,
+  "health": 1,
+  "cost": 0
+ },
+ {
+  "id": "BG21_029_G",
+  "dbfId": 74911,
+  "name": "粗鄙小鬼",
+  "text": "<b>亡语：</b>召唤四个1/1的小鬼。",
+  "type": "MINION",
+  "techLevel": 1,
+  "races": [
+   "DEMON"
+  ],
+  "race": "DEMON",
+  "attack": 2,
+  "health": 2,
+  "cost": 0
+ },
+ {
+  "id": "BGS_061",
+  "dbfId": 61061,
+  "name": "海盗无赖",
+  "text": "<b>亡语：</b>召唤一个1/1的海盗并使其立即发起攻击。",
+  "type": "MINION",
+  "techLevel": 1,
+  "races": [
+   "PIRATE"
+  ],
+  "race": "PIRATE",
+  "attack": 3,
+  "health": 1,
+  "cost": 0
+ },
+ {
+  "id": "BGS_116",
+  "dbfId": 64042,
+  "name": "刷新畸体",
+  "text": "<b>战吼：</b>获得2次免费的<b>刷新</b>。",
+  "type": "MINION",
+  "techLevel": 4,
+  "races": [
+   "ELEMENTAL"
+  ],
+  "race": "ELEMENTAL",
+  "attack": 4,
+  "health": 5,
+  "cost": 0,
+  "isBattlegroundsPoolMinion": true
+ },
+ {
+  "id": "BG23_009",
+  "dbfId": 80747,
+  "name": "熔岩潜伏者",
+  "text": "每回合从手牌对本随从使用的第一张<b>塑造法术</b>的法术牌永久有效。<i>（还剩1张！）</i>",
+  "type": "MINION",
+  "techLevel": 2,
+  "races": [
+   "NAGA"
+  ],
+  "race": "NAGA",
+  "attack": 2,
+  "health": 5,
+  "cost": 0,
+  "isBattlegroundsPoolMinion": true
+ },
+ {
+  "id": "BG28_500",
+  "dbfId": 103785,
+  "name": "护甲储备",
+  "text": "将你的护甲值变为5点。",
+  "type": "BATTLEGROUND_SPELL",
+  "techLevel": 5,
+  "cost": 3,
+  "isBattlegroundsPoolSpell": true
+ },
+ {
+  "id": "TB_BaconShop_HERO_49",
+  "dbfId": 60366,
+  "name": "米尔豪斯·法力风暴",
+  "type": "HERO",
+  "health": 30
+ },
+ {
+  "id": "TB_BaconShop_HP_054",
+  "dbfId": 60405,
+  "name": "法力风暴",
+  "text": "购买随从和<b>刷新</b>的消耗改为（2）枚铸币。升级酒馆所需的铸币增加（1）枚。",
+  "type": "HERO_POWER",
+  "cost": 0
+ },
+ {
+  "id": "TB_BaconShop_HERO_75",
+  "dbfId": 64400,
+  "name": "拉卡尼休",
+  "type": "HERO",
+  "health": 30
+ },
+ {
+  "id": "BG22_HERO_201",
+  "dbfId": 81569,
+  "name": "费林大使",
+  "type": "HERO",
+  "health": 30
+ },
+ {
+  "id": "BG36_MagicItem_402",
+  "dbfId": 134638,
+  "name": "精神鞭笞者肖像",
+  "text": "获取一张残忍的精神鞭笞者。你的残忍的精神鞭笞者还会使相邻的随从获得属性值。",
+  "type": "BATTLEGROUND_TRINKET",
+  "cost": 4
+ },
+ {
+  "id": "BGFYM_011",
+  "dbfId": 132532,
+  "name": "亚煞极",
+  "text": "<b>神明</b>。<b>亡语：</b>召唤你在本场战斗中死亡的前2个畸变怪，且其具有其最大属性值<i>（<b>神明</b>除外）</i>。",
+  "type": "MINION",
+  "techLevel": 1,
+  "races": [
+   "ABERRATION"
+  ],
+  "race": "ABERRATION",
+  "attack": 1,
+  "health": 1,
+  "cost": 0
+ }
+]

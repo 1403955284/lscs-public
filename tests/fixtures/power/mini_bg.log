@@ -1,0 +1,173 @@
+D 10:00:00.0000000 GameState.DebugPrintPower() - CREATE_GAME
+D 10:00:00.0000000 GameState.DebugPrintPower() -     GameEntity EntityID=1
+D 10:00:00.0000000 GameState.DebugPrintPower() -         tag=CARDTYPE value=GAME
+D 10:00:00.0000000 GameState.DebugPrintPower() -         tag=ZONE value=PLAY
+D 10:00:00.0000000 GameState.DebugPrintPower() -         tag=TURN value=0
+D 10:00:00.0000000 GameState.DebugPrintPower() -     Player EntityID=2 PlayerID=1 GameAccountId=[hi=1 lo=1]
+D 10:00:00.0000000 GameState.DebugPrintPower() -         tag=PLAYER_ID value=1
+D 10:00:00.0000000 GameState.DebugPrintPower() -         tag=CONTROLLER value=1
+D 10:00:00.0000000 GameState.DebugPrintPower() -         tag=CARDTYPE value=PLAYER
+D 10:00:00.0000000 GameState.DebugPrintPower() -         tag=HERO_ENTITY value=10
+D 10:00:00.0000000 GameState.DebugPrintPower() -         tag=PLAYER_TECH_LEVEL value=1
+D 10:00:00.0000000 GameState.DebugPrintPower() -     Player EntityID=3 PlayerID=2 GameAccountId=[hi=0 lo=0]
+D 10:00:00.0000000 GameState.DebugPrintPower() -         tag=PLAYER_ID value=2
+D 10:00:00.0000000 GameState.DebugPrintPower() -         tag=CONTROLLER value=2
+D 10:00:00.0000000 GameState.DebugPrintPower() -         tag=CARDTYPE value=PLAYER
+D 10:00:00.0000000 GameState.DebugPrintPower() -         tag=HERO_ENTITY value=11
+D 10:00:00.0000000 GameState.DebugPrintPower() - FULL_ENTITY - Creating ID=10 CardID=TB_BaconShop_HERO_PH
+D 10:00:00.0000000 GameState.DebugPrintPower() -     tag=CONTROLLER value=1
+D 10:00:00.0000000 GameState.DebugPrintPower() -     tag=CARDTYPE value=HERO
+D 10:00:00.0000000 GameState.DebugPrintPower() -     tag=ZONE value=PLAY
+D 10:00:00.0000000 GameState.DebugPrintPower() -     tag=HEALTH value=30
+D 10:00:00.0000000 GameState.DebugPrintPower() - FULL_ENTITY - Creating ID=11 CardID=TB_BaconShopBob
+D 10:00:00.0000000 GameState.DebugPrintPower() -     tag=CONTROLLER value=2
+D 10:00:00.0000000 GameState.DebugPrintPower() -     tag=CARDTYPE value=HERO
+D 10:00:00.0000000 GameState.DebugPrintPower() -     tag=ZONE value=PLAY
+D 10:00:00.0000000 GameState.DebugPrintPower() -     tag=HEALTH value=60
+D 10:00:00.0000000 GameState.DebugPrintPower() - FULL_ENTITY - Creating ID=12 CardID=TB_BaconShop_HERO_75
+D 10:00:00.0000000 GameState.DebugPrintPower() -     tag=CONTROLLER value=2
+D 10:00:00.0000000 GameState.DebugPrintPower() -     tag=CARDTYPE value=HERO
+D 10:00:00.0000000 GameState.DebugPrintPower() -     tag=ZONE value=SETASIDE
+D 10:00:00.0000000 GameState.DebugPrintPower() -     tag=HEALTH value=30
+D 10:00:00.0000000 GameState.DebugPrintPower() -     tag=PLAYER_ID value=3
+D 10:00:00.0000000 GameState.DebugPrintPower() -     tag=PLAYER_LEADERBOARD_PLACE value=2
+D 10:00:00.0000000 GameState.DebugPrintPower() -     tag=PLAYER_TECH_LEVEL value=1
+D 10:00:00.0000000 GameState.DebugPrintPower() - FULL_ENTITY - Creating ID=13 CardID=BG22_HERO_201
+D 10:00:00.0000000 GameState.DebugPrintPower() -     tag=CONTROLLER value=2
+D 10:00:00.0000000 GameState.DebugPrintPower() -     tag=CARDTYPE value=HERO
+D 10:00:00.0000000 GameState.DebugPrintPower() -     tag=ZONE value=SETASIDE
+D 10:00:00.0000000 GameState.DebugPrintPower() -     tag=HEALTH value=30
+D 10:00:00.0000000 GameState.DebugPrintPower() -     tag=PLAYER_ID value=4
+D 10:00:00.0000000 GameState.DebugPrintPower() -     tag=PLAYER_LEADERBOARD_PLACE value=3
+D 10:00:00.0000000 GameState.DebugPrintPower() -     tag=PLAYER_TECH_LEVEL value=1
+D 10:00:00.0000000 GameState.DebugPrintPower() - FULL_ENTITY - Creating ID=14 CardID=TB_BaconShop_HERO_49
+D 10:00:00.0000000 GameState.DebugPrintPower() -     tag=CONTROLLER value=1
+D 10:00:00.0000000 GameState.DebugPrintPower() -     tag=CARDTYPE value=HERO
+D 10:00:00.0000000 GameState.DebugPrintPower() -     tag=ZONE value=HAND
+D 10:00:00.0000000 GameState.DebugPrintPower() -     tag=HEALTH value=30
+D 10:00:00.0000000 GameState.DebugPrintGame() - BuildNumber=999999
+D 10:00:00.0000000 GameState.DebugPrintGame() - GameType=GT_BATTLEGROUNDS
+D 10:00:00.0000000 GameState.DebugPrintGame() - FormatType=FT_WILD
+D 10:00:00.0000000 GameState.DebugPrintGame() - PlayerID=1, PlayerName=Me#1234
+D 10:00:00.0000000 GameState.DebugPrintGame() - PlayerID=2, PlayerName=The Innkeeper
+D 10:00:05.0000000 GameState.DebugPrintPower() - TAG_CHANGE Entity=2 tag=HERO_ENTITY value=14
+D 10:00:05.0000000 GameState.DebugPrintPower() - TAG_CHANGE Entity=14 tag=ZONE value=PLAY
+D 10:00:05.0000000 GameState.DebugPrintPower() - TAG_CHANGE Entity=14 tag=PLAYER_ID value=1
+D 10:00:05.0000000 GameState.DebugPrintPower() - TAG_CHANGE Entity=14 tag=PLAYER_LEADERBOARD_PLACE value=1
+D 10:00:05.0000000 GameState.DebugPrintPower() - TAG_CHANGE Entity=10 tag=ZONE value=SETASIDE
+D 10:00:05.0000000 GameState.DebugPrintPower() - FULL_ENTITY - Creating ID=15 CardID=TB_BaconShop_HP_054
+D 10:00:05.0000000 GameState.DebugPrintPower() -     tag=CONTROLLER value=1
+D 10:00:05.0000000 GameState.DebugPrintPower() -     tag=CARDTYPE value=HERO_POWER
+D 10:00:05.0000000 GameState.DebugPrintPower() -     tag=ZONE value=PLAY
+D 10:00:10.0000000 GameState.DebugPrintPower() - TAG_CHANGE Entity=GameEntity tag=TURN value=1
+D 10:00:10.0000000 GameState.DebugPrintPower() - TAG_CHANGE Entity=2 tag=RESOURCES value=3
+D 10:00:10.0000000 GameState.DebugPrintPower() - TAG_CHANGE Entity=2 tag=NEXT_OPPONENT_PLAYER_ID value=3
+D 10:00:10.0000000 GameState.DebugPrintPower() - FULL_ENTITY - Creating ID=20 CardID=TB_BaconShop_8p_Reroll_Button
+D 10:00:10.0000000 GameState.DebugPrintPower() -     tag=CONTROLLER value=1
+D 10:00:10.0000000 GameState.DebugPrintPower() -     tag=CARDTYPE value=GAME_MODE_BUTTON
+D 10:00:10.0000000 GameState.DebugPrintPower() -     tag=ZONE value=PLAY
+D 10:00:10.0000000 GameState.DebugPrintPower() -     tag=COST value=1
+D 10:00:10.0000000 GameState.DebugPrintPower() - FULL_ENTITY - Creating ID=21 CardID=TB_BaconShopTechUp02_Button
+D 10:00:10.0000000 GameState.DebugPrintPower() -     tag=CONTROLLER value=1
+D 10:00:10.0000000 GameState.DebugPrintPower() -     tag=CARDTYPE value=GAME_MODE_BUTTON
+D 10:00:10.0000000 GameState.DebugPrintPower() -     tag=ZONE value=PLAY
+D 10:00:10.0000000 GameState.DebugPrintPower() -     tag=COST value=5
+D 10:00:10.0000000 GameState.DebugPrintPower() - FULL_ENTITY - Creating ID=30 CardID=BG21_029
+D 10:00:10.0000000 GameState.DebugPrintPower() -     tag=CONTROLLER value=2
+D 10:00:10.0000000 GameState.DebugPrintPower() -     tag=CARDTYPE value=MINION
+D 10:00:10.0000000 GameState.DebugPrintPower() -     tag=ZONE value=PLAY
+D 10:00:10.0000000 GameState.DebugPrintPower() -     tag=ZONE_POSITION value=1
+D 10:00:10.0000000 GameState.DebugPrintPower() -     tag=ATK value=1
+D 10:00:10.0000000 GameState.DebugPrintPower() -     tag=HEALTH value=1
+D 10:00:10.0000000 GameState.DebugPrintPower() -     tag=TECH_LEVEL value=1
+D 10:00:10.0000000 GameState.DebugPrintPower() -     tag=CARDRACE value=DEMON
+D 10:00:10.0000000 GameState.DebugPrintPower() - FULL_ENTITY - Creating ID=31 CardID=BGS_061
+D 10:00:10.0000000 GameState.DebugPrintPower() -     tag=CONTROLLER value=2
+D 10:00:10.0000000 GameState.DebugPrintPower() -     tag=CARDTYPE value=MINION
+D 10:00:10.0000000 GameState.DebugPrintPower() -     tag=ZONE value=PLAY
+D 10:00:10.0000000 GameState.DebugPrintPower() -     tag=ZONE_POSITION value=2
+D 10:00:10.0000000 GameState.DebugPrintPower() -     tag=ATK value=3
+D 10:00:10.0000000 GameState.DebugPrintPower() -     tag=HEALTH value=1
+D 10:00:10.0000000 GameState.DebugPrintPower() -     tag=TECH_LEVEL value=1
+D 10:00:10.0000000 GameState.DebugPrintPower() -     tag=CARDRACE value=PIRATE
+D 10:00:10.0000000 GameState.DebugPrintPower() - FULL_ENTITY - Creating ID=32 CardID=BGS_116
+D 10:00:10.0000000 GameState.DebugPrintPower() -     tag=CONTROLLER value=2
+D 10:00:10.0000000 GameState.DebugPrintPower() -     tag=CARDTYPE value=MINION
+D 10:00:10.0000000 GameState.DebugPrintPower() -     tag=ZONE value=PLAY
+D 10:00:10.0000000 GameState.DebugPrintPower() -     tag=ZONE_POSITION value=3
+D 10:00:10.0000000 GameState.DebugPrintPower() -     tag=ATK value=1
+D 10:00:10.0000000 GameState.DebugPrintPower() -     tag=HEALTH value=4
+D 10:00:10.0000000 GameState.DebugPrintPower() -     tag=TECH_LEVEL value=1
+D 10:00:10.0000000 GameState.DebugPrintPower() -     tag=CARDRACE value=ELEMENTAL
+D 10:00:10.0000000 GameState.DebugPrintPower() -     tag=TAUNT value=1
+D 10:00:10.0000000 GameState.DebugPrintPower() - TAG_CHANGE Entity=GameEntity tag=STEP value=MAIN_ACTION
+D 10:00:20.0000000 GameState.DebugPrintPower() - TAG_CHANGE Entity=2 tag=RESOURCES_USED value=3
+D 10:00:20.0000000 GameState.DebugPrintPower() - TAG_CHANGE Entity=31 tag=CONTROLLER value=1
+D 10:00:20.0000000 GameState.DebugPrintPower() - TAG_CHANGE Entity=31 tag=ZONE value=HAND
+D 10:00:20.0000000 GameState.DebugPrintPower() - TAG_CHANGE Entity=31 tag=ZONE_POSITION value=1
+D 10:00:25.0000000 GameState.DebugPrintPower() - TAG_CHANGE Entity=31 tag=ZONE value=PLAY
+D 10:00:25.0000000 GameState.DebugPrintPower() - TAG_CHANGE Entity=31 tag=ZONE_POSITION value=1
+D 10:00:30.0000000 GameState.DebugPrintPower() - TAG_CHANGE Entity=30 tag=FROZEN value=1
+D 10:00:30.0000000 GameState.DebugPrintPower() - TAG_CHANGE Entity=32 tag=FROZEN value=1
+D 10:00:40.0000000 GameState.DebugPrintPower() - TAG_CHANGE Entity=GameEntity tag=STEP value=MAIN_END
+D 10:00:40.0000000 GameState.DebugPrintPower() - TAG_CHANGE Entity=GameEntity tag=TURN value=2
+D 10:00:40.0000000 GameState.DebugPrintPower() - TAG_CHANGE Entity=30 tag=ZONE value=SETASIDE
+D 10:00:40.0000000 GameState.DebugPrintPower() - TAG_CHANGE Entity=32 tag=ZONE value=SETASIDE
+D 10:00:40.0000000 GameState.DebugPrintPower() - FULL_ENTITY - Creating ID=40 CardID=TB_BaconShop_HERO_75
+D 10:00:40.0000000 GameState.DebugPrintPower() -     tag=CONTROLLER value=2
+D 10:00:40.0000000 GameState.DebugPrintPower() -     tag=CARDTYPE value=HERO
+D 10:00:40.0000000 GameState.DebugPrintPower() -     tag=ZONE value=PLAY
+D 10:00:40.0000000 GameState.DebugPrintPower() -     tag=HEALTH value=30
+D 10:00:40.0000000 GameState.DebugPrintPower() - TAG_CHANGE Entity=3 tag=HERO_ENTITY value=40
+D 10:00:40.0000000 GameState.DebugPrintPower() - FULL_ENTITY - Creating ID=41 CardID=BG21_029_G
+D 10:00:40.0000000 GameState.DebugPrintPower() -     tag=CONTROLLER value=2
+D 10:00:40.0000000 GameState.DebugPrintPower() -     tag=CARDTYPE value=MINION
+D 10:00:40.0000000 GameState.DebugPrintPower() -     tag=ZONE value=PLAY
+D 10:00:40.0000000 GameState.DebugPrintPower() -     tag=ZONE_POSITION value=1
+D 10:00:40.0000000 GameState.DebugPrintPower() -     tag=ATK value=2
+D 10:00:40.0000000 GameState.DebugPrintPower() -     tag=HEALTH value=2
+D 10:00:40.0000000 GameState.DebugPrintPower() -     tag=TECH_LEVEL value=1
+D 10:00:40.0000000 GameState.DebugPrintPower() -     tag=CARDRACE value=DEMON
+D 10:00:40.0000000 GameState.DebugPrintPower() -     tag=PREMIUM value=1
+D 10:00:40.0000000 GameState.DebugPrintPower() - FULL_ENTITY - Creating ID=42 CardID=BGS_116
+D 10:00:40.0000000 GameState.DebugPrintPower() -     tag=CONTROLLER value=2
+D 10:00:40.0000000 GameState.DebugPrintPower() -     tag=CARDTYPE value=MINION
+D 10:00:40.0000000 GameState.DebugPrintPower() -     tag=ZONE value=PLAY
+D 10:00:40.0000000 GameState.DebugPrintPower() -     tag=ZONE_POSITION value=2
+D 10:00:40.0000000 GameState.DebugPrintPower() -     tag=ATK value=1
+D 10:00:40.0000000 GameState.DebugPrintPower() -     tag=HEALTH value=4
+D 10:00:40.0000000 GameState.DebugPrintPower() -     tag=TECH_LEVEL value=1
+D 10:00:40.0000000 GameState.DebugPrintPower() -     tag=CARDRACE value=ELEMENTAL
+D 10:00:40.0000000 GameState.DebugPrintPower() -     tag=TAUNT value=1
+D 10:00:45.0000000 GameState.DebugPrintPower() - TAG_CHANGE Entity=31 tag=ATTACKING value=1
+D 10:00:45.0000000 GameState.DebugPrintPower() - TAG_CHANGE Entity=41 tag=DAMAGE value=3
+D 10:00:45.0000000 GameState.DebugPrintPower() - TAG_CHANGE Entity=41 tag=ZONE value=GRAVEYARD
+D 10:00:45.0000000 GameState.DebugPrintPower() - TAG_CHANGE Entity=31 tag=ATTACKING value=0
+D 10:00:50.0000000 GameState.DebugPrintPower() - TAG_CHANGE Entity=14 tag=DAMAGE value=3
+D 10:00:50.0000000 GameState.DebugPrintPower() - TAG_CHANGE Entity=3 tag=HERO_ENTITY value=11
+D 10:00:50.0000000 GameState.DebugPrintPower() - TAG_CHANGE Entity=40 tag=ZONE value=SETASIDE
+D 10:00:50.0000000 GameState.DebugPrintPower() - TAG_CHANGE Entity=42 tag=ZONE value=SETASIDE
+D 10:01:00.0000000 GameState.DebugPrintPower() - TAG_CHANGE Entity=GameEntity tag=TURN value=3
+D 10:01:00.0000000 GameState.DebugPrintPower() - TAG_CHANGE Entity=2 tag=RESOURCES value=4
+D 10:01:00.0000000 GameState.DebugPrintPower() - TAG_CHANGE Entity=2 tag=RESOURCES_USED value=0
+D 10:01:00.0000000 GameState.DebugPrintPower() - TAG_CHANGE Entity=2 tag=NEXT_OPPONENT_PLAYER_ID value=4
+D 10:01:00.0000000 GameState.DebugPrintPower() - TAG_CHANGE Entity=21 tag=COST value=4
+D 10:01:00.0000000 GameState.DebugPrintPower() - FULL_ENTITY - Creating ID=50 CardID=BG23_009
+D 10:01:00.0000000 GameState.DebugPrintPower() -     tag=CONTROLLER value=2
+D 10:01:00.0000000 GameState.DebugPrintPower() -     tag=CARDTYPE value=MINION
+D 10:01:00.0000000 GameState.DebugPrintPower() -     tag=ZONE value=PLAY
+D 10:01:00.0000000 GameState.DebugPrintPower() -     tag=ZONE_POSITION value=1
+D 10:01:00.0000000 GameState.DebugPrintPower() -     tag=ATK value=2
+D 10:01:00.0000000 GameState.DebugPrintPower() -     tag=HEALTH value=5
+D 10:01:00.0000000 GameState.DebugPrintPower() -     tag=TECH_LEVEL value=2
+D 10:01:00.0000000 GameState.DebugPrintPower() -     tag=CARDRACE value=NAGA
+D 10:01:00.0000000 GameState.DebugPrintPower() - FULL_ENTITY - Creating ID=51 CardID=BG28_500
+D 10:01:00.0000000 GameState.DebugPrintPower() -     tag=CONTROLLER value=2
+D 10:01:00.0000000 GameState.DebugPrintPower() -     tag=CARDTYPE value=BATTLEGROUND_SPELL
+D 10:01:00.0000000 GameState.DebugPrintPower() -     tag=ZONE value=PLAY
+D 10:01:00.0000000 GameState.DebugPrintPower() -     tag=ZONE_POSITION value=2
+D 10:01:00.0000000 GameState.DebugPrintPower() -     tag=TECH_LEVEL value=1
+D 10:01:00.0000000 GameState.DebugPrintPower() - TAG_CHANGE Entity=GameEntity tag=STEP value=MAIN_ACTION
+D 10:01:10.0000000 GameState.DebugPrintPower() - TAG_CHANGE Entity=14 tag=PLAYER_LEADERBOARD_PLACE value=5
+D 10:01:10.0000000 GameState.DebugPrintPower() - TAG_CHANGE Entity=2 tag=PLAYSTATE value=LOST
+D 10:01:10.0000000 GameState.DebugPrintPower() - TAG_CHANGE Entity=GameEntity tag=STATE value=COMPLETE

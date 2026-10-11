@@ -1,0 +1,122 @@
+from factory import hand_minion, make_state, minion, shop_minion, shop_spell
+
+from lscs.advisor.context import build_context
+from lscs.advisor.models import Action
+from lscs.advisor.validate import validate_plan
+
+
+def ctx_for(**kwargs):
+    return build_context(make_state(**kwargs), buy_cost=3)
+
+
+def buy(entity_id):
+    return Action(type="buy", entity_id=entity_id)
+
+
+def sell(entity_id):
+    return Action(type="sell", entity_id=entity_id)
+
+
+UPGRADE = Action(type="upgrade")
+REFRESH = Action(type="refresh")
+FREEZE = Action(type="freeze")
+SHOP = [shop_minion(20, "A", 2, 2), shop_minion(21, "B", 3, 3), shop_minion(22, "C", 1, 4)]
+
+
+def test_empty_plan_is_valid():
+    assert validate_plan([], ctx_for()) is None
+
+
+def test_buy_within_gold():
+    assert validate_plan([buy(20)], ctx_for(gold=3, shop=SHOP)) is None
+
+
+def test_buy_needs_gold():
+    assert validate_plan([buy(20), buy(21)], ctx_for(gold=5, shop=SHOP)) == "第 2 步：铸币不够"
+
+
+def test_buy_must_be_in_shop_and_only_once():
+    assert validate_plan([buy(99)], ctx_for(gold=10, shop=SHOP)) == "第 1 步：商店里没有 #99"
+    assert validate_plan([buy(20), buy(20)], ctx_for(gold=10, shop=SHOP)) == (
+        "第 2 步：#20 已经买过"
+    )
+
+
+def test_selling_first_pays_for_a_buy():
+    board = [minion(10, "X", 1, 1)]
+    assert validate_plan([sell(10), buy(20)], ctx_for(gold=2, shop=SHOP, board=board)) is None
+    assert validate_plan([buy(20), sell(10)], ctx_for(gold=2, shop=SHOP, board=board)) == (
+        "第 1 步：铸币不够"
+    )
+
+
+def test_sell_must_be_on_board_and_only_once():
+    board = [minion(10, "X", 1, 1)]
+    assert validate_plan([sell(11)], ctx_for(board=board)) == "第 1 步：场上没有 #11"
+    assert validate_plan([sell(10), sell(10)], ctx_for(board=board)) == "第 2 步：#10 已经卖过"
+
+
+def test_upgrade_rules():
+    assert validate_plan([UPGRADE], ctx_for(gold=5, upgrade_cost=5)) is None
+    assert validate_plan([UPGRADE], ctx_for(gold=4, upgrade_cost=5)) == "第 1 步：铸币不够"
+    assert validate_plan([UPGRADE], ctx_for(gold=9, upgrade_cost=None)) == (
+        "第 1 步：已经是最高等级，不能升本"
+    )
+    assert validate_plan([UPGRADE, UPGRADE], ctx_for(gold=20, upgrade_cost=5)) == (
+        "第 2 步：一个方案只能升本一次"
+    )
+
+
+def test_refresh_must_be_last_except_freeze():
+    assert validate_plan([buy(20), REFRESH], ctx_for(gold=4, shop=SHOP)) is None
+    assert validate_plan([REFRESH, FREEZE], ctx_for(gold=1)) is None
+    assert validate_plan([REFRESH, buy(20)], ctx_for(gold=9, shop=SHOP)) == (
+        "第 2 步：刷新之后只能冻结"
+    )
+    assert validate_plan([REFRESH], ctx_for(gold=1, refresh_cost=None)) == "第 1 步：现在不能刷新"
+
+
+def test_freeze_must_be_last():
+    assert validate_plan([FREEZE, buy(20)], ctx_for(gold=3, shop=SHOP)) == (
+        "第 2 步：冻结之后不能再有动作"
+    )
+
+
+def test_board_space_counts_hand_minions():
+    board = [minion(10 + i, f"X{i}", 1, 1) for i in range(6)]
+    hand = [hand_minion(30, "H", 1, 1)]
+    assert validate_plan([buy(20)], ctx_for(gold=3, shop=SHOP, board=board, hand=hand)) == (
+        "场面放不下：执行后会有 8 个随从（最多 7 个）"
+    )
+    assert (
+        validate_plan([sell(10), buy(20)], ctx_for(gold=3, shop=SHOP, board=board, hand=hand))
+        is None
+    )
+
+
+def test_triple_frees_two_slots():
+    board = [minion(10 + i, f"X{i}", 1, 1) for i in range(5)] + [
+        minion(15, "A", 2, 2),
+        minion(16, "A", 2, 2),
+    ]
+    assert validate_plan([buy(20)], ctx_for(gold=3, shop=SHOP, board=board)) is None
+
+
+def test_spells_use_their_cost_and_take_no_board_space():
+    board = [minion(10 + i, f"X{i}", 1, 1) for i in range(7)]
+    shop = [shop_spell(40, "S", cost=1)]
+    assert validate_plan([buy(40)], ctx_for(gold=1, shop=shop, board=board)) is None
+    assert validate_plan([buy(40)], ctx_for(gold=0, shop=shop, board=board)) == "第 1 步：铸币不够"
+
+
+def test_overfull_start_allows_doing_nothing_but_not_adding():
+    board = [minion(10 + i, f"X{i}", 1, 1) for i in range(7)]
+    hand = [hand_minion(30, "H", 1, 1)]
+    assert validate_plan([], ctx_for(board=board, hand=hand)) is None
+    assert validate_plan([buy(20)], ctx_for(gold=3, shop=SHOP, board=board, hand=hand)) == (
+        "场面放不下：执行后会有 9 个随从（最多 8 个）"
+    )
+    assert (
+        validate_plan([sell(10), buy(20)], ctx_for(gold=3, shop=SHOP, board=board, hand=hand))
+        is None
+    )

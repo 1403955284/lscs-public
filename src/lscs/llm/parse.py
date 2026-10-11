@@ -1,0 +1,83 @@
+"""把大模型的回答解析成 Plan（M2 设计文档第 7.3 节）。"""
+
+from __future__ import annotations
+
+import json
+import math
+
+from lscs.advisor.models import ACTION_TYPES, Action, Plan
+
+MAX_ACTIONS = 4
+
+
+class ParseError(Exception):
+    pass
+
+
+class EmptyResponse(ParseError):
+    pass
+
+
+def _entity_id(raw: object) -> int | None:
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, str) and raw.lstrip("#").isdigit():
+        return int(raw.lstrip("#"))
+    return None
+
+
+def _confidence(raw: object) -> float | None:
+    if isinstance(raw, bool) or not isinstance(raw, int | float):
+        return None
+    try:
+        value = float(raw)
+    except OverflowError:
+        return None
+    return min(max(value, 0.0), 1.0) if math.isfinite(value) else None
+
+
+def parse_plan(text: str) -> Plan:
+    if not text.strip():
+        raise EmptyResponse("空内容")
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        raise ParseError("不是合法的 JSON") from None
+    if not isinstance(data, dict):
+        raise ParseError("不是 JSON 对象")
+    raw_actions = data.get("actions")
+    if not isinstance(raw_actions, list):
+        raise ParseError("缺少 actions 列表")
+    if len(raw_actions) > MAX_ACTIONS:
+        raise ParseError(f"动作超过 {MAX_ACTIONS} 个")
+    actions = []
+    for i, raw in enumerate(raw_actions, start=1):
+        if not isinstance(raw, dict):
+            raise ParseError(f"第 {i} 个动作不是对象")
+        kind = raw.get("type")
+        if kind not in ACTION_TYPES:
+            raise ParseError(f"第 {i} 个动作类型未知：{kind}")
+        entity = None
+        if kind in ("buy", "sell"):
+            entity = _entity_id(raw.get("entity_id"))
+            if entity is None:
+                raise ParseError(f"第 {i} 个动作缺少 entity_id")
+        reason = raw.get("reason")
+        actions.append(
+            Action(
+                type=kind,
+                entity_id=entity,
+                reason=reason.strip() if isinstance(reason, str) else "",
+            )
+        )
+    summary = data.get("summary")
+    direction = data.get("direction")
+    return Plan(
+        source="llm",
+        actions=tuple(actions),
+        summary=summary.strip() if isinstance(summary, str) else "",
+        direction=direction.strip() or None if isinstance(direction, str) else None,
+        confidence=_confidence(data.get("confidence")),
+    )
