@@ -276,17 +276,46 @@ def test_replay_with_ai_calls_model_and_hides_key(monkeypatch, tmp_path, capsys)
     from helpers import MINI_LOG
 
     answer = json.dumps({"actions": [{"type": "buy", "entity_id": 31, "reason": "海盗"}]})
-    key = _ai_cli_setup(monkeypatch, tmp_path, [answer, answer])
+    key = _ai_cli_setup(monkeypatch, tmp_path, [answer] * 4)
     assert main(["replay", str(MINI_LOG), "--ai"]) == 0
     out = capsys.readouterr().out
     assert "AI：deepseek-flash（Key sk-c…abcd，思考模式 disabled）" in out
+    assert "深度分析：开启（思考 low，每回合开始时约 20 秒出结果）" in out
     assert "建议改回 disabled" not in out
-    assert "：① 买 海盗无赖 3/1（海盗）" in out  # 耗时取决于机器，不断言
+    # 每个招募回合快速、深度各一次；耗时取决于机器，不断言
+    assert out.count("：① 买 海盗无赖 3/1（海盗）") == 2
+    assert "  🧠 深度分析中…（约 20 秒）" in out and "  🧠 深度分析（" in out
     assert "  🤖 AI 建议无效，已忽略" in out  # 第 2 回合 #31 已经在场上，同样的回答不合法
-    assert "本局 AI 调用 2 次" in out
+    assert "  🧠 深度分析失败：AI 建议无效，已忽略" in out
+    assert "本局 AI 调用 4 次" in out
     assert key not in out
     record = next((tmp_path / "recordings").glob("llm-*.jsonl")).read_text(encoding="utf-8")
-    assert key not in record and record.count("\n") == 2
+    assert key not in record and record.count("\n") == 4
+    lanes = [json.loads(line)["lane"] for line in record.splitlines()]
+    assert lanes == ["fast", "deep", "fast", "deep"]
+
+
+def test_deep_thinking_high_waits_longer(monkeypatch, tmp_path, capsys):
+    from helpers import MINI_LOG
+
+    _ai_cli_setup(monkeypatch, tmp_path, [], extra='deep_thinking = "high"\n')
+    assert main(["replay", str(MINI_LOG), "--ai"]) == 0
+    out = capsys.readouterr().out
+    assert "深度分析：开启（思考 high，每回合开始时约 40 秒出结果）" in out
+    assert "  🧠 深度分析中…（约 40 秒）" in out and "约 20 秒" not in out
+
+
+def test_replay_with_deep_analysis_off(monkeypatch, tmp_path, capsys):
+    import json
+
+    from helpers import MINI_LOG
+
+    answer = json.dumps({"actions": [{"type": "buy", "entity_id": 31, "reason": "海盗"}]})
+    _ai_cli_setup(monkeypatch, tmp_path, [answer] * 2, extra="deep_analysis = false\n")
+    assert main(["replay", str(MINI_LOG), "--ai"]) == 0
+    out = capsys.readouterr().out
+    assert "深度分析：关闭" in out and "🧠" not in out
+    assert "本局 AI 调用 2 次" in out
 
 
 def test_replay_with_ai_and_broken_config_fails(monkeypatch, tmp_path, capsys):
@@ -433,9 +462,11 @@ def test_watch_catch_up_mid_game_calls_once_for_the_current_turn():
     pipeline = Pipeline(StateTracker(TEST_POOL), on_update)
     cut = next(i for i, line in enumerate(lines) if pipeline.push(line) or 7 in started)
     jobs, provider, _ = _catch_up(lines[: cut + 200])  # 第 7 回合招募中途启动 watch
-    assert len(jobs) == 1
-    jobs[0]()
-    assert provider.calls[0][1].startswith("第 7 回合")
+    assert len(jobs) == 2  # 快速、深度各一个，都只为当前回合
+    for job in jobs:
+        job()
+    assert {c.thinking for c in provider.calls} == {"disabled", "low"}
+    assert all(c.user.split("\n\n", 1)[1].startswith("第 7 回合") for c in provider.calls)
 
 
 def test_watch_stops_when_asked():

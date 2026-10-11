@@ -8,6 +8,8 @@ import math
 from lscs.advisor.models import ACTION_TYPES, Action, Plan
 
 MAX_ACTIONS = 5  # 例如 买、买、英雄技能、刷新、冻结
+MAX_LOOK_FOR = 6  # "要找的牌"最多几个
+LOOK_FOR_CHARS = 20  # 每个最长几个字（超出截断，最后一个字换成"…"）
 
 
 class ParseError(Exception):
@@ -38,6 +40,27 @@ def _confidence(raw: object) -> float | None:
     return min(max(value, 0.0), 1.0) if math.isfinite(value) else None
 
 
+def _text(raw: object) -> str:
+    return raw.strip() if isinstance(raw, str) else ""
+
+
+def _look_for(raw: object) -> tuple[str, ...]:
+    """不是列表时忽略；跳过空的和不是文字的项。"""
+    if not isinstance(raw, list):
+        return ()
+    names = []
+    for item in raw:
+        name = _text(item)
+        if not name:
+            continue
+        if len(name) > LOOK_FOR_CHARS:
+            name = name[: LOOK_FOR_CHARS - 1] + "…"
+        names.append(name)
+        if len(names) == MAX_LOOK_FOR:
+            break
+    return tuple(names)
+
+
 def parse_plan(text: str) -> Plan:
     if not text.strip():
         raise EmptyResponse("空内容")
@@ -66,20 +89,13 @@ def parse_plan(text: str) -> Plan:
                 raise ParseError(f"第 {i} 个动作缺少 entity_id")
         elif kind == "hero_power":
             entity = _entity_id(raw.get("entity_id"))  # 目标；不需要目标时没有，校验时也忽略
-        reason = raw.get("reason")
-        actions.append(
-            Action(
-                type=kind,
-                entity_id=entity,
-                reason=reason.strip() if isinstance(reason, str) else "",
-            )
-        )
-    summary = data.get("summary")
-    direction = data.get("direction")
+        actions.append(Action(type=kind, entity_id=entity, reason=_text(raw.get("reason"))))
     return Plan(
         source="llm",
         actions=tuple(actions),
-        summary=summary.strip() if isinstance(summary, str) else "",
-        direction=direction.strip() or None if isinstance(direction, str) else None,
+        summary=_text(data.get("summary")),
+        direction=_text(data.get("direction")) or None,
         confidence=_confidence(data.get("confidence")),
+        analysis=_text(data.get("analysis")),
+        look_for=_look_for(data.get("look_for")),
     )

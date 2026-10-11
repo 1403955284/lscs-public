@@ -50,6 +50,7 @@ class CardInfo:
     is_pool_spell: bool
     duos_only: bool
     dbf_id: int | None = None
+    cost: int | None = None  # 铸币费用（酒馆法术）
 
 
 class CardDB:
@@ -71,6 +72,7 @@ class CardDB:
                 is_pool_spell=bool(raw.get("isBattlegroundsPoolSpell")),
                 duos_only=bool(raw.get("isBattlegroundsDuosExclusive")),
                 dbf_id=raw.get("dbfId"),
+                cost=raw.get("cost"),
             )
             self._cards[info.card_id] = info
             if info.dbf_id is not None:
@@ -99,6 +101,16 @@ class CardDB:
                 c
                 for c in self._cards.values()
                 if c.is_pool_minion and (include_duos or not c.duos_only)
+            ),
+            key=lambda c: (c.tier or 0, c.card_id),
+        )
+
+    def pool_spells(self, include_duos: bool = False) -> list[CardInfo]:
+        return sorted(
+            (
+                c
+                for c in self._cards.values()
+                if c.is_pool_spell and (include_duos or not c.duos_only)
             ),
             key=lambda c: (c.tier or 0, c.card_id),
         )

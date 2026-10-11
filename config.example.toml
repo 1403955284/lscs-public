@@ -6,10 +6,16 @@ provider = "deepseek"
 model = "deepseek-flash"
 base_url = ""                  # 留空表示 https://api.deepseek.com
 api_key = ""                   # 你的 DeepSeek Key
-thinking = "disabled"          # 请保持 disabled；low/high 很慢（约 18 秒），而且经常返回空内容
+# 快速建议：招募开始和每次刷新后各一次，2~3 秒出结果
+thinking = "disabled"          # 请保持 disabled；思考交给下面的深度分析
 timeout_seconds = 20
-max_calls_per_game = 60
-max_output_tokens = 800
+max_output_tokens = 1500
+max_calls_per_game = 80        # 每局最多调用几次（快速和深度一起算）
+# 深度分析：每回合开始时和快速建议同时发出，开思考，约 20 秒（偶尔 1 分钟）出结果
+deep_analysis = true           # false 关闭深度分析（每局大约省 5 毛到 1 块钱）
+deep_thinking = "low"          # 思考强度：low 或 high（high 更慢）
+deep_max_output_tokens = 16000
+deep_timeout_seconds = 75
 
 [overlay]
 enabled = true                 # 游戏上的悬浮面板；false 只用终端（也可以用 lscs watch --no-overlay）

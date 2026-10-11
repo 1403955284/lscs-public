@@ -19,7 +19,7 @@ from lscs.overlay.model import OverlayModel, OverlayView, condense
 log = logging.getLogger(__name__)
 
 RENDER_MS = 150  # 读取数据模型的间隔
-CONDENSE_LEVELS = 3  # 0 全部；1 去掉"方向"；2 再去掉附注、"思路"只留一行
+CONDENSE_LEVELS = 3  # 0 全部；1 去掉"方向"；2 再去掉"要找"和附注、"分析"只留一行
 PLACE_MS = 500  # 重新定位、判断显示/隐藏的间隔
 BG = "#1e1e24"
 TITLE = "#d4d4dc"
@@ -309,8 +309,8 @@ class OverlayWindow:
         )
 
     def _draw(self) -> None:
-        """画出当前内容；超过最大高度时逐级精简（先去掉"方向"，再去掉附注、"思路"只留一行），
-        最后仍然超高就截掉底部。"""
+        """画出当前内容；超过最大高度时逐级精简（先去掉"方向"，再去掉"要找"和附注、
+        "分析"只留一行），最后仍然超高就截掉底部。"""
         view, layout = self._view, self._layout
         if view is None or layout is None:
             return
@@ -347,16 +347,24 @@ class OverlayWindow:
         title = self._label(wrapped(view.title, inner, bold), TITLE, bold)
         title.grid(row=row, column=0, columnspan=2, sticky="w")
         row += 1
-        sections = (("规则", view.rules, RULES_TAG), ("AI", view.ai, AI_TAG))
+        sections = (("规则", view.rules, RULES_TAG), (view.ai_title, view.ai, AI_TAG))
         for tag, lines, color in sections if not view.compact else ():
             if not lines:
                 continue
-            self._label(tag, color, bold).grid(row=row, column=0, sticky="nw", pady=(gap // 2, 0))
+            first_pad = gap // 2
+            label = self._label(tag, color, bold)
+            if bold.measure(tag) + gap > tag_width:
+                # 放不进标签列的标题（"AI（深度）"）单独占一行，内容仍然从第二列开始
+                label.grid(row=row, column=0, columnspan=2, sticky="w", pady=(first_pad, 0))
+                row += 1
+                first_pad = 0
+            else:
+                label.grid(row=row, column=0, sticky="nw", pady=(first_pad, 0))
             for i, line in enumerate(lines):
                 max_lines = 1 if level >= 2 and line.role == "reason" else 0
                 text = wrapped(line.text, inner - tag_width, text_font, max_lines)
                 label = self._label(text, MUTED if line.tone == "muted" else TEXT, text_font)
-                label.grid(row=row, column=1, sticky="w", pady=(gap // 2 if i == 0 else 0, 0))
+                label.grid(row=row, column=1, sticky="w", pady=(first_pad if i == 0 else 0, 0))
                 row += 1
         if view.warning and not view.compact:
             warning = self._label(wrapped(view.warning, inner, text_font), WARN, text_font)

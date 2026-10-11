@@ -7,6 +7,10 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict
 
 ActionType = Literal["buy", "sell", "upgrade", "hero_power", "refresh", "freeze"]
+Lane = Literal["fast", "deep"]  # AI 建议的两路：快速建议、深度分析
+# 深度分析的操作为什么不能用了：refreshed 商店刷新了；invalid 操作不合法；
+# changed 步骤已经做完、局面变化太大或已经进入战斗
+Expired = Literal["refreshed", "invalid", "changed"]
 ACTION_TYPES: tuple[str, ...] = ("buy", "sell", "upgrade", "hero_power", "refresh", "freeze")
 
 
@@ -26,6 +30,8 @@ class Plan(_Frozen):
     summary: str = ""
     direction: str | None = None
     confidence: float | None = None
+    analysis: str = ""  # AI 的局势判断、本局方向、本回合目标
+    look_for: tuple[str, ...] = ()  # AI 说接下来要找的牌
 
     def signature(self) -> tuple[tuple[str, int | None], ...]:
         """只看动作和对象、不看理由，用于判断两个方案是否相同。"""
@@ -39,3 +45,5 @@ class Advice(_Frozen):
     alternatives: tuple[Plan, ...] = ()
     stale_note: str | None = None
     elapsed: float | None = None  # AI 调用耗时（秒）
+    lane: Lane = "fast"
+    expired: Expired | None = None  # 深度分析的操作已经不能用，只看思路

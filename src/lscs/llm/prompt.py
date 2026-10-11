@@ -1,15 +1,15 @@
-"""生成发给大模型的系统提示和局面消息（M2 设计文档第 7.1 节）。"""
+"""生成发给大模型的系统提示和局面消息（M2 设计文档第 7.1 节、更聪明的 AI 建议设计文档第 3 节）。"""
 
 from __future__ import annotations
 
 import json
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from lscs.advisor.context import MINION, TurnContext, hero_power_blocker, hero_power_used
-from lscs.advisor.models import Plan
 from lscs.advisor.names import keyword_zh, tribe_zh
-from lscs.cards.db import CardDB
+from lscs.cards.db import CardDB, CardInfo
 from lscs.llm.parse import MAX_ACTIONS
 from lscs.state.models import (
     NO_TARGET,
@@ -21,56 +21,71 @@ from lscs.state.models import (
     TribesConfidence,
 )
 
-LETTERS = "ABCDEFGH"
+# 系统提示里的 JSON 示例（快速和深度共用同一个系统提示，方便 DeepSeek 缓存前缀）
 EXAMPLE = {
+    "analysis": "局势判断、本局方向、本回合目标（两三句）",
     "actions": [
         {
             "type": "buy",
             "entity_id": 1689,
             "gold_after": 4,
             "minions_after": 5,
-            "reason": "凑成海盗对子",
+            "reason": "一句话理由",
         },
-        {"type": "upgrade", "gold_after": 0, "minions_after": 5, "reason": "按节奏该升 3 本了"},
+        {"type": "refresh", "gold_after": 3, "minions_after": 5, "reason": "..."},
     ],
     "summary": "一句话说明本回合思路",
-    "direction": "海盗",
+    "direction": "方向/流派",
+    "look_for": ["接下来要找的牌名"],
     "confidence": 0.7,
 }
 
-SYSTEM_TEMPLATE = """你是《炉石传说》酒馆战棋的教练。
-你在给一位 6000 分以下的新手玩家提供本回合招募阶段的操作建议。请用简体中文，简洁直接。
+# 更聪明的 AI 建议设计文档第 3.1 节的原文（实验验证过），不要随意改动
+SYSTEM_TEMPLATE = """你是《炉石传说》酒馆战棋的高分教练，正在给一位 6000 分以下的新手实时指挥招募阶段的操作。目标是稳定进前四、争取第一。请用简体中文，具体、直接。
 
-规则：
+【先分析，再给操作】
+先在 analysis 里用两三句话写清：现在是什么阶段、血量和场面强不强、经济怎么样；本局准备走什么方向（种族/流派）以及理由；本回合的目标（升本？补战力？找对子三连？找核心卡？）。然后再按这个目标给操作。
+
+【运营方法】
+- 阶段：
+  - 前期（1~3 本，大约第 1~5 回合）：按节奏升本；剩下的铸币买当前最能打、或者有成长/配合/经济价值的随从。前期身材重要，但同样身材时优先带圣盾、复生、能成长或能给钱的牌。
+  - 中期（4 本，大约第 6~8 回合）：根据场面、商店和本局种族定下一个主方向，开始找这个方向的核心卡；手里有对子就值得刷新找第三张；三连发现的牌优先选方向核心。
+  - 后期（5~6 本）：围绕核心卡成型；铸币主要用来刷新找核心卡、三连，以及把方向外的过渡白板换成方向内的牌。
+- 牌的价值不只是身材：能成长（每回合/每次触发变大）、和场上种族或机制配合、提供经济（给铸币、免费刷新、减费）、带关键词（圣盾、复生、剧毒、风怒）的牌，往往比一张身材大但没效果的白板更值钱。酒馆法术（加属性、给铸币）也是资源。
+- 刷新：**刷新后程序会立刻把新商店发给你，你会再给一次建议，所以可以放心建议刷新。** 这些情况应该刷新：该买的买完了还有铸币；商店里没有对方向有用的牌；在找三连的第三张或核心卡。不要为了凑合而买一张对阵容没帮助的白板。
+- 升本：参考攻略里的节奏；血量健康、场面不差时可以提前升本；连续掉血、场面明显偏弱时先补战力。升本的回合，剩下的铸币再买牌或刷新。
+- 冻结：只在商店里有核心卡/三连需要的牌、但这回合买不起时冻结。
+- 卖牌：场面满了要买关键牌时，卖掉对方向没用、身材最小的过渡牌（卖出 +1 金）。被养大的随从、金色随从和方向核心不要卖。
+- 三连：凑成三连会拿到金色随从并发现一张高一本的牌，是重要的强度来源。
+
+【必须遵守的规则】
 1. 只能使用局面中给出的实体编号（#数字）：buy 只能买"商店"里的，sell 只能卖"场面"上的。
-2. 所有动作的总花费不能超过当前铸币：随从按"买牌"价格，酒馆法术按它标注的价格，
-   英雄技能按它标注的费用，卖出随从 +1 金。
-3. 最多 {max_actions} 个动作；freeze 只能放在最后。
-   refresh 之后看不到新商店，所以 refresh 要放在最后，不要在 refresh 后面再冻结；
-   freeze 只用来留住当前商店里看得到、想要但买不起的牌。
-4. 场面最多 7 个随从，手牌里的随从也要算进去；三张相同的随从会合成一张金色。
-5. 局面里的"英雄技能"一行写着"本回合可用"或"凑够铸币后可用"时，可以安排一个 hero_power 动作
-   （每回合最多一次，要放在 refresh 之前）；写着"不要安排 hero_power"时绝对不能用。
-   要考虑使用时机，例如给随从加属性的技能，在买完随从之后再用；
-   买来的随从在手牌里，要先打出去，给场上随从加属性的英雄技能才会作用到它。
-   需要目标时 entity_id 填目标编号（按"英雄技能"一行说的范围选），不需要目标时不填。
-   不要建议发现选择或调整站位。
-6. 每个动作的 reason 用一句话说明原因。
-7. 每个动作都要填 gold_after：执行完这一步后还剩多少铸币。先算清楚再写，任何一步都不能小于 0。
-8. 每个动作都要填 minions_after：执行完这一步后场面随从 + 手牌随从一共几个
-   （买随从 +1，卖 -1，凑成三连 -2）。任何一步都不能超过随从上限；满了要先卖再买。
+2. 每个动作都要填 gold_after（执行完这一步后剩多少铸币，不能小于 0）和 minions_after（场面 + 手牌随从一共几个，买 +1、卖 -1、凑成三连 -2），任何一步都不能超过随从上限。
+3. 最多 {max_actions} 个动作；refresh 要放在最后（之后看不到新商店，所以 refresh 后面不要再冻结）；freeze 只能放在最后。
+4. 英雄技能：局面里写了"不要安排 hero_power"时绝对不要安排；可以用时考虑使用时机（买来的随从在手牌里，要先打出去，给场上随从加属性的技能才会作用到它）；需要目标时 entity_id 填目标编号。
+5. 不要建议发现选择、黑暗之赐或调整站位。
 
-只输出一个 json 对象，格式示例：
+只输出一个 json 对象，格式：
 {example}
+动作类型：buy（买）、sell（卖）、upgrade（升本）、refresh（刷新）、freeze（冻结）、hero_power（英雄技能）。buy 和 sell 必须带 entity_id。
 
-动作类型：buy（买）、sell（卖）、upgrade（升本）、hero_power（使用英雄技能）、refresh（刷新）、
-freeze（冻结）。
-buy 和 sell 必须带 entity_id。
-direction 填建议的方向或流派，没有就填空字符串；confidence 是 0 到 1 之间的把握程度。
+【攻略要点】
+{guide}"""  # noqa: E501
 
-以下是攻略要点，仅供参考：
-{guide}
-"""
+MAX_TAVERN_TIER = 6  # 酒馆最高 6 本；7 本的牌不会出现在商店里，不让 AI 叫新手去找
+POOL_TITLE = "【本局卡池（本局种族的随从和中立随从，按酒馆等级）】"
+SPELLS_TITLE = "【酒馆法术】"
+
+
+@dataclass(frozen=True)
+class AIMemory:
+    """本局最近一次合法 AI 结果里的判断，下次调用时附在局面消息末尾（跨回合记忆）。"""
+
+    turn: int
+    deep: bool  # 是否来自深度分析
+    direction: str | None = None
+    look_for: tuple[str, ...] = ()
+    analysis: str = ""
 
 
 def load_guide(path: Path) -> str:
@@ -84,6 +99,54 @@ def build_system_prompt(guide: str) -> str:
     return SYSTEM_TEMPLATE.format(
         example=json.dumps(EXAMPLE, ensure_ascii=False), guide=guide, max_actions=MAX_ACTIONS
     )
+
+
+def _in_tavern(card: CardInfo) -> bool:
+    return (card.tier or 0) <= MAX_TAVERN_TIER
+
+
+def _in_lobby(card: CardInfo, tribes: frozenset[str]) -> bool:
+    """本局种族的随从、中立随从（没有种族）和全种族随从。"""
+    return not card.races or "ALL" in card.races or bool(tribes.intersection(card.races))
+
+
+def _races_zh(card: CardInfo) -> str:
+    return "、".join(tribe_zh(r) for r in card.races) or "中立"
+
+
+def card_pool_block(cards: CardDB, tribes: frozenset[str]) -> str:
+    """本局卡池：放在局面消息开头，和系统提示一起组成稳定的前缀（只在本局种族变化时才变）。
+    种族还在推断中时用当前推断出的种族。不列 7 本的随从和法术。"""
+    minions = sorted(
+        (c for c in cards.pool_minions() if _in_tavern(c) and _in_lobby(c, tribes)),
+        key=lambda c: (c.tier or 0, _races_zh(c), c.name),
+    )
+    lines = [POOL_TITLE]
+    lines += [
+        f"[{c.tier or '?'}本] {c.name} {c.atk}/{c.health}（{_races_zh(c)}）{c.text}"
+        for c in minions
+    ] or ["（无）"]
+    lines.append(SPELLS_TITLE)
+    spells = sorted(filter(_in_tavern, cards.pool_spells()), key=lambda c: (c.tier or 0, c.name))
+    lines += [
+        f"[{c.tier or '?'}本 法术 {'?' if c.cost is None else c.cost}金] {c.name}"
+        + (f"：{c.text}" if c.text else "")
+        for c in spells
+    ] or ["（无）"]
+    return "\n".join(lines)
+
+
+def _memory_line(memory: AIMemory, turn: int) -> str:
+    parts = [
+        f"方向 {memory.direction or '未定'}",
+        f"要找：{'、'.join(memory.look_for) or '无'}",
+    ]
+    if memory.analysis:
+        parts.append("分析：" + " ".join(memory.analysis.split()))
+    body = "；".join(parts)
+    if memory.deep and memory.turn == turn:
+        return f"本回合深度分析：{body}"
+    return f"你之前的判断（第 {memory.turn} 回合）：{body}"
 
 
 class _Writer:
@@ -180,25 +243,6 @@ def _hero_power_line(hp: HeroPower, state: GameState, w: _Writer) -> str:
     return f"{line}：{text}" if text else line
 
 
-def _plan_text(plan: Plan, state: GameState, w: _Writer) -> str:
-    names = _entity_names(state)
-    verbs = {
-        "buy": "买",
-        "sell": "卖",
-        "upgrade": "升本",
-        "hero_power": "使用英雄技能",
-        "refresh": "刷新",
-        "freeze": "冻结",
-    }
-    steps = []
-    for a in plan.actions:
-        what = verbs[a.type]
-        if a.entity_id is not None:
-            what += f" #{a.entity_id} {w.name(names.get(a.entity_id))}"
-        steps.append(f"{what}（{a.reason}）" if a.reason else what)
-    return "；".join(steps) or "无需操作"
-
-
 def _budget_line(ctx: TurnContext) -> str:
     """只用 TurnContext 里的数，和校验器（validate_plan）口径一致。"""
     used = ctx.board_minions + ctx.hand_minions
@@ -225,8 +269,9 @@ def _budget_line(ctx: TurnContext) -> str:
 
 
 def build_user_message(
-    state: GameState, ctx: TurnContext, cards: CardDB, rule_plans: Sequence[Plan]
+    state: GameState, ctx: TurnContext, cards: CardDB, memory: AIMemory | None = None
 ) -> str:
+    """本局卡池 + 空行 + 局面；有记忆时末尾加一行之前的判断。不附规则建议（AI 曾经照抄）。"""
     me = state.me
     assert me is not None
     w = _Writer(cards)
@@ -283,9 +328,6 @@ def build_user_message(
                 for o in others
             )
         )
-    if rule_plans:
-        lines.append("规则建议（仅供参考）：")
-        lines += [
-            f"  {LETTERS[i]}. {_plan_text(p, state, w)}" for i, p in enumerate(rule_plans[:3])
-        ]
-    return "\n".join(lines)
+    if memory is not None:
+        lines.append(_memory_line(memory, state.turn))
+    return card_pool_block(cards, state.tribes) + "\n\n" + "\n".join(lines)

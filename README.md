@@ -32,10 +32,13 @@ uv run lscs watch               # 每次打游戏前运行，PowerShell 不要�
 
 详见 [使用说明.md](使用说明.md) 的"填写 DeepSeek Key"和"常用设置"。实现要点：
 
-- AI 在每个招募回合开始时调用一次，每次刷新后（商店稳定 1 秒）再调用一次，每局最多 `max_calls_per_game` 次（默认 60）。
-  `watch` 启动时从头读当前的 Power.log，但只为读完后的当前回合调用。每次调用的提示词和回答记录在
-  `recordings/llm-日期.jsonl`，不包含 Key，也不进仓库。
-- `thinking` 请保持 `"disabled"`：实测 `"low"`/`"high"` 平均约 18 秒，而且经常返回空内容。
+- AI 分两路调用，每局合计最多 `max_calls_per_game` 次（默认 80）：
+  - 快速建议（不开思考，2~3 秒）：每个招募回合开始时一次，每次刷新后（商店稳定 1 秒）再一次；
+  - 深度分析（`deep_thinking` 开思考，约 20 秒）：只在招募回合开始时和快速建议同时发出，`deep_analysis = false` 关闭。
+  `watch` 启动时从头读当前的 Power.log，但只为读完后的当前回合调用（每路最多一次）。每次调用的提示词和回答记录在
+  `recordings/llm-日期.jsonl`（`lane` 是 `fast` 或 `deep`），不包含 Key，也不进仓库。
+- 局面消息开头附本局卡池（本局种族和中立随从、酒馆法术），末尾附上次的判断（方向、要找的牌、分析）；不附规则建议。
+- `thinking`（快速建议）请保持 `"disabled"`，思考交给深度分析。
 - 攻略要点在 `strategy/current/guide.md`，会原样发给 AI。
 - 英雄技能能不能用以日志里的选项列表（`GameState.DebugPrintOptions`）为准，选项比招募开始晚几十毫秒才到，
   会等它一起生成招募开始的局面。规则只安排 0 费、不需要目标的技能；其余的交给 AI，提示词里写明费用、状态和可选目标。

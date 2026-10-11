@@ -4,10 +4,15 @@ from factory import hand_minion, make_state, minion, power, shop_minion
 from helpers import FIXTURES, TEST_POOL
 
 from lscs.advisor.context import build_context
-from lscs.advisor.rules import rule_plans
 from lscs.advisor.rules_config import load_rules_config
 from lscs.cards.db import CardDB
-from lscs.llm.prompt import build_system_prompt, build_user_message, load_guide
+from lscs.llm.prompt import (
+    AIMemory,
+    build_system_prompt,
+    build_user_message,
+    card_pool_block,
+    load_guide,
+)
 from lscs.pipeline import Pipeline
 from lscs.state.models import EventType, OpponentView
 from lscs.state.tracker import StateTracker
@@ -16,8 +21,18 @@ ROOT = Path(__file__).resolve().parents[1]
 CARDS = CardDB.from_json_file(FIXTURES / "cards_mini.json")
 RULES = load_rules_config(ROOT / "strategy" / "current" / "rules.toml")
 
+POOL_TURN_2 = """【本局卡池（本局种族的随从和中立随从，按酒馆等级）】
+[2本] 熔岩潜伏者 2/5（纳迦）每回合从手牌对本随从使用的第一张塑造法术的法术牌永久有效。（还剩1张！）
+[4本] 刷新畸体 4/5（元素）战吼：获得2次免费的刷新。
+【酒馆法术】
+[5本 法术 3金] 护甲储备：将你的护甲值变为5点。"""
+
 # 这份合成日志没有选项列表，所以英雄技能是"还不确定"（真实日志见 test_hero_power_line_*）
-EXPECTED_TURN_2 = """第 2 回合（招募）| 英雄：米尔豪斯·法力风暴 | 血量 27+0 | 铸币 4 | 酒馆 1 本
+EXPECTED_TURN_2 = (
+    POOL_TURN_2
+    + """
+
+第 2 回合（招募）| 英雄：米尔豪斯·法力风暴 | 血量 27+0 | 铸币 4 | 酒馆 1 本
 升本 4 金 | 刷新 1 金 | 买牌 2 金 | 卖牌 +1 金
 预算：铸币 4，只买随从最多 2 张；随从上限 7，现在 1 个（场面 1 + 手牌随从 0），还能再买 6 个随从；英雄技能现在不能用
 英雄技能：法力风暴（还不确定本回合能不能用——不要安排 hero_power）：购买随从和刷新的消耗改为（2）枚铸币。升级酒馆所需的铸币增加（1）枚。
@@ -30,10 +45,39 @@ EXPECTED_TURN_2 = """第 2 回合（招募）| 英雄：米尔豪斯·法力风�
 手牌：
   （空）
 下一个对手：费林大使 血量 30+0；还没见过阵容
-其他对手：拉卡尼休 血量 30 第 2 名
-规则建议（仅供参考）：
-  A. 升本（第 2 回合按节奏该升 2 本了）
-  B. 买 #50 熔岩潜伏者（商店里身材最好）；刷新（剩 2 金，刷新找更好的牌）"""
+其他对手：拉卡尼休 血量 30 第 2 名"""
+)
+
+EXPECTED_SYSTEM = """你是《炉石传说》酒馆战棋的高分教练，正在给一位 6000 分以下的新手实时指挥招募阶段的操作。目标是稳定进前四、争取第一。请用简体中文，具体、直接。
+
+【先分析，再给操作】
+先在 analysis 里用两三句话写清：现在是什么阶段、血量和场面强不强、经济怎么样；本局准备走什么方向（种族/流派）以及理由；本回合的目标（升本？补战力？找对子三连？找核心卡？）。然后再按这个目标给操作。
+
+【运营方法】
+- 阶段：
+  - 前期（1~3 本，大约第 1~5 回合）：按节奏升本；剩下的铸币买当前最能打、或者有成长/配合/经济价值的随从。前期身材重要，但同样身材时优先带圣盾、复生、能成长或能给钱的牌。
+  - 中期（4 本，大约第 6~8 回合）：根据场面、商店和本局种族定下一个主方向，开始找这个方向的核心卡；手里有对子就值得刷新找第三张；三连发现的牌优先选方向核心。
+  - 后期（5~6 本）：围绕核心卡成型；铸币主要用来刷新找核心卡、三连，以及把方向外的过渡白板换成方向内的牌。
+- 牌的价值不只是身材：能成长（每回合/每次触发变大）、和场上种族或机制配合、提供经济（给铸币、免费刷新、减费）、带关键词（圣盾、复生、剧毒、风怒）的牌，往往比一张身材大但没效果的白板更值钱。酒馆法术（加属性、给铸币）也是资源。
+- 刷新：**刷新后程序会立刻把新商店发给你，你会再给一次建议，所以可以放心建议刷新。** 这些情况应该刷新：该买的买完了还有铸币；商店里没有对方向有用的牌；在找三连的第三张或核心卡。不要为了凑合而买一张对阵容没帮助的白板。
+- 升本：参考攻略里的节奏；血量健康、场面不差时可以提前升本；连续掉血、场面明显偏弱时先补战力。升本的回合，剩下的铸币再买牌或刷新。
+- 冻结：只在商店里有核心卡/三连需要的牌、但这回合买不起时冻结。
+- 卖牌：场面满了要买关键牌时，卖掉对方向没用、身材最小的过渡牌（卖出 +1 金）。被养大的随从、金色随从和方向核心不要卖。
+- 三连：凑成三连会拿到金色随从并发现一张高一本的牌，是重要的强度来源。
+
+【必须遵守的规则】
+1. 只能使用局面中给出的实体编号（#数字）：buy 只能买"商店"里的，sell 只能卖"场面"上的。
+2. 每个动作都要填 gold_after（执行完这一步后剩多少铸币，不能小于 0）和 minions_after（场面 + 手牌随从一共几个，买 +1、卖 -1、凑成三连 -2），任何一步都不能超过随从上限。
+3. 最多 5 个动作；refresh 要放在最后（之后看不到新商店，所以 refresh 后面不要再冻结）；freeze 只能放在最后。
+4. 英雄技能：局面里写了"不要安排 hero_power"时绝对不要安排；可以用时考虑使用时机（买来的随从在手牌里，要先打出去，给场上随从加属性的技能才会作用到它）；需要目标时 entity_id 填目标编号。
+5. 不要建议发现选择、黑暗之赐或调整站位。
+
+只输出一个 json 对象，格式：
+{"analysis": "局势判断、本局方向、本回合目标（两三句）", "actions": [{"type": "buy", "entity_id": 1689, "gold_after": 4, "minions_after": 5, "reason": "一句话理由"}, {"type": "refresh", "gold_after": 3, "minions_after": 5, "reason": "..."}], "summary": "一句话说明本回合思路", "direction": "方向/流派", "look_for": ["接下来要找的牌名"], "confidence": 0.7}
+动作类型：buy（买）、sell（卖）、upgrade（升本）、refresh（刷新）、freeze（冻结）、hero_power（英雄技能）。buy 和 sell 必须带 entity_id。
+
+【攻略要点】
+要点"""
 
 
 def recruit_state(mini_lines, turn):
@@ -49,13 +93,228 @@ def recruit_state(mini_lines, turn):
     )
 
 
-def message_for(state):
+def full_message(state, memory=None, cards=CARDS):
     ctx = build_context(state, RULES.buy_cost_for(state.me.hero_card_id))
-    return build_user_message(state, ctx, CARDS, rule_plans(ctx, RULES, CARDS.name))
+    return build_user_message(state, ctx, cards, memory)
+
+
+def message_for(state, memory=None):
+    """去掉开头的本局卡池，只看局面部分。"""
+    pool, situation = full_message(state, memory).split("\n\n", 1)
+    assert pool.startswith("【本局卡池")
+    return situation
 
 
 def test_user_message_snapshot(mini_lines):
-    assert message_for(recruit_state(mini_lines, 2)) == EXPECTED_TURN_2
+    assert full_message(recruit_state(mini_lines, 2)) == EXPECTED_TURN_2
+
+
+def test_rule_plans_are_not_sent(mini_lines):
+    text = full_message(recruit_state(mini_lines, 2))
+    assert "规则建议" not in text and "A. " not in text
+
+
+POOL_RAW = [
+    {
+        "id": "D2",
+        "name": "B恶魔",
+        "type": "MINION",
+        "techLevel": 1,
+        "races": ["DEMON"],
+        "attack": 2,
+        "health": 2,
+        "isBattlegroundsPoolMinion": True,
+        "text": "<b>嘲讽</b>",
+    },
+    {
+        "id": "D1",
+        "name": "A恶魔",
+        "type": "MINION",
+        "techLevel": 1,
+        "races": ["DEMON"],
+        "attack": 1,
+        "health": 3,
+        "isBattlegroundsPoolMinion": True,
+    },
+    {
+        "id": "BEAST",
+        "name": "野兽",
+        "type": "MINION",
+        "techLevel": 1,
+        "races": ["BEAST"],
+        "attack": 3,
+        "health": 3,
+        "isBattlegroundsPoolMinion": True,
+    },
+    {
+        "id": "DUAL",
+        "name": "双种族",
+        "type": "MINION",
+        "techLevel": 2,
+        "races": ["BEAST", "MURLOC"],
+        "attack": 2,
+        "health": 4,
+        "isBattlegroundsPoolMinion": True,
+    },
+    {
+        "id": "NEUTRAL",
+        "name": "中立随从",
+        "type": "MINION",
+        "techLevel": 3,
+        "attack": 3,
+        "health": 3,
+        "isBattlegroundsPoolMinion": True,
+        "text": "战吼：获得一个铸币。",
+    },
+    {
+        "id": "ALL",
+        "name": "全能",
+        "type": "MINION",
+        "techLevel": 2,
+        "races": ["ALL"],
+        "attack": 2,
+        "health": 1,
+        "isBattlegroundsPoolMinion": True,
+    },
+    {
+        "id": "DUOS",
+        "name": "双人专属",
+        "type": "MINION",
+        "techLevel": 1,
+        "races": ["DEMON"],
+        "attack": 1,
+        "health": 1,
+        "isBattlegroundsPoolMinion": True,
+        "isBattlegroundsDuosExclusive": True,
+    },
+    {
+        "id": "OLD",
+        "name": "已退环境",
+        "type": "MINION",
+        "techLevel": 1,
+        "races": ["DEMON"],
+        "attack": 1,
+        "health": 1,
+    },
+    {
+        "id": "T7",
+        "name": "七本恶魔",
+        "type": "MINION",
+        "techLevel": 7,
+        "races": ["DEMON"],
+        "attack": 9,
+        "health": 9,
+        "isBattlegroundsPoolMinion": True,
+    },
+    {
+        "id": "S7",
+        "name": "七本法术",
+        "type": "BATTLEGROUND_SPELL",
+        "techLevel": 7,
+        "cost": 4,
+        "isBattlegroundsPoolSpell": True,
+        "text": "七本才有。",
+    },
+    {
+        "id": "S2",
+        "name": "铸币",
+        "type": "BATTLEGROUND_SPELL",
+        "techLevel": 1,
+        "cost": 1,
+        "isBattlegroundsPoolSpell": True,
+        "text": "获得一枚铸币。",
+    },
+    {
+        "id": "S1",
+        "name": "加攻",
+        "type": "BATTLEGROUND_SPELL",
+        "techLevel": 3,
+        "cost": 2,
+        "isBattlegroundsPoolSpell": True,
+        "text": "使一个随从获得+2/+2。",
+    },
+    {
+        "id": "S3",
+        "name": "双人法术",
+        "type": "BATTLEGROUND_SPELL",
+        "techLevel": 1,
+        "cost": 0,
+        "isBattlegroundsPoolSpell": True,
+        "isBattlegroundsDuosExclusive": True,
+    },
+]
+
+
+def test_card_pool_keeps_lobby_tribes_neutral_and_all():
+    block = card_pool_block(CardDB(POOL_RAW), frozenset({"DEMON", "MURLOC"}))
+    assert (
+        block
+        == """【本局卡池（本局种族的随从和中立随从，按酒馆等级）】
+[1本] A恶魔 1/3（恶魔）
+[1本] B恶魔 2/2（恶魔）嘲讽
+[2本] 全能 2/1（全种族）
+[2本] 双种族 2/4（野兽、鱼人）
+[3本] 中立随从 3/3（中立）战吼：获得一个铸币。
+【酒馆法术】
+[1本 法术 1金] 铸币：获得一枚铸币。
+[3本 法术 2金] 加攻：使一个随从获得+2/+2。"""
+    )
+
+
+def test_card_pool_leaves_out_tier_7():
+    block = card_pool_block(CardDB(POOL_RAW), frozenset({"DEMON"}))
+    assert "七本" not in block  # 酒馆最高 6 本，7 本的牌不会出现在商店里
+
+
+def test_card_pool_while_tribes_are_unknown():
+    block = card_pool_block(CardDB(POOL_RAW), frozenset())
+    assert "恶魔）" not in block and "（中立）" in block and "（全种族）" in block
+    empty = card_pool_block(CardDB([]), frozenset({"DEMON"}))
+    assert empty == (
+        "【本局卡池（本局种族的随从和中立随从，按酒馆等级）】\n（无）\n【酒馆法术】\n（无）"
+    )
+
+
+def test_card_pool_uses_the_inferred_tribes_of_the_state():
+    state = make_state(shop=[shop_minion(20, "BGS_061", 3, 1)])
+    state = state.model_copy(update={"tribes": frozenset({"BEAST"})})
+    pool = full_message(state, cards=CardDB(POOL_RAW)).split("\n\n", 1)[0]
+    assert "[1本] 野兽 3/3（野兽）" in pool and "A恶魔" not in pool
+
+
+MEMORY = AIMemory(
+    turn=6,
+    deep=False,
+    direction="畸变",
+    look_for=("飘荡祭品", "神明"),
+    analysis="血量健康，\n准备升本。",
+)
+
+
+def test_memory_line_from_an_earlier_judgement():
+    state = make_state(turn=7, shop=[shop_minion(20, "BGS_061", 3, 1)])
+    assert message_for(state, MEMORY).splitlines()[-1] == (
+        "你之前的判断（第 6 回合）：方向 畸变；要找：飘荡祭品、神明；分析：血量健康， 准备升本。"
+    )
+    deep_last_turn = AIMemory(turn=6, deep=True, direction=None)
+    assert message_for(state, deep_last_turn).splitlines()[-1] == (
+        "你之前的判断（第 6 回合）：方向 未定；要找：无"
+    )
+    assert "你之前的判断" not in message_for(state)
+
+
+def test_memory_line_with_this_turns_deep_analysis():
+    state = make_state(turn=6, shop=[shop_minion(20, "BGS_061", 3, 1)])
+    deep = AIMemory(
+        turn=6, deep=True, direction="畸变", look_for=("神明",), analysis="提前升 5 本。"
+    )
+    assert message_for(state, deep).splitlines()[-1] == (
+        "本回合深度分析：方向 畸变；要找：神明；分析：提前升 5 本。"
+    )
+    same_turn_fast = AIMemory(turn=6, deep=False, direction="畸变")
+    assert (
+        message_for(state, same_turn_fast).splitlines()[-1].startswith("你之前的判断（第 6 回合）")
+    )
 
 
 def test_opponent_board_seen_in_combat(mini_lines):
@@ -89,11 +348,25 @@ def test_unknown_cards_fall_back_to_ids():
     assert "  [#20] NOPE 2/2 | 1 本 | 中立" in text
 
 
+def test_system_prompt_snapshot():
+    assert build_system_prompt("要点") == EXPECTED_SYSTEM
+
+
+def test_system_prompt_derives_limit_and_example(monkeypatch):
+    import lscs.llm.prompt
+
+    monkeypatch.setattr(lscs.llm.prompt, "MAX_ACTIONS", 4)
+    monkeypatch.setattr(lscs.llm.prompt, "EXAMPLE", {"actions": []})
+    system = build_system_prompt("要点")
+    assert "3. 最多 4 个动作；" in system
+    assert '格式：\n{"actions": []}\n动作类型' in system
+
+
 def test_system_prompt_has_json_example_and_guide():
     system = build_system_prompt(load_guide(ROOT / "strategy" / "current" / "guide.md"))
     assert "json" in system
-    assert '"entity_id": 1689' in system
-    assert "酒馆战棋新手要点" in system
+    assert '"entity_id": 1689' in system and '"look_for": ["接下来要找的牌名"]' in system
+    assert "\n\n【攻略要点】\n# 酒馆战棋新手要点" in system
 
 
 def test_missing_guide(tmp_path):
@@ -133,7 +406,7 @@ def test_budget_line_when_already_over_the_limit():
 def test_budget_line_survives_zero_buy_cost():
     state = make_state(gold=3)
     ctx = build_context(state, 0)
-    lines = build_user_message(state, ctx, CARDS, []).splitlines()
+    lines = build_user_message(state, ctx, CARDS).split("\n\n", 1)[1].splitlines()
     assert lines[2].startswith("预算：铸币 3，只买随从最多 7 张；")
 
 
@@ -154,14 +427,6 @@ def test_other_opponents_without_place():
     text = message_for(state)
     assert "其他对手：NOPE2 血量 15 第 2 名；NOPE 血量 20" in text
     assert "None" not in text
-
-
-def test_system_prompt_asks_for_running_totals():
-    system = build_system_prompt("要点")
-    assert '"gold_after": 4, "minions_after": 5' in system
-    assert "refresh 要放在最后，不要在 refresh 后面再冻结" in system
-    assert "7. 每个动作都要填 gold_after" in system
-    assert "8. 每个动作都要填 minions_after" in system
 
 
 DESC = "购买随从和刷新的消耗改为（2）枚铸币。升级酒馆所需的铸币增加（1）枚。"
@@ -255,17 +520,13 @@ def test_budget_line_says_when_the_hero_power_cannot_be_used():
         assert budget(hp).endswith("；英雄技能现在不能用")
 
 
-def test_rule_plans_mention_the_hero_power():
-    state = make_state(gold=0, hero_power_state=power())
-    assert "  A. 使用英雄技能（免费技能，每回合都用掉）" in message_for(state)
-
-
-def test_system_prompt_allows_hero_power():
+def test_system_prompt_rules():
     system = build_system_prompt("要点")
-    assert "不要建议使用英雄技能" not in system
-    assert "不要建议发现选择或调整站位" in system
-    assert "最多 5 个动作" in system
-    assert "买来的随从在手牌里，要先打出去，给场上随从加属性的英雄技能才会作用到它" in system
-    assert "hero_power（使用英雄技能）" in system
+    assert '"gold_after": 4, "minions_after": 5' in system
+    assert "refresh 要放在最后（之后看不到新商店，所以 refresh 后面不要再冻结）" in system
+    assert "2. 每个动作都要填 gold_after" in system
+    assert "可以放心建议刷新" in system
+    assert "不要建议发现选择、黑暗之赐或调整站位" in system
+    assert "买来的随从在手牌里，要先打出去，给场上随从加属性的技能才会作用到它" in system
+    assert "hero_power（英雄技能）" in system
     assert "需要目标时 entity_id 填目标编号" in system
-    assert "英雄技能按它标注的费用" in system

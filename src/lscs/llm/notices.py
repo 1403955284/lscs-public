@@ -4,3 +4,4 @@
 AUTH_FAILURE_LIMIT = 3
 AUTH_DISABLED = f"API Key 连续 {AUTH_FAILURE_LIMIT} 次无效，已关闭 AI"
 BUDGET_EXHAUSTED = "本局 AI 预算已用完，之后只显示规则建议"
+TIMEOUT = "AI 超时"  # 提供商和调度器超时时 AIResult.error 的文字

@@ -28,9 +28,16 @@ def test_missing_file_gives_defaults(tmp_path):
     assert (llm.thinking, llm.timeout_seconds, llm.max_calls_per_game, llm.max_output_tokens) == (
         "disabled",
         20,
-        60,
-        800,
+        80,
+        1500,
     )
+    deep = (
+        llm.deep_analysis,
+        llm.deep_thinking,
+        llm.deep_max_output_tokens,
+        llm.deep_timeout_seconds,
+    )
+    assert deep == (True, "low", 16000, 75)
 
 
 def test_example_file_matches_defaults():
@@ -41,6 +48,30 @@ def test_values_are_read(tmp_path):
     path = write(tmp_path, f'[llm]\napi_key = "{SECRET}"\nthinking = "low"\ntimeout_seconds = 45\n')
     llm = load_config(path).llm
     assert (llm.api_key, llm.thinking, llm.timeout_seconds) == (SECRET, "low", 45)
+
+
+def test_deep_analysis_values_are_read(tmp_path):
+    path = write(
+        tmp_path,
+        '[llm]\ndeep_analysis = false\ndeep_thinking = "high"\n'
+        "deep_max_output_tokens = 8000\ndeep_timeout_seconds = 40\n",
+    )
+    llm = load_config(path).llm
+    assert (llm.deep_analysis, llm.deep_thinking) == (False, "high")
+    assert (llm.deep_max_output_tokens, llm.deep_timeout_seconds) == (8000, 40)
+
+
+@pytest.mark.parametrize(
+    ("line", "field"),
+    [
+        ('deep_thinking = "disabled"', "llm.deep_thinking"),
+        ("deep_max_output_tokens = 0", "llm.deep_max_output_tokens"),
+        ("deep_timeout_seconds = 0", "llm.deep_timeout_seconds"),
+    ],
+)
+def test_deep_analysis_invalid_values_are_rejected(tmp_path, line, field):
+    with pytest.raises(ConfigError, match=field):
+        load_config(write(tmp_path, f"[llm]\n{line}\n"))
 
 
 def test_wrong_type_names_the_field_without_echoing_values(tmp_path):

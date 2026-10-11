@@ -9,10 +9,11 @@ from typing import TYPE_CHECKING
 
 from lscs.advisor.context import build_context, hero_power_used
 from lscs.advisor.display import AdviceSink
-from lscs.advisor.models import Action, Advice, Plan
+from lscs.advisor.models import Action, Advice, Lane, Plan
 from lscs.advisor.rules import rule_plans
 from lscs.advisor.rules_config import RulesConfig
 from lscs.advisor.validate import validate_plan
+from lscs.llm.notices import TIMEOUT
 from lscs.state.models import Event, EventType, GameState, Phase
 
 if TYPE_CHECKING:
@@ -95,7 +96,7 @@ class AdviceRunner:
             if ready and types & TRIGGERS:
                 self._advise(state, events)
         elif self._scheduler is not None:
-            self._scheduler.observe(state, events, None, [])
+            self._scheduler.observe(state, events, None)
         s = self._scheduler
         if s is not None and EventType.GAME_ENDED in types and s.calls > 0:
             self._display.ai_summary(s.calls, s.input_tokens, s.output_tokens)
@@ -112,7 +113,7 @@ class AdviceRunner:
             plans = rule_plans(ctx, self._rules, self._name)
         except Exception:
             self._rules_error(state.turn)
-            plans = []  # 规则出错时 AI 照常调用，只是提示词里没有规则建议
+            plans = []  # 规则出错时 AI 照常调用（提示词里本来就不附规则建议）
         if plans:
             started = any(e.type == EventType.RECRUIT_STARTED for e in events)
             if plans[0].actions or started:  # 回合中途铸币花光后不再提示"无需操作"
@@ -125,7 +126,7 @@ class AdviceRunner:
                 self.last_rules = advice
                 self._display.show_rules(state, advice)
         if self._scheduler is not None:
-            self._scheduler.observe(state, events, ctx, plans)
+            self._scheduler.observe(state, events, ctx)
 
     def _rules_error(self, turn: int) -> None:
         """在 except 里调用：每回合只提示一次、记一次完整堆栈，之后的只记调试日志。"""
@@ -145,7 +146,7 @@ class AdviceRunner:
         try:
             for event in self._scheduler.tick():
                 if isinstance(event, AIStarted):
-                    self._display.ai_pending()
+                    self._display.ai_pending(event.lane)
                 elif isinstance(event, AINotice):
                     self._display.ai_text(event.text)
                 elif isinstance(event, AIResult):
@@ -156,30 +157,42 @@ class AdviceRunner:
             self._display.ai_text("AI 结果处理出错，本次忽略")
 
     def _show_result(self, result: AIResult) -> None:
+        lane = result.lane
         if result.error is not None:
-            self._display.ai_text(result.error)
+            self._display.ai_text(_error_text(result.error, lane), lane)
             return
         request, current = result.request, self._state
-        if (
-            current is None
-            or current.me is None
-            or current.phase != Phase.RECRUIT
-            or current.turn != request.state.turn
-        ):
-            log.info("AI 结果回来时已不在同一个招募回合，丢弃")
+        if current is None or current.me is None or current.turn != request.state.turn:
+            log.info("AI 结果回来时已不在同一个回合，丢弃")
             return
-        plan, stale = result.plan, None
-        if current.seq != request.state.seq:
+        plan, stale, expired = result.plan, None, result.expired
+        if current.phase != Phase.RECRUIT:
+            # 深度分析可能在本回合的战斗中才回来：操作做不了了，但思路下回合还用得上
+            if lane == "fast" or current.phase != Phase.COMBAT:
+                log.info("AI 结果回来时已不在招募阶段，丢弃")
+                return
+            expired = "changed"
+        if expired is None and current.seq != request.state.seq:
+            # 深度分析的操作用不上时（做完了或局面变化太大）照样显示，只看思路
             plan = remaining_plan(plan, request.state, current)
             if plan.actions == () and result.plan.actions:
-                return  # 建议的步骤你都已经做了
-            ctx = build_context(current, self._rules.buy_cost_for(current.me.hero_card_id))
-            if ctx is None or validate_plan(plan.actions, ctx) is not None:
-                self._display.ai_text("AI 建议已过期（局面变化太大）")
-                return
-            stale = f"基于 {self._clock() - request.started:.0f} 秒前的局面"
+                if lane == "fast":
+                    return  # 建议的步骤你都已经做了
+                expired = "changed"
+            else:
+                ctx = build_context(current, self._rules.buy_cost_for(current.me.hero_card_id))
+                if ctx is None or validate_plan(plan.actions, ctx) is not None:
+                    if lane == "fast":
+                        self._display.ai_text("AI 建议已过期（局面变化太大）")
+                        return
+                    expired = "changed"
+                else:
+                    stale = f"基于 {self._clock() - request.started:.0f} 秒前的局面"
+        if expired is not None:
+            plan = result.plan
         agrees = (
-            self.last_rules is not None
+            expired is None
+            and self.last_rules is not None
             and self.last_rules.turn == current.turn
             and self.last_rules.plan.signature() == plan.signature()
         )
@@ -189,5 +202,13 @@ class AdviceRunner:
             plan=plan,
             stale_note=stale,
             elapsed=result.elapsed,
+            lane=lane,
+            expired=expired,
         )
         self._display.show_ai(current, advice, agrees)
+
+
+def _error_text(error: str, lane: Lane) -> str:
+    if lane == "fast":
+        return error
+    return "深度分析超时" if error == TIMEOUT else f"深度分析失败：{error}"

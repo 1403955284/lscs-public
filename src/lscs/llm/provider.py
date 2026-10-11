@@ -5,9 +5,10 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Literal, NamedTuple, Protocol
 
 from lscs.config import LLMConfig
+from lscs.llm.notices import TIMEOUT
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 STATUS_MESSAGES = {402: "DeepSeek 余额不足", 429: "请求太频繁，稍后再试"}
@@ -23,6 +24,7 @@ class LLMResult:
 
 
 ErrorKind = Literal["auth", "timeout", "other"]
+Thinking = Literal["disabled", "low", "high"]
 
 
 class LLMError(Exception):
@@ -34,7 +36,16 @@ class LLMError(Exception):
 
 
 class LLMProvider(Protocol):
-    def complete_json(self, system: str, user: str, timeout: float) -> LLMResult: ...
+    def complete_json(
+        self,
+        system: str,
+        user: str,
+        timeout: float,
+        thinking: Thinking | None = None,
+        max_tokens: int | None = None,
+    ) -> LLMResult:
+        """thinking、max_tokens 不是 None 时覆盖配置（深度分析开思考、输出上限更大）。"""
+        ...
 
 
 class OpenAICompatProvider:
@@ -49,7 +60,14 @@ class OpenAICompatProvider:
         self._client = client
         self._clock = clock
 
-    def request_kwargs(self, system: str, user: str, timeout: float) -> dict:
+    def request_kwargs(
+        self,
+        system: str,
+        user: str,
+        timeout: float,
+        thinking: Thinking | None = None,
+        max_tokens: int | None = None,
+    ) -> dict:
         kwargs: dict = {
             "model": self._cfg.model,
             "messages": [
@@ -57,29 +75,37 @@ class OpenAICompatProvider:
                 {"role": "user", "content": user},
             ],
             "response_format": {"type": "json_object"},
-            "max_tokens": self._cfg.max_output_tokens,
+            "max_tokens": max_tokens if max_tokens is not None else self._cfg.max_output_tokens,
             # 单次连接/读取超时，不是总时长；过期结果由调度器按编号丢弃
             "timeout": timeout,
         }
-        if self._cfg.thinking == "disabled":
+        effort = thinking if thinking is not None else self._cfg.thinking
+        if effort == "disabled":
             kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
         else:
             kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
-            kwargs["reasoning_effort"] = self._cfg.thinking
+            kwargs["reasoning_effort"] = effort
         return kwargs
 
-    def complete_json(self, system: str, user: str, timeout: float) -> LLMResult:
+    def complete_json(
+        self,
+        system: str,
+        user: str,
+        timeout: float,
+        thinking: Thinking | None = None,
+        max_tokens: int | None = None,
+    ) -> LLMResult:
         import openai
 
         start = self._clock()
         try:
             response = self._client.chat.completions.create(
-                **self.request_kwargs(system, user, timeout)
+                **self.request_kwargs(system, user, timeout, thinking, max_tokens)
             )
         except openai.AuthenticationError:
             raise LLMError("auth", "API Key 无效") from None
         except openai.APITimeoutError:
-            raise LLMError("timeout", "AI 超时") from None
+            raise LLMError("timeout", TIMEOUT) from None
         except openai.APIStatusError as exc:
             message = STATUS_MESSAGES.get(exc.status_code, f"AI 调用失败（HTTP {exc.status_code}）")
             raise LLMError("other", message) from None
@@ -99,16 +125,31 @@ class OpenAICompatProvider:
         )
 
 
+class FakeCall(NamedTuple):
+    system: str
+    user: str
+    timeout: float
+    thinking: Thinking | None
+    max_tokens: int | None
+
+
 class FakeProvider:
     """测试用：按顺序返回预设的回答文本，或抛出预设的异常。"""
 
     def __init__(self, responses: list[str | Exception], elapsed: float = 1.0) -> None:
         self._responses = list(responses)
         self._elapsed = elapsed
-        self.calls: list[tuple[str, str, float]] = []
+        self.calls: list[FakeCall] = []
 
-    def complete_json(self, system: str, user: str, timeout: float) -> LLMResult:
-        self.calls.append((system, user, timeout))
+    def complete_json(
+        self,
+        system: str,
+        user: str,
+        timeout: float,
+        thinking: Thinking | None = None,
+        max_tokens: int | None = None,
+    ) -> LLMResult:
+        self.calls.append(FakeCall(system, user, timeout, thinking, max_tokens))
         item = self._responses.pop(0) if self._responses else ""
         if isinstance(item, Exception):
             raise item

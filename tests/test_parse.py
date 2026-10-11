@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from lscs.advisor.models import Action
@@ -86,3 +88,28 @@ def test_hero_power_with_or_without_target():
         Action(type="hero_power", entity_id=451),
         Action(type="freeze"),
     )
+
+
+def test_analysis_and_look_for():
+    plan = parse_plan(
+        '{"analysis": " 前期血厚，先升本。 ", "actions": [],'
+        ' "look_for": [" 飘荡祭品 ", "神明", "", 3, null]}'
+    )
+    assert plan.analysis == "前期血厚，先升本。"
+    assert plan.look_for == ("飘荡祭品", "神明")  # 空的和不是文字的跳过
+
+
+def test_analysis_and_look_for_are_optional():
+    plan = parse_plan('{"actions": []}')
+    assert (plan.analysis, plan.look_for) == ("", ())
+    plan = parse_plan('{"actions": [], "analysis": 3, "look_for": "神明"}')
+    assert (plan.analysis, plan.look_for) == ("", ())  # 类型不对时忽略，不影响合法性
+
+
+def test_look_for_is_limited():
+    names = [f"牌{i}" for i in range(8)]
+    long_name = "很" * 30
+    plan = parse_plan(json.dumps({"actions": [], "look_for": [long_name, *names]}))
+    assert len(plan.look_for) == 6  # 最多 6 个
+    assert plan.look_for[0] == "很" * 19 + "…"  # 每个最长 20 字
+    assert plan.look_for[1:] == tuple(names[:5])

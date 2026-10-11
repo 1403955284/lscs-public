@@ -47,7 +47,7 @@ def test_request_without_thinking():
         "model": "deepseek-flash",
         "messages": [{"role": "system", "content": "系统"}, {"role": "user", "content": "局面"}],
         "response_format": {"type": "json_object"},
-        "max_tokens": 800,
+        "max_tokens": 1500,
         "timeout": 20,
         "extra_body": {"thinking": {"type": "disabled"}},
     }
@@ -67,6 +67,20 @@ def test_request_with_thinking_effort():
     )
     assert client.kwargs["extra_body"] == {"thinking": {"type": "enabled"}}
     assert client.kwargs["reasoning_effort"] == "low"
+
+
+def test_per_call_thinking_and_max_tokens_override_the_config():
+    client = StubClient(result=response("{}"))
+    provider = OpenAICompatProvider(LLMConfig(api_key="k"), client=client)
+    provider.complete_json("s", "u", timeout=75, thinking="low", max_tokens=16000)
+    assert client.kwargs["extra_body"] == {"thinking": {"type": "enabled"}}
+    assert client.kwargs["reasoning_effort"] == "low"
+    assert client.kwargs["max_tokens"] == 16000
+    thinking = OpenAICompatProvider(LLMConfig(api_key="k", thinking="high"), client=client)
+    thinking.complete_json("s", "u", timeout=20, thinking="disabled", max_tokens=1500)
+    assert client.kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert "reasoning_effort" not in client.kwargs
+    assert client.kwargs["max_tokens"] == 1500
 
 
 def test_empty_content_becomes_empty_text():
@@ -131,5 +145,7 @@ def test_fake_provider_replays_script():
     assert fake.complete_json("s", "u", 3).text == '{"a": 1}'
     with pytest.raises(LLMError):
         fake.complete_json("s", "u", 3)
-    assert fake.complete_json("s", "u", 3).text == ""  # 脚本用完后返回空内容
+    assert fake.complete_json("s", "u", 3, thinking="low", max_tokens=9).text == ""  # 脚本用完
     assert [c[2] for c in fake.calls] == [3, 3, 3]
+    assert [(c.thinking, c.max_tokens) for c in fake.calls] == [(None, None)] * 2 + [("low", 9)]
+    assert fake.calls[0] == ("s", "u", 3, None, None)

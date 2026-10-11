@@ -11,7 +11,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from lscs import __version__
-from lscs.advisor.display import AdviceDisplay, AdviceSink, DisplayGroup
+from lscs.advisor.display import AdviceDisplay, AdviceSink, DisplayGroup, deep_wait_hint
 from lscs.advisor.rules_config import RulesConfig, load_rules_config
 from lscs.advisor.runner import AdviceRunner
 from lscs.config import DEFAULT_CONFIG, ConfigError, OverlayConfig, load_config, mask_key
@@ -173,10 +173,15 @@ def _build_scheduler(cards, sync: bool):
         print("没有卡牌数据，无法使用 AI，只显示规则建议。")
         return None
     print(f"AI：{llm.model}（Key {mask_key(llm.api_key)}，思考模式 {llm.thinking}）", flush=True)
+    if llm.deep_analysis:
+        wait = deep_wait_hint(llm.deep_thinking)
+        print(f"深度分析：开启（思考 {llm.deep_thinking}，每回合开始时{wait}出结果）", flush=True)
+    else:
+        print("深度分析：关闭", flush=True)
     if llm.thinking != "disabled":
         print(
-            f"注意：思考模式 {llm.thinking} 很慢（约 18 秒）而且经常返回空内容，"
-            "建议改回 disabled。",
+            f"注意：快速建议开了思考模式 {llm.thinking}，会很慢（{deep_wait_hint(llm.thinking)}）；"
+            "思考交给深度分析就好，thinking 建议改回 disabled。",
             flush=True,
         )
     extra = {"debounce": 0.0, "run_async": lambda job: job()} if sync else {}
@@ -201,13 +206,14 @@ def _overlay_config(explicit: bool) -> OverlayConfig | None:
 
 
 def _displays(
-    name: Namer, overlay: OverlayConfig | None, ai_enabled: bool
+    name: Namer, overlay: OverlayConfig | None, scheduler
 ) -> tuple[OverlayModel | None, AdviceSink]:
     """终端总是显示；打开悬浮面板时，建议同时发给面板的数据模型。"""
-    terminal = AdviceDisplay(name)
+    deep_thinking = scheduler.deep_thinking if scheduler is not None else "low"
+    terminal = AdviceDisplay(name, deep_thinking=deep_thinking)
     if overlay is None:
         return None, terminal
-    model = OverlayModel(name, ai_enabled=ai_enabled)
+    model = OverlayModel(name, ai_enabled=scheduler is not None)
     return model, DisplayGroup(terminal, model)
 
 
@@ -255,7 +261,7 @@ def _cmd_replay(args: argparse.Namespace) -> int:
             except ConfigError as exc:
                 print(exc)
                 return 1
-        model, display = _displays(name, overlay, ai_enabled=scheduler is not None)
+        model, display = _displays(name, overlay, scheduler)
         runner = AdviceRunner(rules, name, display, scheduler)
         if model is not None:
             handlers.append(model.on_update)  # 先更新面板的回合，再出建议
@@ -352,7 +358,7 @@ def _cmd_watch(args: argparse.Namespace) -> int:
         except ConfigError as exc:
             print(exc)
             return 1
-    model, display = _displays(name, overlay, ai_enabled=scheduler is not None)
+    model, display = _displays(name, overlay, scheduler)
     runner = AdviceRunner(rules, name, display, scheduler)
     print(f"正在监听 {install / 'Logs'}，按 Ctrl+C 退出。")
     handlers = [_timeline(name, args.verbose)]

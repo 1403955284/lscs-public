@@ -305,7 +305,7 @@ def test_concurrent_calls_are_safe():
     assert versions == sorted(versions)
 
 
-def test_condense_drops_direction_first_then_notes():
+def test_condense_drops_direction_first_then_look_for_and_notes():
     view = OverlayView(
         title="第 3 回合",
         compact=False,
@@ -313,18 +313,27 @@ def test_condense_drops_direction_first_then_notes():
         ai=(
             Line("① 买 海盗 3/2"),
             Line("方向：纳迦", role="direction"),
-            Line("思路：先保血", role="reason"),
+            Line("要找：船长", role="look_for"),
+            Line("分析：先保血", role="reason"),
             Line("基于 6 秒前的局面", "muted", role="note"),
+            Line("深度分析中…", "muted"),
         ),
+        ai_title="AI（深度）",
         warning="⚠ 状态可能不准",
     )
     assert condense(view, 0) == view
     one = condense(view, 1)
     assert one.rules == (Line("① 刷新"),)
-    assert [line.text for line in one.ai] == ["① 买 海盗 3/2", "思路：先保血", "基于 6 秒前的局面"]
+    assert [line.text for line in one.ai] == [
+        "① 买 海盗 3/2",
+        "要找：船长",
+        "分析：先保血",
+        "基于 6 秒前的局面",
+        "深度分析中…",
+    ]
     two = condense(view, 2)
-    assert [line.text for line in two.ai] == ["① 买 海盗 3/2", "思路：先保血"]
-    assert (two.title, two.warning) == (view.title, view.warning)
+    assert [line.text for line in two.ai] == ["① 买 海盗 3/2", "分析：先保血", "深度分析中…"]
+    assert (two.title, two.warning, two.ai_title) == (view.title, view.warning, view.ai_title)
 
 
 def test_hero_power_step_shows_and_disappears_once_used():
@@ -346,3 +355,172 @@ def test_hero_power_step_shows_and_disappears_once_used():
     )
     model.on_update(used, [])
     assert model.snapshot().rules == (Line("① 刷新"),)
+
+
+# ---- 快速 + 深度两路 ----
+
+
+def llm_advice(actions, turn=3, lane="fast", expired=None, state_seq=1, **fields):
+    plan = Plan(source="llm", actions=actions, **fields)
+    return Advice(
+        state_seq=state_seq, turn=turn, plan=plan, elapsed=2.0, lane=lane, expired=expired
+    )
+
+
+BUY_21 = (Action(type="buy", entity_id=21, reason="身材好"),)
+BUY_20 = (Action(type="buy", entity_id=20, reason="海盗"),)
+DEEP = {
+    "analysis": "畸变核心在 5 本，提前升本。",
+    "direction": "畸变",
+    "look_for": ("神明", "祭品"),
+}
+
+
+def test_fast_ai_lines_show_look_for_and_analysis():
+    model = OverlayModel(name)
+    model.on_update(T3, started(3))
+    advice = llm_advice(
+        BUY_21, summary="买", analysis="血量健康，先补战力。", direction="海盗", look_for=("船长",)
+    )
+    model.show_ai(T3, advice, False)
+    view = model.snapshot()
+    assert view.ai_title == "AI"
+    assert view.ai == (
+        Line("① 买 蚀脑怪 3/4"),
+        Line("方向：海盗", role="direction"),
+        Line("要找：船长", role="look_for"),
+        Line("分析：血量健康，先补战力。", role="reason"),
+    )
+
+
+def test_look_for_and_analysis_are_cut():
+    model = OverlayModel(name)
+    model.on_update(T3, started(3))
+    names = tuple(f"很长的牌名{i}" for i in range(6))
+    model.show_ai(T3, llm_advice(BUY_21, analysis="分" * 50, look_for=names), False)
+    look_for, analysis = model.snapshot().ai[1:]
+    assert look_for.text == ("要找：" + "、".join(names))[:24] + "…"
+    assert analysis.text == ("分析：" + "分" * 37) + "…"
+
+
+def test_deep_analysis_pending_line_and_deep_result_first():
+    model = OverlayModel(name)
+    model.on_update(T3, started(3))
+    model.ai_pending()
+    model.ai_pending("deep")
+    assert model.snapshot().ai == (Line("分析中…", "muted"), Line("深度分析中…", "muted"))
+    model.show_ai(T3, llm_advice(BUY_21, analysis="快速分析"), False)
+    assert model.snapshot().ai[-1] == Line("深度分析中…", "muted")
+    model.show_ai(T3, llm_advice(BUY_20, lane="deep", **DEEP), False)
+    view = model.snapshot()
+    assert view.ai_title == "AI（深度）"
+    assert view.ai == (
+        Line("① 买 海盗 3/2"),
+        Line("方向：畸变", role="direction"),
+        Line("要找：神明、祭品", role="look_for"),
+        Line("分析：畸变核心在 5 本，提前升本。", role="reason"),
+    )
+    model.on_update(make_state(turn=4, seq=9), started(4))
+    view = model.snapshot()
+    assert (view.ai, view.ai_title) == ((), "AI")  # 新回合清空深度分析
+
+
+def test_deep_steps_done_keep_the_thoughts():
+    model = OverlayModel(name)
+    model.on_update(T3, started(3))
+    model.show_ai(T3, llm_advice(BUY_20, lane="deep", **DEEP), False)
+    model.on_update(BOUGHT, [])
+    assert model.snapshot().ai == (
+        Line("已按建议操作完", "muted"),
+        Line("要找：神明、祭品", role="look_for"),
+        Line("分析：畸变核心在 5 本，提前升本。", role="reason"),
+    )
+
+
+def test_expired_deep_result_shows_its_direction_look_for_and_analysis():
+    model = OverlayModel(name)
+    model.on_update(T3, started(3))
+    plan = Plan(source="llm", actions=BUY_21, analysis="快速分析", direction="海盗")
+    fast = Advice(state_seq=1, turn=3, plan=plan, stale_note="基于 6 秒前的局面", elapsed=2.0)
+    model.show_ai(T3, fast, False)
+    model.show_ai(T3, llm_advice(BUY_20, lane="deep", expired="invalid", **DEEP), False)
+    view = model.snapshot()
+    assert view.ai_title == "AI（深度）"
+    assert view.ai == (  # 快速建议的操作 + 深度分析的方向和思路 + 快速建议的附注
+        Line("① 买 蚀脑怪 3/4"),
+        Line("方向：畸变", role="direction"),
+        Line("要找：神明、祭品", role="look_for"),
+        Line("分析：畸变核心在 5 本，提前升本。", role="reason"),
+        Line("基于 6 秒前的局面", "muted", role="note"),
+    )
+    assert [line.text for line in condense(view, 1).ai][:2] == [
+        "① 买 蚀脑怪 3/4",
+        "要找：神明、祭品",
+    ]
+
+
+def test_refresh_after_deep_result_keeps_its_thoughts_with_the_new_fast_advice():
+    model = OverlayModel(name)
+    model.on_update(T3, started(3))
+    model.show_ai(T3, llm_advice(BUY_21, analysis="快速分析"), False)
+    model.show_ai(T3, llm_advice(BUY_20, lane="deep", **DEEP), False)
+    model.on_update(REFRESHED, [])  # 深度分析的操作过期
+    thoughts = (
+        Line("方向：畸变", role="direction"),
+        Line("要找：神明、祭品", role="look_for"),
+        Line("分析：畸变核心在 5 本，提前升本。", role="reason"),
+    )
+    assert model.snapshot().ai == (Line("商店已刷新，等待新的 AI 建议", "muted"), *thoughts)
+    buy_30 = (Action(type="buy", entity_id=30),)
+    model.show_ai(REFRESHED, llm_advice(buy_30, state_seq=3, analysis="刷新后的快速分析"), False)
+    view = model.snapshot()
+    assert view.ai_title == "AI（深度）"
+    assert view.ai == (Line("① 买 小鬼 1/1"), *thoughts)
+
+
+def test_expired_deep_thoughts_while_the_new_fast_advice_is_pending():
+    model = OverlayModel(name)
+    model.on_update(T3, started(3))
+    model.show_ai(T3, llm_advice(BUY_21, analysis="快速分析"), False)
+    model.show_ai(T3, llm_advice(BUY_20, lane="deep", **DEEP), False)
+    model.on_update(REFRESHED, [])
+    model.ai_pending()  # 刷新后的快速建议已经发出
+    view = model.snapshot()
+    assert view.ai_title == "AI（深度）"
+    assert view.ai == (
+        Line("分析中…", "muted"),
+        Line("方向：畸变", role="direction"),
+        Line("要找：神明、祭品", role="look_for"),
+        Line("分析：畸变核心在 5 本，提前升本。", role="reason"),
+    )
+
+
+def test_deep_error_only_clears_the_pending_line():
+    model = OverlayModel(name)
+    model.on_update(T3, started(3))
+    model.ai_pending("deep")
+    model.show_ai(T3, llm_advice(BUY_21), False)
+    model.ai_text("深度分析超时", "deep")
+    view = model.snapshot()
+    assert (view.ai, view.ai_title) == ((Line("① 买 蚀脑怪 3/4"),), "AI")
+
+
+def test_deep_agreeing_with_rules_keeps_its_thoughts():
+    model = OverlayModel(name)
+    model.on_update(T3, started(3))
+    model.show_ai(T3, llm_advice(BUY_20, lane="deep", **DEEP), True)
+    view = model.snapshot()
+    assert view.ai_title == "AI（深度）"
+    assert view.ai == (
+        Line("✓ 同意规则建议"),
+        Line("要找：神明、祭品", role="look_for"),
+        Line("分析：畸变核心在 5 本，提前升本。", role="reason"),
+    )
+
+
+def test_budget_notice_with_deep_pending():
+    model = OverlayModel(name)
+    model.on_update(T3, started(3))
+    model.ai_text(BUDGET_EXHAUSTED)
+    model.ai_pending("deep")
+    assert model.snapshot().ai == (Line(BUDGET_EXHAUSTED, "muted"), Line("深度分析中…", "muted"))

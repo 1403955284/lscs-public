@@ -105,14 +105,18 @@ def test_display_group_forwards_every_method_and_isolates_errors(caplog):
     group.show_rules(STATE, advice)
     group.rules_error()
     group.ai_pending()
+    group.ai_pending("deep")
     group.ai_text("AI 超时")
+    group.ai_text("深度分析超时", "deep")
     group.show_ai(STATE, advice, True)
     group.ai_summary(2, 300, 40)
     expected = [
         ("show_rules", (STATE, advice)),
         ("rules_error", ()),
-        ("ai_pending", ()),
-        ("ai_text", ("AI 超时",)),
+        ("ai_pending", ("fast",)),
+        ("ai_pending", ("deep",)),
+        ("ai_text", ("AI 超时", "fast")),
+        ("ai_text", ("深度分析超时", "deep")),
         ("show_ai", (STATE, advice, True)),
         ("ai_summary", (2, 300, 40)),
     ]
@@ -154,3 +158,77 @@ def test_describe_hero_power_target_when_requirement_is_unknown():
     state = make_state(board=[minion(10, "A", 1, 1)], hero_power_state=hp)
     action = Action(type="hero_power", entity_id=10)
     assert describe_action(action, state, name) == "使用英雄技能 瞄准 → 小鬼 1/1"
+
+
+def test_show_ai_lines_for_analysis_direction_and_look_for():
+    out = []
+    display = AdviceDisplay(name, out.append)
+    plan = Plan(
+        source="llm",
+        actions=(Action(type="buy", entity_id=20, reason="对子"),),
+        summary="买海盗",
+        analysis="中期，血量 20，\n准备走海盗。",
+        direction="海盗",
+        look_for=("船长", "海盗无赖"),
+    )
+    display.show_ai(STATE, Advice(state_seq=1, turn=3, plan=plan, elapsed=2.14), False)
+    assert out == [
+        "  🤖 AI（2.1 秒）：① 买 海盗 3/2（对子）",
+        "          分析：中期，血量 20， 准备走海盗。",  # 完整显示，换行变成空格
+        "          方向：海盗   要找：船长、海盗无赖",
+    ]
+
+
+def test_show_ai_without_steps_does_not_repeat_the_summary():
+    out = []
+    plan = Plan(source="llm", summary="省钱", look_for=("船长",))
+    AdviceDisplay(name, out.append).show_ai(
+        STATE, Advice(state_seq=1, turn=3, plan=plan, elapsed=1.0), False
+    )
+    assert out == ["  🤖 AI（1.0 秒）：无需操作（省钱）", "          要找：船长"]
+
+
+def test_deep_pending_and_text():
+    out = []
+    display = AdviceDisplay(name, out.append)
+    display.ai_pending("deep")
+    display.ai_text("深度分析超时", "deep")
+    display.ai_pending()
+    assert out == ["  🧠 深度分析中…（约 20 秒）", "  🧠 深度分析超时", "  🤖 AI 分析中…"]
+
+
+def test_deep_agreeing_with_rules_still_shows_the_analysis():
+    out = []
+    plan = Plan(source="llm", analysis="照规则来。", direction="海盗")
+    advice = Advice(state_seq=1, turn=3, plan=plan, elapsed=23.4, lane="deep")
+    AdviceDisplay(name, out.append).show_ai(STATE, advice, True)
+    assert out == [
+        "  🧠 ✓ 深度分析同意规则建议（23 秒）",
+        "          分析：照规则来。",
+        "          方向：海盗",
+    ]
+
+
+def test_expired_deep_labels_say_why():
+    plan = Plan(source="llm", analysis="照规则来。")
+    heads = []
+    for cause in ("refreshed", "invalid", "changed"):
+        out = []
+        advice = Advice(state_seq=1, turn=3, plan=plan, lane="deep", expired=cause)
+        AdviceDisplay(name, out.append).show_ai(STATE, advice, False)
+        heads.append(out[0])
+        assert out[1:] == ["          分析：照规则来。"]
+    assert heads == [
+        "  🧠 深度分析：操作已过期（商店刷新了），只看思路",
+        "  🧠 深度分析：操作不可用，只看思路",
+        "  🧠 深度分析：操作已过期，只看思路",
+    ]
+
+
+def test_deep_wait_hint_follows_the_thinking_setting():
+    from lscs.advisor.display import deep_wait_hint
+
+    assert (deep_wait_hint("low"), deep_wait_hint("high")) == ("约 20 秒", "约 40 秒")
+    out = []
+    AdviceDisplay(name, out.append, deep_thinking="high").ai_pending("deep")
+    assert out == ["  🧠 深度分析中…（约 40 秒）"]

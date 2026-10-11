@@ -29,6 +29,7 @@ RAW = [
         "techLevel": 1,
         "isBattlegroundsPoolSpell": True,
         "race": "INVALID",
+        "cost": 1,
     },
     {"id": "OLD_1", "name": "旧卡", "type": "MINION", "race": "BEAST"},
 ]
@@ -60,6 +61,15 @@ def test_pool_minions_exclude_duos_by_default():
     db = CardDB(RAW)
     assert [c.card_id for c in db.pool_minions()] == ["BG21_029"]
     assert [c.card_id for c in db.pool_minions(include_duos=True)] == ["BG21_029", "BG25_XXX"]
+
+
+def test_cost_and_pool_spells():
+    db = CardDB(RAW)
+    assert db.get("BG28_500").cost == 1
+    assert db.get("BG21_029").cost is None  # 数据里没有费用
+    assert [c.card_id for c in db.pool_spells()] == ["BG28_500"]
+    duo_spell = {**RAW[3], "id": "BG28_DUO", "isBattlegroundsDuosExclusive": True}
+    assert [c.card_id for c in CardDB([*RAW, duo_spell]).pool_spells()] == ["BG28_500"]
 
 
 def test_from_json_file(tmp_path):

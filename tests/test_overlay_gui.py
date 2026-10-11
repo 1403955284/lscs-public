@@ -32,13 +32,22 @@ def test_overlay_window_renders_states_and_closes():
         direction="海盗",
     )
     ai = Plan(source="llm", actions=(Action(type="upgrade"),), summary="血量健康，先升本" * 4)
+    deep = Plan(
+        source="llm",
+        actions=(Action(type="buy", entity_id=20),),
+        analysis="畸变核心在 5 本，血量健康，提前升本。" * 2,
+        direction="畸变",
+        look_for=("神明", "飘荡祭品"),
+    )
     steps = [
         lambda: model.on_update(STATE, [Event(type=EventType.RECRUIT_STARTED, turn=3)]),
         lambda: model.show_rules(STATE, Advice(state_seq=1, turn=3, plan=rules)),
         lambda: model.ai_pending(),
+        lambda: model.ai_pending("deep"),
         lambda: model.show_ai(
             STATE, Advice(state_seq=1, turn=3, plan=ai, stale_note="基于 6 秒前的局面"), False
         ),
+        lambda: model.show_ai(STATE, Advice(state_seq=1, turn=3, plan=deep, lane="deep"), False),
         lambda: model.on_update(STATE.model_copy(update={"uncertain": True, "seq": 2}), []),
         lambda: model.on_update(make_state(turn=3, phase=Phase.COMBAT, seq=3), []),
         lambda: model.show_message("监听已停止，请查看终端"),
@@ -63,6 +72,9 @@ def test_overlay_window_renders_states_and_closes():
     assert "规则" in texts and "AI" in texts
     assert any("① 买 海盗 3/2" in t for t in texts)
     assert any(t.startswith("思路：") for t in texts)
+    assert "深度分析中…" in texts
+    assert "AI（深度）" in texts and "要找：神明、飘荡祭品" in texts
+    assert any(t.startswith("分析：畸变核心") for t in texts)
     assert "⚠ 状态可能不准" in texts
     assert "第 3 回合 · 战斗中" in texts
     assert snapshots[-1][0] == ["监听已停止，请查看终端"]
@@ -92,6 +104,10 @@ def test_overlay_window_condenses_when_too_tall():
     model.show_ai(
         state, Advice(state_seq=1, turn=3, plan=plan, stale_note="基于 6 秒前的局面"), False
     )
+    deep = plan.model_copy(update={"analysis": "很长的分析" * 8, "look_for": ("神明",) * 6})
+    model.show_ai(state, Advice(state_seq=1, turn=3, plan=deep, lane="deep"), False)
+    model.ai_pending("deep")  # 只是为了多一行
+    model.show_ai(state, Advice(state_seq=1, turn=3, plan=deep, lane="deep"), False)
     seen = []
 
     def keep_running():
@@ -102,6 +118,9 @@ def test_overlay_window_condenses_when_too_tall():
     texts, (_w, height) = seen[-1]
     assert height <= window._layout.max_height
     assert texts[0].startswith("第 3 回合")  # 标题和警告总是保留（字大时标题可能换行）
+    assert "AI（深度）" in texts
+    if any(t.startswith("方向：") for t in texts):  # 精简时先去掉"方向"，再去掉"要找"
+        assert any(t.startswith("要找：") for t in texts)
     assert "⚠ 状态可能不准" in texts or height == window._layout.max_height
 
 

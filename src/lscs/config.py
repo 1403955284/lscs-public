@@ -24,10 +24,16 @@ class LLMConfig(BaseModel):
     model: str = "deepseek-flash"
     base_url: str = ""  # 留空表示 https://api.deepseek.com
     api_key: str = Field(default="", repr=False)  # 不出现在 repr / 日志里
+    # 快速建议：招募开始和每次刷新后各调用一次，不开思考，2~3 秒出结果
     thinking: Literal["disabled", "low", "high"] = "disabled"
     timeout_seconds: float = Field(default=20, gt=0)
-    max_calls_per_game: int = Field(default=60, ge=0)
-    max_output_tokens: int = Field(default=800, gt=0)
+    max_calls_per_game: int = Field(default=80, ge=0)  # 快速和深度两路共用
+    max_output_tokens: int = Field(default=1500, gt=0)  # 800 不够写 analysis
+    # 深度分析：只在招募开始时和快速建议同时发出，开思考，约 20 秒
+    deep_analysis: bool = True
+    deep_thinking: Literal["low", "high"] = "low"
+    deep_max_output_tokens: int = Field(default=16000, gt=0)
+    deep_timeout_seconds: float = Field(default=75, gt=0)
 
     @field_validator("api_key")
     @classmethod

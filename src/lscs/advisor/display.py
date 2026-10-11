@@ -6,7 +6,7 @@ import logging
 from collections.abc import Callable
 from typing import Protocol
 
-from lscs.advisor.models import Action, Advice, Plan
+from lscs.advisor.models import Action, Advice, Expired, Lane, Plan
 from lscs.state.models import GameState
 
 log = logging.getLogger(__name__)
@@ -15,6 +15,12 @@ Namer = Callable[[str], str]
 Output = Callable[[str], None]
 CIRCLED = "①②③④⑤⑥⑦⑧⑨"
 INDENT = "          "  # 让多步方案的后续行与第一步对齐
+ICONS: dict[Lane, str] = {"fast": "🤖 ", "deep": "🧠 "}
+EXPIRED_LABELS: dict[Expired, str] = {
+    "refreshed": "操作已过期（商店刷新了），只看思路",
+    "invalid": "操作不可用，只看思路",
+    "changed": "操作已过期，只看思路",
+}
 
 
 def _print(line: str) -> None:
@@ -76,21 +82,50 @@ def format_plan(plan: Plan, state: GameState, name: Namer, reasons: bool = True)
     ]
 
 
+def deep_wait_hint(thinking: str) -> str:
+    """深度分析大约要等多久（终端提示和启动时的说明共用）。"""
+    return "约 40 秒" if thinking == "high" else "约 20 秒"
+
+
+def one_line(text: str) -> str:
+    """AI 写的多行文字合成一行。"""
+    return " ".join(text.split())
+
+
+def thought_lines(plan: Plan, summary: bool = True, extra: tuple[str, ...] = ()) -> list[str]:
+    """AI 方案下面的"分析"一行（没有分析时用"思路"），以及"方向 / 要找"一行。"""
+    lines = []
+    if plan.analysis:
+        lines.append(f"分析：{one_line(plan.analysis)}")
+    elif plan.summary and summary:
+        lines.append(f"思路：{one_line(plan.summary)}")
+    tail = []
+    if plan.direction:
+        tail.append(f"方向：{plan.direction}")
+    if plan.look_for:
+        tail.append("要找：" + "、".join(plan.look_for))
+    tail += extra
+    if tail:
+        lines.append("   ".join(tail))
+    return lines
+
+
 class AdviceSink(Protocol):
     """AdviceRunner 输出建议的对象：终端（AdviceDisplay）、悬浮面板或 DisplayGroup。"""
 
     def show_rules(self, state: GameState, advice: Advice) -> None: ...
     def rules_error(self) -> None: ...
-    def ai_pending(self) -> None: ...
-    def ai_text(self, text: str) -> None: ...
+    def ai_pending(self, lane: Lane = "fast") -> None: ...
+    def ai_text(self, text: str, lane: Lane = "fast") -> None: ...
     def show_ai(self, state: GameState, advice: Advice, agrees: bool) -> None: ...
     def ai_summary(self, calls: int, input_tokens: int, output_tokens: int) -> None: ...
 
 
 class AdviceDisplay:
-    def __init__(self, name: Namer, out: Output = _print) -> None:
+    def __init__(self, name: Namer, out: Output = _print, deep_thinking: str = "low") -> None:
         self._name = name
         self._out = out
+        self._deep_pending = f"深度分析中…（{deep_wait_hint(deep_thinking)}）"
         self._last_rules: tuple | None = None
 
     def _block(self, label: str, lines: list[str]) -> None:
@@ -113,29 +148,33 @@ class AdviceDisplay:
     def rules_error(self) -> None:
         self._out("  📋 本回合规则建议出错")
 
-    def ai_pending(self) -> None:
-        self._out("  🤖 AI 分析中…")
+    def ai_pending(self, lane: Lane = "fast") -> None:
+        self._out(("  🧠 " + self._deep_pending) if lane == "deep" else "  🤖 AI 分析中…")
 
-    def ai_text(self, text: str) -> None:
+    def ai_text(self, text: str, lane: Lane = "fast") -> None:
         """AI 的错误、提示、过期等一行消息。"""
-        self._out(f"  🤖 {text}")
+        self._out(f"  {ICONS[lane]}{text}")
 
     def show_ai(self, state: GameState, advice: Advice, agrees: bool) -> None:
-        seconds = f"{advice.elapsed:.1f} 秒" if advice.elapsed is not None else "?"
-        if agrees:
-            self._out(f"  🤖 ✓ AI 同意规则建议（{seconds}）")
+        plan, deep = advice.plan, advice.lane == "deep"
+        icon = ICONS[advice.lane]
+        if advice.expired is not None:
+            # 冒号而不是括号：原因里本身带括号，不嵌套
+            self._block(icon, [f"深度分析：{EXPIRED_LABELS[advice.expired]}", *thought_lines(plan)])
             return
-        lines = format_plan(advice.plan, state, self._name)
-        extra = []
-        if advice.plan.summary:
-            extra.append(f"思路：{advice.plan.summary}")
-        if advice.plan.direction:
-            extra.append(f"方向：{advice.plan.direction}")
-        if advice.stale_note:
-            extra.append(f"（{advice.stale_note}）")
-        if extra:
-            lines.append("   ".join(extra))
-        self._block(f"🤖 AI（{seconds}）：", lines)
+        if advice.elapsed is None:
+            seconds = "?"
+        else:  # 深度分析要等十几秒，不用精确到 0.1 秒
+            seconds = f"{advice.elapsed:.0f} 秒" if deep else f"{advice.elapsed:.1f} 秒"
+        if agrees:
+            who = "深度分析" if deep else "AI "
+            self._block(icon, [f"✓ {who}同意规则建议（{seconds}）", *thought_lines(plan)])
+            return
+        stale = (f"（{advice.stale_note}）",) if advice.stale_note else ()
+        lines = format_plan(plan, state, self._name)
+        lines += thought_lines(plan, summary=bool(plan.actions), extra=stale)
+        label = f"深度分析（{seconds}）：" if deep else f"AI（{seconds}）："
+        self._block(icon + label, lines)
 
     def ai_summary(self, calls: int, input_tokens: int, output_tokens: int) -> None:
         self._out(
@@ -163,11 +202,11 @@ class DisplayGroup:
     def rules_error(self) -> None:
         self._each("rules_error")
 
-    def ai_pending(self) -> None:
-        self._each("ai_pending")
+    def ai_pending(self, lane: Lane = "fast") -> None:
+        self._each("ai_pending", lane)
 
-    def ai_text(self, text: str) -> None:
-        self._each("ai_text", text)
+    def ai_text(self, text: str, lane: Lane = "fast") -> None:
+        self._each("ai_text", text, lane)
 
     def show_ai(self, state: GameState, advice: Advice, agrees: bool) -> None:
         self._each("show_ai", state, advice, agrees)

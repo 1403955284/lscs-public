@@ -59,7 +59,7 @@ class SpyScheduler:
     def reset_game(self):
         pass
 
-    def observe(self, state, events, ctx, plans):
+    def observe(self, state, events, ctx):
         self.observed.append((state.seq, ctx is not None))
 
     def tick(self):
