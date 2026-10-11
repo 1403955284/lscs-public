@@ -93,3 +93,20 @@ def test_reconnect_without_recruit_started_still_advises():
     state = make_state(turn=4, gold=6, shop=[shop_minion(20, "BGS_061", 3, 1)])
     runner.on_update(state, _events(EventType.GOLD_CHANGED, EventType.SHOP_CHANGED, turn=4))
     assert out and out[0].startswith("  📋 规则：")
+
+
+def test_hero_power_change_updates_rules_advice():
+    # 招募开始时选项还没到（技能状态未知）；选项到了、技能能用，规则建议跟着更新
+    from factory import power
+
+    out = []
+    runner = AdviceRunner(RULES, lambda c: c, AdviceDisplay(lambda c: c, out.append))
+    shop = [shop_minion(20, "BGS_061", 3, 1)]
+    unknown = make_state(turn=2, gold=0, shop=shop, hero_power_state=power(option="unknown"))
+    runner.on_update(unknown, _events(EventType.RECRUIT_STARTED))
+    usable = make_state(turn=2, gold=0, shop=shop, seq=2, hero_power_state=power())
+    runner.on_update(usable, _events(EventType.HERO_POWER_CHANGED))
+    assert out == [
+        "  📋 规则：无需操作（本回合不需要操作）",
+        "  📋 规则：① 使用英雄技能 BG21_HERO_000p（免费技能，每回合都用掉）",
+    ]

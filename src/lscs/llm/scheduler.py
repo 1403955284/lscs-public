@@ -23,7 +23,7 @@ from dataclasses import dataclass, replace
 
 from lscs.advisor.context import TurnContext
 from lscs.advisor.models import Plan
-from lscs.advisor.validate import validate_plan
+from lscs.advisor.validate import normalize_actions, validate_plan
 from lscs.cards.db import CardDB
 from lscs.config import LLMConfig
 from lscs.llm.notices import AUTH_DISABLED, AUTH_FAILURE_LIMIT, BUDGET_EXHAUSTED
@@ -279,6 +279,9 @@ class LLMScheduler:
                     self._finish(request, error="AI 建议无效，已忽略", llm=result)
                     return
                 self._record(request, user, result, "合法")
+                plan = plan.model_copy(
+                    update={"actions": normalize_actions(plan.actions, request.ctx)}
+                )
                 self._finish(request, plan=plan, llm=result)
                 return
         except LLMError as exc:

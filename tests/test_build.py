@@ -180,3 +180,166 @@ def test_main_action_follows_game_step(mini_lines):
     assert build(store_until(mini_lines, FIRST_RECRUIT)).main_action is True
     ended = build(store_until(mini_lines, "tag=STEP value=MAIN_END"))
     assert ended.main_action is False
+
+
+def options(store, *listed):
+    """在 store 上应用一组新的选项：listed 是 (kind, entity_id, error)。"""
+    from lscs.parsing.feed import OptionListed, OptionsStarted
+
+    store.apply(OptionsStarted())
+    store.apply(OptionListed("option", None, "INVALID"))  # 结束回合
+    for kind, entity_id, error in listed:
+        store.apply(OptionListed(kind, entity_id, error))
+
+
+def test_hero_power_unknown_until_this_turns_options_arrive(mini_lines):
+    hp = build(store_until(mini_lines, FIRST_RECRUIT)).me.hero_power
+    assert (hp.entity_id, hp.card_id, hp.cost, hp.used_this_turn) == (
+        15,
+        "TB_BaconShop_HP_054",
+        0,
+        False,
+    )
+    assert (hp.option, hp.unusable_reason, hp.targets, hp.needs_target, hp.passive) == (
+        "unknown",
+        None,
+        (),
+        None,  # 还没见过它能用的样子，不知道要不要目标
+        False,
+    )
+
+
+def test_hero_power_usable_from_options(mini_lines):
+    store = store_until(mini_lines, FIRST_RECRUIT)
+    options(store, ("option", 15, None))
+    hp = build(store).me.hero_power
+    assert (hp.option, hp.unusable_reason, hp.needs_target, hp.passive) == (
+        "usable",
+        None,
+        False,
+        False,
+    )
+
+
+def test_hero_power_not_in_options_is_absent(mini_lines):
+    store = store_until(mini_lines, FIRST_RECRUIT)
+    options(store, ("option", 20, None))  # 只有刷新按钮
+    hp = build(store).me.hero_power
+    assert (hp.option, hp.passive) == ("absent", True)
+
+
+def test_hero_power_missing_later_in_the_turn_is_not_called_passive(mini_lines):
+    store = store_until(mini_lines, FIRST_RECRUIT)
+    options(store, ("option", 15, None))  # 本回合第一组选项里有它
+    options(store, ("option", 20, None))
+    hp = build(store).me.hero_power
+    assert (hp.option, hp.passive) == ("absent", False)
+
+
+def test_hero_power_error_codes_make_it_unusable(mini_lines):
+    for error in ("REQ_ENOUGH_MANA", "REQ_NOT_EXHAUSTED_HERO_POWER", "127"):
+        store = store_until(mini_lines, FIRST_RECRUIT)
+        options(store, ("option", 15, error))
+        hp = build(store).me.hero_power
+        assert (hp.option, hp.unusable_reason, hp.needs_target) == ("unusable", error, None)
+    store = store_until(mini_lines, FIRST_RECRUIT)
+    options(store, ("option", 15, "REQ_TARGET_TO_PLAY"))  # 这个错误码本身就说明要目标
+    hp = build(store).me.hero_power
+    assert (hp.option, hp.needs_target) == ("unusable", True)
+
+
+def test_hero_power_targets_are_the_ones_without_error(mini_lines):
+    store = store_until(mini_lines, FIRST_RECRUIT)
+    options(
+        store,
+        ("option", 15, None),
+        ("target", 30, None),
+        ("target", 14, "REQ_MINION_TARGET"),
+        ("target", 32, None),
+    )
+    hp = build(store).me.hero_power
+    assert (hp.option, hp.needs_target, hp.targets) == ("usable", True, (30, 32))
+
+
+OPTIONS = "D 10:00:11.0000000 GameState.DebugPrintOptions() - "
+POWER_USABLE = [
+    OPTIONS + "id=1",
+    OPTIONS + "  option 0 type=END_TURN mainEntity= error=INVALID errorParam=",
+    OPTIONS
+    + "  option 1 type=POWER mainEntity=[entityName=法力风暴 id=15 zone=PLAY zonePos=0 cardId=TB_BaconShop_HP_054 player=1] error=NONE errorParam=",
+]
+
+
+def with_lines_after(lines, marker, extra):
+    i = next(i for i, line in enumerate(lines) if marker in line)
+    return lines[: i + 1] + extra + lines[i + 1 :]
+
+
+def test_hero_power_options_from_log_lines_count_only_for_their_turn(mini_lines):
+    lines = with_lines_after(mini_lines, FIRST_RECRUIT, POWER_USABLE)
+    assert build(store_until(lines, "option 1 type=POWER")).me.hero_power.option == "usable"
+    later = store_until(
+        lines,
+        "10:01:00.0000000 GameState.DebugPrintPower() - TAG_CHANGE Entity=GameEntity tag=STEP value=MAIN_ACTION",
+    )
+    assert build(later).me.hero_power.option == "unknown"  # 第 2 回合的选项还没到
+
+
+def test_hero_power_cost_and_exhausted_tags(mini_lines):
+    from lscs.parsing.feed import TagSet
+
+    store = store_until(mini_lines, FIRST_RECRUIT)
+    store.apply(TagSet(15, GameTag.COST, 2))
+    store.apply(TagSet(15, GameTag.EXHAUSTED, 1))
+    hp = build(store).me.hero_power
+    assert (hp.cost, hp.used_this_turn) == (2, True)
+
+
+def test_no_hero_power_entity(mini_lines):
+    from hearthstone.enums import Zone
+
+    from lscs.parsing.feed import TagSet
+
+    store = store_until(mini_lines, FIRST_RECRUIT)
+    store.apply(TagSet(15, GameTag.ZONE, Zone.GRAVEYARD))
+    me = build(store).me
+    assert (me.hero_power, me.hero_power_card_id) == (None, None)
+
+
+AIMED = "[entityName=Aim id=15 zone=PLAY zonePos=0 cardId=TB_BaconShop_HP_054 player=1]"
+IMP = "[entityName=Imp id=30 zone=PLAY zonePos=1 cardId=BG21_029 player=2]"
+
+
+def test_paid_targeted_power_remembers_its_target_while_unaffordable(mini_lines):
+    # 真实格式：铸币不够时选项没有目标行；能用的那一组才列出目标
+    t = "D 10:00:11.0000000 GameState.DebugPrintOptions() - "
+    u = "D 10:00:12.0000000 GameState.DebugPrintOptions() - "
+    v = "D 10:00:13.0000000 GameState.DebugPrintOptions() - "
+    lines = with_lines_after(
+        mini_lines,
+        FIRST_RECRUIT,
+        [
+            t + "id=1",
+            t + f"  option 1 type=POWER mainEntity={AIMED} error=REQ_ENOUGH_MANA errorParam=",
+            u + "id=2",
+            u + f"  option 1 type=POWER mainEntity={AIMED} error=NONE errorParam=",
+            u + f"    target 0 entity={IMP} error=NONE errorParam=",
+            u + f"    target 1 entity={IMP} error=NONE errorParam=",
+            v + "id=3",
+            v + f"  option 1 type=POWER mainEntity={AIMED} error=REQ_ENOUGH_MANA errorParam=",
+        ],
+    )
+    first = build(
+        store_until(lines, "10:00:11.0000000 GameState.DebugPrintOptions() -   option")
+    ).me
+    assert (first.hero_power.option, first.hero_power.needs_target) == ("unusable", None)
+    usable = build(store_until(lines, "    target 1 entity=")).me.hero_power
+    assert (usable.option, usable.needs_target, usable.targets) == ("usable", True, (30,))
+    later = build(store_until(lines, "10:00:13.0000000 GameState.DebugPrintOptions() -   option"))
+    hp = later.me.hero_power
+    assert (hp.option, hp.unusable_reason, hp.needs_target, hp.targets) == (
+        "unusable",
+        "REQ_ENOUGH_MANA",
+        True,
+        (),
+    )

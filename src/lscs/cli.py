@@ -26,7 +26,7 @@ from lscs.logwatch.tail import LogTailer
 from lscs.overlay import app as overlay_app
 from lscs.overlay.model import OverlayModel
 from lscs.pipeline import Pipeline, UpdateHandler
-from lscs.replay import paced, read_log_lines
+from lscs.replay import push_paced, read_log_lines
 from lscs.state.models import Event, GameState
 from lscs.state.pool import load_pool_config
 from lscs.state.tracker import StateTracker
@@ -36,6 +36,7 @@ DEFAULT_POOL = PROJECT_ROOT / "strategy" / "current" / "pool.toml"
 DEFAULT_RULES = PROJECT_ROOT / "strategy" / "current" / "rules.toml"
 DEFAULT_GUIDE = PROJECT_ROOT / "strategy" / "current" / "guide.md"
 RECORDINGS_DIR = PROJECT_ROOT / "recordings"
+POLL_INTERVAL = 0.2  # watch 默认的轮询间隔（秒）
 OVERLAY_REPLAY_SPEED = 20.0  # replay --overlay 没填 --speed 时的倍速（不等待的话面板一闪而过）
 log = logging.getLogger(__name__)
 
@@ -274,12 +275,14 @@ def _cmd_replay(args: argparse.Namespace) -> int:
         speed = OVERLAY_REPLAY_SPEED
 
     def work(stop: threading.Event | None) -> None:
-        sleep = time.sleep if stop is None else stop.wait
-        for line in paced(read_log_lines(Path(args.log)), speed, sleep=sleep):
-            if stop is not None and stop.is_set():
-                break
-            pipeline.push(line)
-        pipeline.flush()
+        push_paced(
+            pipeline,
+            read_log_lines(Path(args.log)),
+            speed,
+            sleep=time.sleep if stop is None else stop.wait,
+            interval=POLL_INTERVAL,
+            stop=None if stop is None else stop.is_set,
+        )
 
     if model is None or overlay is None:
         work(None)
@@ -441,7 +444,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("watch", help="实时监听炉石日志，打印状态时间线和建议")
     p.add_argument("--install-dir", help="炉石安装目录（默认自动探测）")
-    p.add_argument("--interval", type=float, default=0.2, help="轮询间隔（秒）")
+    p.add_argument("--interval", type=float, default=POLL_INTERVAL, help="轮询间隔（秒）")
     p.add_argument("--no-ai", action="store_true", help="只显示规则建议，不调用大模型")
     p.add_argument("--no-overlay", action="store_true", help="不打开游戏上的悬浮面板，只在终端显示")
     _add_output_options(p, names_flag=False)

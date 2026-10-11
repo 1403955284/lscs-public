@@ -1,7 +1,7 @@
 import random
 from pathlib import Path
 
-from factory import hand_minion, make_state, minion, shop_minion, shop_spell
+from factory import hand_minion, make_state, minion, power, shop_minion, shop_spell
 
 from lscs.advisor.context import build_context
 from lscs.advisor.rules import rule_plans
@@ -113,6 +113,22 @@ def test_full_board_keeps_board_if_shop_is_worse():
         turn=6, gold=3, tier=3, upgrade_cost=9, board=board, shop=[shop_minion(20, "B", 1, 1)]
     )
     assert steps(plans[0]) == [("refresh", None)]
+    assert plans[0].summary == "刷新找牌"  # 没有买牌，不能说"买最好的身材"
+
+
+def test_summary_without_buys_names_what_the_plan_does():
+    board = [minion(10 + i, f"X{i}", 3, 3) for i in range(7)]
+    plans = plans_for(
+        turn=6,
+        gold=3,
+        tier=3,
+        upgrade_cost=9,
+        board=board,
+        shop=[shop_minion(20, "B", 1, 1)],
+        hero_power_state=power(),
+    )
+    assert steps(plans[0]) == [("hero_power", None), ("refresh", None)]
+    assert plans[0].summary == "用掉免费的英雄技能，刷新找牌"
 
 
 def test_zero_gold_needs_no_action():
@@ -157,3 +173,113 @@ def test_random_states_always_produce_valid_plans():
         assert plans, state
         for plan in plans:
             assert validate_plan(plan.actions, ctx) is None, (plan, state)
+
+
+FREE = "免费技能，每回合都用掉"
+AFTER_BUYING = "免费技能，买的随从打出去后再用"
+
+
+def test_free_hero_power_after_buying_and_before_refreshing():
+    plans = plans_for(
+        turn=3,
+        gold=5,
+        tier=2,
+        upgrade_cost=7,
+        shop=[shop_minion(20, "A", 1, 1), shop_minion(21, "B", 4, 5, keywords=["TAUNT"])],
+        hero_power_state=power(),
+    )
+    assert steps(plans[0]) == [("buy", 21), ("hero_power", None), ("refresh", None)]
+    # 买来的随从在手牌里，要先打出去，加属性的技能才会作用到它
+    assert plans[0].actions[1].reason == AFTER_BUYING
+
+
+def test_free_hero_power_in_every_plan():
+    plans = plans_for(
+        turn=2,
+        gold=4,
+        tier=1,
+        upgrade_cost=4,
+        health=20,
+        shop=[shop_minion(20, "A", 1, 1)],
+        hero_power_state=power(),
+    )
+    assert steps(plans[0]) == [("upgrade", None), ("hero_power", None)]
+    assert plans[0].actions[1].reason == FREE
+    assert steps(plans[1]) == [("buy", 20), ("hero_power", None), ("refresh", None)]
+
+
+def test_free_hero_power_even_without_gold():
+    plans = plans_for(gold=0, shop=[shop_minion(20, "A", 1, 1)], hero_power_state=power())
+    assert steps(plans[0]) == [("hero_power", None)]
+    assert plans[0].summary == "用掉免费的英雄技能"
+
+
+def test_rules_leave_other_hero_powers_to_the_ai():
+    for hp in [
+        power(cost=1),
+        power(targets=(10,)),
+        power(used=True),
+        power(option="unusable", reason="REQ_NOT_EXHAUSTED_HERO_POWER"),
+        power(option="absent"),
+        power(option="unknown"),
+        None,
+    ]:
+        plans = plans_for(
+            gold=3,
+            board=[minion(10, "B", 2, 2)],
+            shop=[shop_minion(20, "A", 1, 1)],
+            hero_power_state=hp,
+        )
+        assert all(a.type != "hero_power" for p in plans for a in p.actions), hp
+
+
+def test_random_states_with_hero_powers_always_produce_valid_plans():
+    rng = random.Random(20261012)
+    for _ in range(300):
+        board = [
+            minion(100 + i, rng.choice("ABCDE"), rng.randint(1, 9), rng.randint(1, 9))
+            for i in range(rng.randint(0, 7))
+        ]
+        shop = [
+            shop_minion(300 + i, rng.choice("ABCDE"), rng.randint(1, 9), rng.randint(1, 9))
+            for i in range(rng.randint(0, 6))
+        ]
+        option = rng.choice(["usable", "unusable", "absent", "unknown"])
+        reason = rng.choice(["REQ_ENOUGH_MANA", "REQ_NOT_EXHAUSTED_HERO_POWER", "127"])
+        targets = rng.choice([(), tuple(m.entity_id for m in board[:2])])
+        hp = power(
+            cost=rng.choice([0, 0, 1, 2]),
+            option=option,
+            used=rng.random() < 0.2,
+            reason=reason if option == "unusable" else None,
+            targets=targets,
+        )
+        state = make_state(
+            turn=rng.randint(1, 12),
+            gold=rng.randint(0, 10),
+            tier=rng.randint(1, 6),
+            health=rng.randint(1, 40),
+            upgrade_cost=rng.choice([None, rng.randint(0, 11)]),
+            refresh_cost=rng.choice([None, 1, 2]),
+            board=board,
+            shop=shop,
+            hero_power_state=rng.choice([hp, hp, None]),
+        )
+        ctx = build_context(state, buy_cost=3)
+        plans = rule_plans(ctx, CFG, name)
+        assert plans, state
+        for plan in plans:
+            assert validate_plan(plan.actions, ctx) is None, (plan, state)
+
+
+def test_hero_power_reminds_to_play_minions_already_in_hand():
+    # 这回合早些时候买的随从还在手牌里：同样提醒先打出去
+    plans = plans_for(
+        turn=4,
+        gold=0,
+        hand=[hand_minion(30, "A", 1, 1)],
+        shop=[shop_minion(20, "B", 2, 2)],
+        hero_power_state=power(),
+    )
+    assert steps(plans[0]) == [("hero_power", None)]
+    assert plans[0].actions[0].reason == AFTER_BUYING

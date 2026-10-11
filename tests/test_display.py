@@ -1,9 +1,9 @@
-from factory import make_state, minion, shop_minion, shop_spell
+from factory import hand_spell, make_state, minion, power, shop_minion, shop_spell
 
 from lscs.advisor.display import AdviceDisplay, describe_action, format_plan
 from lscs.advisor.models import Action, Advice, Plan
 
-NAMES = {"A": "小鬼", "B": "海盗", "S": "香蕉"}
+NAMES = {"A": "小鬼", "B": "海盗", "S": "香蕉", "BG21_HERO_000p": "定罪", "AIM": "瞄准"}
 
 
 def name(card_id):
@@ -119,3 +119,38 @@ def test_display_group_forwards_every_method_and_isolates_errors(caplog):
     assert first.calls == expected
     assert last.calls == expected
     assert "show_rules 坏了" in caplog.text and "ai_summary 坏了" in caplog.text
+
+
+def test_describe_hero_power():
+    state = make_state(hero_power_state=power())
+    action = Action(type="hero_power", reason="免费")
+    assert describe_action(action, state, name) == "使用英雄技能 定罪（免费）"
+    # 不需要目标时 AI 多给的编号不显示
+    assert describe_action(Action(type="hero_power", entity_id=10), state, name) == (
+        "使用英雄技能 定罪"
+    )
+    assert describe_action(action, make_state(), name, reasons=False) == "使用英雄技能"
+
+
+def test_describe_hero_power_with_target():
+    state = make_state(
+        board=[minion(10, "A", 1, 1)],
+        shop=[shop_minion(20, "B", 3, 2)],
+        hand=[hand_spell(30, "S")],
+        hero_power_state=power("AIM", targets=(10, 20, 30, 40)),
+    )
+
+    def aimed(target):
+        return describe_action(Action(type="hero_power", entity_id=target), state, name)
+
+    assert aimed(10) == "使用英雄技能 瞄准 → 小鬼 1/1"
+    assert aimed(20) == "使用英雄技能 瞄准 → 海盗 3/2"
+    assert aimed(30) == "使用英雄技能 瞄准 → 香蕉"
+    assert aimed(40) == "使用英雄技能 瞄准 → #40"
+
+
+def test_describe_hero_power_target_when_requirement_is_unknown():
+    hp = power("AIM", cost=2, option="unusable", reason="REQ_ENOUGH_MANA", needs_target=None)
+    state = make_state(board=[minion(10, "A", 1, 1)], hero_power_state=hp)
+    action = Action(type="hero_power", entity_id=10)
+    assert describe_action(action, state, name) == "使用英雄技能 瞄准 → 小鬼 1/1"

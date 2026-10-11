@@ -1,8 +1,10 @@
-"""按实体 ID 保存 tag，并维护按区域、按类型的索引，方便快速查询。"""
+"""按实体 ID 保存 tag，并维护按区域、按类型的索引，方便快速查询。
+另外保存最近一组选项（现在能执行哪些操作），按操作的主实体查询。"""
 
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import dataclass, field
 
 from hearthstone.enums import GameTag
 
@@ -10,10 +12,31 @@ from lscs.parsing.feed import (
     CardRevealed,
     GameMeta,
     GameStarted,
+    OptionListed,
+    OptionsStarted,
     PlayerDeclared,
     PowerChange,
     TagSet,
 )
+
+
+@dataclass
+class ListedOption:
+    """选项列表里的一个操作；读完这一组之前，目标还会陆续追加。"""
+
+    error: str | None  # None：现在可以执行
+    targets: list[int] = field(default_factory=list)  # 直接列在操作下面、error=NONE 的目标
+    # 抉择：每一项（subOption）下面 error=NONE 的目标
+    choice_targets: list[list[int]] = field(default_factory=list)
+
+    def valid_targets(self) -> tuple[int, ...]:
+        """可以选的目标，去重、保持顺序。抉择的目标只收对每一项都合法的
+        （不知道玩家会选哪一项；有一项不需要目标时就没有这样的目标）。"""
+        found = list(self.targets)
+        if self.choice_targets:
+            first, *rest = self.choice_targets
+            found += [t for t in first if all(t in other for other in rest)]
+        return tuple(dict.fromkeys(found))
 
 
 class EntityStore:
@@ -31,6 +54,15 @@ class EntityStore:
         self._zone_key: dict[int, tuple[int, int]] = {}
         self._type_index: dict[int, set[int]] = defaultdict(set)
         self._type_key: dict[int, int] = {}
+        self.options: dict[int, ListedOption] = {}  # 最近一组选项：主实体 ID -> 选项
+        self.options_turn: int | None = None  # 最近一组选项到达时游戏的 TURN
+        self.first_listed: set[int] = set()  # options_turn 这个回合第一组选项里的主实体
+        # 主实体最近一次以 error=NONE 列出时有没有目标行（整局保留）：
+        # 带错误码的选项从不列目标，铸币不够时只能靠这里知道要不要目标
+        self.needs_target: dict[int, bool] = {}
+        self._option: ListedOption | None = None  # 正在读的选项，后面的目标行属于它
+        self._option_entity: int | None = None
+        self._first_group = False
 
     def apply(self, change: PowerChange) -> None:
         match change:
@@ -51,6 +83,36 @@ class EntityStore:
                     self._reindex_zone(entity_id)
                 elif tag == GameTag.CARDTYPE:
                     self._reindex_type(entity_id)
+            case OptionsStarted():
+                turn = self.tag(self.game_entity_id, GameTag.TURN, 0)
+                self._first_group = turn != self.options_turn
+                if self._first_group:
+                    self.first_listed = set()
+                self.options = {}
+                self.options_turn = turn
+                self._option = None
+            case OptionListed(kind="option", entity_id=entity_id, error=error):
+                self._option = ListedOption(error)
+                self._option_entity = entity_id
+                if entity_id is not None:
+                    self.options[entity_id] = self._option
+                    if self._first_group:
+                        self.first_listed.add(entity_id)
+                    if error is None:
+                        self.needs_target[entity_id] = False
+            case OptionListed(kind="subOption"):
+                if self._option is not None:
+                    self._option.choice_targets.append([])
+            case OptionListed(kind="target", entity_id=entity_id, error=error):
+                option = self._option
+                if option is None:
+                    return
+                if option.error is None and self._option_entity is not None:
+                    self.needs_target[self._option_entity] = True
+                if error is None and entity_id is not None:
+                    # 跟在抉择的某一项后面的目标属于那一项（和 hslog 的嵌套方式一样）
+                    bucket = option.choice_targets[-1] if option.choice_targets else option.targets
+                    bucket.append(entity_id)
 
     def tag(self, entity_id: int | None, tag: int, default: int | None = None) -> int | None:
         if entity_id is None:

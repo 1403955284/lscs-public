@@ -75,3 +75,20 @@ def test_lookup_by_dbf_id():
     assert db.get_by_dbf(72058).card_id == "BG21_029"
     assert db.get("BG21_029").dbf_id == 72058
     assert db.get_by_dbf(1) is None
+
+
+def test_text_repeated_twice_is_collapsed():
+    # HearthstoneJSON zhCN 里凯瑞尔"定罪"（BG21_HERO_000p）的原文：同一段说明重复了一遍，中间夹着"1"
+    raw = (
+        "随机使1个友方随从获得+1/+1。<b><b>被动</b>：</b>在每场战斗后，选择一项提升。"
+        "1随机使1个友方随从获得+1/+1。<b><b>被动</b>：</b>在每场战斗后，选择一项提升。"
+    )
+    assert clean_text(raw) == "随机使1个友方随从获得+1/+1。被动：在每场战斗后，选择一项提升。"
+    assert clean_text("召唤两个1/1的小鬼。@召唤两个1/1的小鬼。") == "召唤两个1/1的小鬼。"
+    assert clean_text("召唤两个1/1的小鬼。召唤两个1/1的小鬼。") == "召唤两个1/1的小鬼。"
+
+
+def test_short_or_different_halves_are_kept():
+    assert clean_text("+1+1") == "+1+1"  # 太短，不当成重复
+    assert clean_text("获得+1/+1") == "获得+1/+1"
+    assert clean_text("嘲讽。圣盾。12嘲讽。圣盾。x") == "嘲讽。圣盾。12嘲讽。圣盾。x"

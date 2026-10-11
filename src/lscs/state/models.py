@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -28,6 +29,7 @@ class EventType(StrEnum):
     BOARD_CHANGED = "BOARD_CHANGED"
     HAND_CHANGED = "HAND_CHANGED"
     GOLD_CHANGED = "GOLD_CHANGED"
+    HERO_POWER_CHANGED = "HERO_POWER_CHANGED"
     COMBAT_STARTED = "COMBAT_STARTED"
     COMBAT_ENDED = "COMBAT_ENDED"
     GAME_ENDED = "GAME_ENDED"
@@ -75,6 +77,29 @@ class HandCard(_Frozen):
     races: tuple[str, ...] = ()
 
 
+# 选项的错误码
+NOT_ENOUGH_GOLD = "REQ_ENOUGH_MANA"
+ALREADY_USED = "REQ_NOT_EXHAUSTED_HERO_POWER"
+NO_TARGET = "REQ_TARGET_TO_PLAY"  # 需要目标，但现在没有可以选的目标
+
+
+class HeroPower(_Frozen):
+    """我方英雄技能。能不能用以本回合最近一组选项（GameState.DebugPrintOptions）为准。"""
+
+    entity_id: int
+    card_id: str
+    cost: int  # COST 标签；日志不写值为 0 的标签，所以没有就是 0
+    used_this_turn: bool  # EXHAUSTED：本回合已经用过
+    # usable：现在能用；unusable：选项里有它但带错误码（见 unusable_reason）；
+    # absent：本回合的选项里没有它（被动技能）；unknown：本回合的选项还没到
+    option: Literal["usable", "unusable", "absent", "unknown"]
+    unusable_reason: str | None = None  # 错误码，如 REQ_ENOUGH_MANA、REQ_NOT_EXHAUSTED_HERO_POWER
+    targets: tuple[int, ...] = ()  # 现在可以选的目标实体
+    # 使用时要不要选目标：这局最近一次能用时选项里有没有目标行；None 表示还没见过它能用
+    needs_target: bool | None = None
+    passive: bool = False  # 本回合第一组选项里就没有它：被动技能
+
+
 class PlayerView(_Frozen):
     player_id: int | None
     hero_card_id: str | None
@@ -88,6 +113,7 @@ class PlayerView(_Frozen):
     board: tuple[Minion, ...]
     hand: tuple[HandCard, ...]
     trinkets: tuple[str, ...] = ()  # 我方饰品的卡牌 ID
+    hero_power: HeroPower | None = None
 
 
 class OpponentView(_Frozen):

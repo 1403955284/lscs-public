@@ -6,8 +6,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
-ActionType = Literal["buy", "sell", "upgrade", "refresh", "freeze"]
-ACTION_TYPES: tuple[str, ...] = ("buy", "sell", "upgrade", "refresh", "freeze")
+ActionType = Literal["buy", "sell", "upgrade", "hero_power", "refresh", "freeze"]
+ACTION_TYPES: tuple[str, ...] = ("buy", "sell", "upgrade", "hero_power", "refresh", "freeze")
 
 
 class _Frozen(BaseModel):
@@ -16,7 +16,7 @@ class _Frozen(BaseModel):
 
 class Action(_Frozen):
     type: ActionType
-    entity_id: int | None = None  # buy / sell 指向的实体
+    entity_id: int | None = None  # buy / sell 指向的实体；hero_power 需要目标时是目标
     reason: str = ""
 
 

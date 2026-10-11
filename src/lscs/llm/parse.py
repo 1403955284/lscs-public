@@ -7,7 +7,7 @@ import math
 
 from lscs.advisor.models import ACTION_TYPES, Action, Plan
 
-MAX_ACTIONS = 4
+MAX_ACTIONS = 5  # 例如 买、买、英雄技能、刷新、冻结
 
 
 class ParseError(Exception):
@@ -64,6 +64,8 @@ def parse_plan(text: str) -> Plan:
             entity = _entity_id(raw.get("entity_id"))
             if entity is None:
                 raise ParseError(f"第 {i} 个动作缺少 entity_id")
+        elif kind == "hero_power":
+            entity = _entity_id(raw.get("entity_id"))  # 目标；不需要目标时没有，校验时也忽略
         reason = raw.get("reason")
         actions.append(
             Action(

@@ -4,6 +4,8 @@ from lscs.parsing.feed import (
     CardRevealed,
     GameMeta,
     GameStarted,
+    OptionListed,
+    OptionsStarted,
     PlayerDeclared,
     PowerFeed,
     TagSet,
@@ -140,3 +142,33 @@ def test_packet_expansion_error_is_counted_and_skipped(monkeypatch):
     # Following normal TAG_CHANGE should still work
     result = feed.feed(P + "TAG_CHANGE Entity=10 tag=ATK value=1")
     assert result == [TagSet(10, GameTag.ATK, 1)]
+
+
+OPT = "D 10:00:01.0000000 GameState.DebugPrintOptions() - "
+
+
+def test_options_become_flat_changes():
+    feed = PowerFeed()
+    feed_all(feed, HEADER)
+    lines = [
+        OPT + "id=1",
+        OPT + "  option 0 type=END_TURN mainEntity= error=INVALID errorParam=",
+        OPT
+        + "  option 1 type=POWER mainEntity=[entityName=Power id=15 zone=PLAY zonePos=0 cardId=HP player=1] error=NONE errorParam=",
+        OPT
+        + "    target 0 entity=[entityName=Imp id=10 zone=PLAY zonePos=1 cardId=BG21_029 player=1] error=NONE errorParam=",
+        OPT
+        + "    target 1 entity=[entityName=Bob id=11 zone=PLAY zonePos=0 cardId=BOB player=2] error=REQ_MINION_TARGET errorParam=",
+        OPT
+        + "  option 2 type=POWER mainEntity=[entityName=Up id=21 zone=PLAY zonePos=0 cardId=UP player=1] error=REQ_ENOUGH_MANA errorParam=",
+    ]
+    assert feed_all(feed, lines) == [
+        OptionsStarted(),
+        OptionListed("option", None, "INVALID"),
+        OptionListed("option", 15, None),
+        OptionListed("target", 10, None),
+        OptionListed("target", 11, "REQ_MINION_TARGET"),
+        OptionListed("option", 21, "REQ_ENOUGH_MANA"),
+    ]
+    # 选项之后的 tag 照常输出
+    assert feed.feed(P + "TAG_CHANGE Entity=10 tag=ATK value=4") == [TagSet(10, GameTag.ATK, 4)]

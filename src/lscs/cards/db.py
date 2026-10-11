@@ -10,13 +10,30 @@ from pathlib import Path
 from lscs.state.pool import GOLDEN_SUFFIX, base_card_id
 
 _TAGS = re.compile(r"<[^>]+>")
+_SEPARATOR = re.compile(r"[0-9@]{0,2}")
+MIN_REPEAT = 6  # 重复的那一段至少这么长，避免把"+1+1"之类的短文本当成重复
+
+
+def _collapse_repeat(text: str) -> str:
+    """A + 分隔（最多两个数字或 @）+ A 收成 A。HearthstoneJSON 有的卡把说明写了两遍，
+    例如凯瑞尔的"定罪"：A + "1" + A。"""
+    for sep in range(3):
+        if (len(text) - sep) % 2:
+            continue
+        half = (len(text) - sep) // 2
+        if half < MIN_REPEAT:
+            continue
+        first, middle, second = text[:half], text[half : half + sep], text[half + sep :]
+        if first == second and _SEPARATOR.fullmatch(middle):
+            return first
+    return text
 
 
 def clean_text(text: str | None) -> str:
     if not text:
         return ""
     text = _TAGS.sub("", text).replace("[x]", "").replace("\n", " ")
-    return re.sub(r"\s+", " ", text).strip()
+    return _collapse_repeat(re.sub(r"\s+", " ", text).strip())
 
 
 @dataclass(frozen=True)

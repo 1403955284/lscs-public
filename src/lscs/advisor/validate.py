@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Sequence
 
-from lscs.advisor.context import MINION, TurnContext, is_golden
+from lscs.advisor.context import MINION, TurnContext, hero_power_blocker, is_golden
 from lscs.advisor.models import Action
 from lscs.state.pool import base_card_id
 
@@ -19,7 +19,7 @@ def validate_plan(actions: Sequence[Action], ctx: TurnContext) -> str | None:
     copies = Counter(ctx.copies)
     bought: set[int] = set()
     sold: set[int] = set()
-    upgraded = refreshed = frozen = False
+    upgraded = refreshed = frozen = powered = False
 
     for step, action in enumerate(actions, start=1):
         where = f"第 {step} 步"
@@ -62,6 +62,28 @@ def validate_plan(actions: Sequence[Action], ctx: TurnContext) -> str | None:
                     return f"{where}：一个方案只能升本一次"
                 upgraded = True
                 gold -= ctx.upgrade_cost
+            case "hero_power":
+                if powered:
+                    return f"{where}：一个方案只能用一次英雄技能"
+                problem = hero_power_blocker(ctx.hero_power)
+                if problem is not None:
+                    return f"{where}：{problem}"
+                hp = ctx.hero_power
+                assert hp is not None
+                if hp.needs_target is not False:  # 确定不需要目标时忽略 entity_id
+                    target = action.entity_id
+                    if target is None:
+                        return f"{where}：英雄技能要选一个目标"
+                    if target in sold:
+                        return f"{where}：#{target} 已经卖掉了"
+                    if hp.option == "usable":
+                        if target not in hp.targets:
+                            return f"{where}：英雄技能不能以 #{target} 为目标"
+                    elif target not in board:
+                        # 铸币不够时选项不列目标：只能选场上的随从
+                        return f"{where}：英雄技能只能以场上的随从为目标，#{target} 不在场上"
+                powered = True
+                gold -= hp.cost
             case "refresh":
                 if ctx.refresh_cost is None:
                     return f"{where}：现在不能刷新"
@@ -74,3 +96,17 @@ def validate_plan(actions: Sequence[Action], ctx: TurnContext) -> str | None:
     if minions > ctx.minion_limit:
         return f"场面放不下：执行后会有 {minions} 个随从（最多 {ctx.minion_limit} 个）"
     return None
+
+
+def normalize_actions(actions: Sequence[Action], ctx: TurnContext) -> tuple[Action, ...]:
+    """去掉确定不需要目标的英雄技能步骤上的 entity_id（校验时本来就忽略），
+    这样和规则方案一样的 AI 方案才会被认作"同意规则建议"。"""
+    hp = ctx.hero_power
+    if hp is None or hp.needs_target is not False:
+        return tuple(actions)
+    return tuple(
+        a.model_copy(update={"entity_id": None})
+        if a.type == "hero_power" and a.entity_id is not None
+        else a
+        for a in actions
+    )

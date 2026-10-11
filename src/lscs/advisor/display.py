@@ -21,6 +21,18 @@ def _print(line: str) -> None:
     print(line, flush=True)
 
 
+def _describe_entity(entity_id: int, state: GameState, name: Namer) -> str:
+    """场面、商店、手牌里的实体：随从带身材；都找不到时用编号。"""
+    me = state.me
+    cards = [*(me.board if me else ()), *state.shop, *(me.hand if me else ())]
+    card = next((c for c in cards if c.entity_id == entity_id), None)
+    if card is None:
+        return f"#{entity_id}"
+    if getattr(card, "card_type", "MINION") == "MINION" and card.atk is not None:
+        return f"{name(card.card_id)} {card.atk}/{card.health}"
+    return name(card.card_id)
+
+
 def describe_action(action: Action, state: GameState, name: Namer, reasons: bool = True) -> str:
     me = state.me
     match action.type:
@@ -42,6 +54,11 @@ def describe_action(action: Action, state: GameState, name: Namer, reasons: bool
         case "upgrade":
             tier = me.tavern_tier + 1 if me is not None else "?"
             text = f"升本 → {tier} 本"
+        case "hero_power":
+            hp = me.hero_power if me is not None else None
+            text = "使用英雄技能" + (f" {name(hp.card_id)}" if hp is not None else "")
+            if hp is not None and hp.needs_target is not False and action.entity_id is not None:
+                text += f" → {_describe_entity(action.entity_id, state, name)}"
         case "refresh":
             text = "刷新"
         case _:

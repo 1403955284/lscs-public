@@ -1,13 +1,13 @@
 import threading
 
-from factory import make_state, minion, shop_minion
+from factory import make_state, minion, power, shop_minion
 
 from lscs.advisor.models import Action, Advice, Plan
 from lscs.llm.notices import AUTH_DISABLED, BUDGET_EXHAUSTED
 from lscs.overlay.model import IDLE, Line, OverlayModel, OverlayView, condense
 from lscs.state.models import Event, EventType, Phase
 
-NAMES = {"A": "小鬼", "B": "海盗", "C": "蚀脑怪"}
+NAMES = {"A": "小鬼", "B": "海盗", "C": "蚀脑怪", "BG21_HERO_000p": "定罪"}
 
 
 def name(card_id):
@@ -106,7 +106,7 @@ def test_stale_ai_and_long_summary_and_many_steps():
     model.show_ai(T3, ai_advice(summary=summary, stale="基于 6 秒前的局面", actions=steps), False)
     ai = model.snapshot().ai
     assert ai == (
-        Line("① 刷新  ② 刷新  ③ 刷新  ④ 刷新  …"),
+        Line("① 刷新  ② 刷新  ③ 刷新  ④ 刷新  ⑤ 刷新  …"),  # AI 方案最多 5 步
         Line("思路：" + "先" * 37 + "…", role="reason"),  # 整行最多 40 字，超出加"…"
         Line("基于 6 秒前的局面", "muted", role="note"),
     )
@@ -325,3 +325,24 @@ def test_condense_drops_direction_first_then_notes():
     two = condense(view, 2)
     assert [line.text for line in two.ai] == ["① 买 海盗 3/2", "思路：先保血"]
     assert (two.title, two.warning) == (view.title, view.warning)
+
+
+def test_hero_power_step_shows_and_disappears_once_used():
+    model = OverlayModel(name)
+    ready = T3.model_copy(update={"me": T3.me.model_copy(update={"hero_power": power()})})
+    model.on_update(ready, started(3))
+    plan = Plan(
+        source="rules",
+        actions=(
+            Action(type="buy", entity_id=20),
+            Action(type="hero_power"),
+            Action(type="refresh"),
+        ),
+    )
+    model.show_rules(ready, Advice(state_seq=1, turn=3, plan=plan))
+    assert model.snapshot().rules == (Line("① 买 海盗 3/2  ② 使用英雄技能 定罪  ③ 刷新"),)
+    used = BOUGHT.model_copy(
+        update={"me": BOUGHT.me.model_copy(update={"hero_power": power(used=True)}), "seq": 5}
+    )
+    model.on_update(used, [])
+    assert model.snapshot().rules == (Line("① 刷新"),)

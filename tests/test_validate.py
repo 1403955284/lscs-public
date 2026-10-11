@@ -1,4 +1,4 @@
-from factory import hand_minion, make_state, minion, shop_minion, shop_spell
+from factory import hand_minion, make_state, minion, power, shop_minion, shop_spell
 
 from lscs.advisor.context import build_context
 from lscs.advisor.models import Action
@@ -120,3 +120,108 @@ def test_overfull_start_allows_doing_nothing_but_not_adding():
         validate_plan([sell(10), buy(20)], ctx_for(gold=3, shop=SHOP, board=board, hand=hand))
         is None
     )
+
+
+def hero_power(target=None):
+    return Action(type="hero_power", entity_id=target)
+
+
+HP = hero_power()
+BOARD = [minion(10, "X", 1, 1), minion(11, "Y", 2, 2)]
+
+
+def test_usable_free_hero_power():
+    assert validate_plan([HP], ctx_for(gold=0, hero_power_state=power())) is None
+    assert (
+        validate_plan([buy(20), HP, REFRESH], ctx_for(gold=4, shop=SHOP, hero_power_state=power()))
+        is None
+    )
+
+
+def test_hero_power_costs_gold():
+    paid = power(cost=2)
+    assert validate_plan([HP], ctx_for(gold=2, hero_power_state=paid)) is None
+    assert validate_plan([buy(20), HP], ctx_for(gold=4, shop=SHOP, hero_power_state=paid)) == (
+        "第 2 步：铸币不够"
+    )
+
+
+def test_hero_power_that_cannot_be_used():
+    cases = [
+        (None, "第 1 步：没有英雄技能"),
+        (power(used=True), "第 1 步：本回合已经用过英雄技能"),
+        (
+            power(option="unusable", reason="REQ_NOT_EXHAUSTED_HERO_POWER"),
+            "第 1 步：本回合已经用过英雄技能",
+        ),
+        (power(option="absent"), "第 1 步：英雄技能是被动的，不能主动使用"),
+        (power(option="absent", passive=False), "第 1 步：英雄技能现在不能用"),
+        (power(option="unknown"), "第 1 步：还不知道英雄技能现在能不能用"),
+        (
+            power(option="unusable", reason="REQ_TARGET_TO_PLAY"),
+            "第 1 步：英雄技能现在没有可选的目标",
+        ),
+        (power(option="unusable", reason="127"), "第 1 步：英雄技能现在不能用（127）"),
+    ]
+    for hp, problem in cases:
+        assert validate_plan([HP], ctx_for(gold=9, hero_power_state=hp)) == problem, hp
+
+
+def test_not_enough_gold_is_fine_once_the_plan_has_enough():
+    short = power(cost=2, option="unusable", reason="REQ_ENOUGH_MANA")
+    ctx = ctx_for(gold=1, board=BOARD, hero_power_state=short)
+    assert validate_plan([HP], ctx) == "第 1 步：铸币不够"
+    assert validate_plan([sell(10), HP], ctx) is None
+
+
+def test_hero_power_targets():
+    aimed = power(targets=(10, 11))
+    ctx = ctx_for(gold=3, board=BOARD, hero_power_state=aimed)
+    assert validate_plan([hero_power(10)], ctx) is None
+    assert validate_plan([hero_power(99)], ctx) == "第 1 步：英雄技能不能以 #99 为目标"
+    assert validate_plan([HP], ctx) == "第 1 步：英雄技能要选一个目标"
+    assert validate_plan([sell(10), hero_power(10)], ctx) == "第 2 步：#10 已经卖掉了"
+
+
+def test_target_is_ignored_when_not_needed():
+    assert validate_plan([hero_power(99)], ctx_for(hero_power_state=power())) is None
+
+
+def test_hero_power_order_and_count():
+    ctx = ctx_for(gold=9, hero_power_state=power())
+    assert validate_plan([REFRESH, HP], ctx) == "第 2 步：刷新之后只能冻结"
+    assert validate_plan([HP, HP], ctx) == "第 2 步：一个方案只能用一次英雄技能"
+    assert validate_plan([HP, FREEZE], ctx) is None
+    assert validate_plan([FREEZE, HP], ctx) == "第 2 步：冻结之后不能再有动作"
+
+
+def test_unaffordable_power_that_may_need_a_target_aims_at_my_board():
+    # 铸币不够时选项不列目标：要目标（或不知道要不要）就只能选场上没卖掉的随从
+    for needs in (True, None):
+        short = power(cost=2, option="unusable", reason="REQ_ENOUGH_MANA", needs_target=needs)
+        ctx = ctx_for(gold=1, board=BOARD, shop=SHOP, hero_power_state=short)
+        assert validate_plan([sell(11), hero_power(10)], ctx) is None
+        assert validate_plan([sell(11), HP], ctx) == "第 2 步：英雄技能要选一个目标"
+        assert validate_plan([sell(11), hero_power(11)], ctx) == "第 2 步：#11 已经卖掉了"
+        assert validate_plan([sell(11), hero_power(20)], ctx) == (
+            "第 2 步：英雄技能只能以场上的随从为目标，#20 不在场上"
+        )
+    known = power(cost=2, option="unusable", reason="REQ_ENOUGH_MANA", needs_target=False)
+    ctx = ctx_for(gold=1, board=BOARD, hero_power_state=known)
+    assert validate_plan([sell(11), hero_power(99)], ctx) is None  # 不需要目标：忽略编号
+
+
+def test_already_used_by_options_counts_as_used():
+    hp = power(option="unusable", reason="REQ_NOT_EXHAUSTED_HERO_POWER")
+    assert validate_plan([HP], ctx_for(hero_power_state=hp)) == "第 1 步：本回合已经用过英雄技能"
+
+
+def test_normalize_drops_targets_the_power_does_not_need():
+    from lscs.advisor.validate import normalize_actions
+
+    actions = (buy(20), hero_power(99))
+    assert normalize_actions(actions, ctx_for(hero_power_state=power())) == (buy(20), HP)
+    aimed = ctx_for(board=BOARD, hero_power_state=power(targets=(10,)))
+    assert normalize_actions((hero_power(10),), aimed) == (hero_power(10),)
+    unknown = ctx_for(hero_power_state=power(needs_target=None))
+    assert normalize_actions((hero_power(10),), unknown) == (hero_power(10),)

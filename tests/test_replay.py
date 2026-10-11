@@ -36,3 +36,39 @@ def test_paced_ignores_midnight_rollover():
     sleeps = []
     list(paced(["D 23:59:59.0 a", "D 00:00:01.0 b"], 1.0, sleep=sleeps.append))
     assert sleeps == []
+
+
+def test_paced_replay_flushes_before_a_long_wait(mini_lines):
+    from helpers import TEST_POOL
+
+    from lscs.pipeline import Pipeline
+    from lscs.replay import push_paced
+    from lscs.state.models import EventType
+    from lscs.state.tracker import StateTracker
+
+    starts = []
+    pipeline = Pipeline(
+        StateTracker(TEST_POOL),
+        lambda s, e: starts.extend(x.turn for x in e if x.type == EventType.RECRUIT_STARTED),
+    )
+    waits = []
+    # 招募开始后等选项时如果要等很久（玩家在想），先把招募开始发出去
+    push_paced(
+        pipeline, mini_lines, 1.0, sleep=lambda s: waits.append((s, list(starts))), interval=0.2
+    )
+    # 10:00:05 → 10:00:10（招募开始）→ 10:00:20（买牌）：第三次等待之前招募开始已经发出
+    assert [seen for _, seen in waits][:3] == [[], [], [1]]
+    assert starts == [1, 2]
+
+
+def test_push_paced_stops_when_asked(mini_lines):
+    from helpers import TEST_POOL
+
+    from lscs.pipeline import Pipeline
+    from lscs.replay import push_paced
+    from lscs.state.tracker import StateTracker
+
+    updates = []
+    pipeline = Pipeline(StateTracker(TEST_POOL), lambda s, e: updates.append(s))
+    push_paced(pipeline, mini_lines, None, sleep=lambda s: None, interval=0.2, stop=lambda: True)
+    assert updates == []

@@ -37,6 +37,8 @@ uv run lscs watch               # 每次打游戏前运行，PowerShell 不要�
   `recordings/llm-日期.jsonl`，不包含 Key，也不进仓库。
 - `thinking` 请保持 `"disabled"`：实测 `"low"`/`"high"` 平均约 18 秒，而且经常返回空内容。
 - 攻略要点在 `strategy/current/guide.md`，会原样发给 AI。
+- 英雄技能能不能用以日志里的选项列表（`GameState.DebugPrintOptions`）为准，选项比招募开始晚几十毫秒才到，
+  会等它一起生成招募开始的局面。规则只安排 0 费、不需要目标的技能；其余的交给 AI，提示词里写明费用、状态和可选目标。
 - 悬浮面板用 tkinter 实现，Windows 上通过 Win32 贴在炉石窗口上，并设置鼠标穿透、不抢焦点、不显示在任务栏；
   失败时退回成屏幕右上角的普通置顶窗口，无法启动时只用终端。`uv run lscs replay <录像> --overlay --speed 20`
   可以在任何平台预览面板。

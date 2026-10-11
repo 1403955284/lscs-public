@@ -7,6 +7,8 @@
 - 商店里每张牌的 COST 都会读进 ShopItem.cost，但只有酒馆法术的 COST 是购买价格；
   随从的 COST 不是价格（随从按买牌价收费，见 advisor.context.TurnContext.price）
 - 排行榜上的对手英雄由 Bob 控制，PLAYER_ID 是对手的玩家 ID
+- 英雄技能能不能用看本回合最近一组选项：error=NONE 能用，带错误码不能用，
+  被动技能从不出现在选项里；选项在招募开始（STEP 变成 MAIN_ACTION）之后才到
 """
 
 from __future__ import annotations
@@ -18,8 +20,10 @@ from hearthstone.enums import CardType, GameTag, PlayState, Race, State, Step, Z
 
 from lscs.state.entities import EntityStore
 from lscs.state.models import (
+    NO_TARGET,
     GameState,
     HandCard,
+    HeroPower,
     Minion,
     OpponentView,
     Phase,
@@ -197,6 +201,34 @@ def _hero_power(store: EntityStore, controller: int) -> str | None:
     return store.card_id(max(ids)) if ids else None
 
 
+def hero_power(store: EntityStore, controller: int) -> HeroPower | None:
+    ids = sorted_zone(store, controller, Zone.PLAY, (CardType.HERO_POWER,))
+    if not ids:
+        return None
+    entity_id = max(ids)
+    listed = None
+    if store.options_turn != raw_turn(store):
+        option = "unknown"
+    else:
+        listed = store.options.get(entity_id)
+        if listed is None:
+            option = "absent"
+        else:
+            option = "usable" if listed.error is None else "unusable"
+    reason = listed.error if listed is not None else None
+    return HeroPower(
+        entity_id=entity_id,
+        card_id=store.card_id(entity_id) or "",
+        cost=store.tag(entity_id, GameTag.COST, 0) or 0,
+        used_this_turn=bool(store.tag(entity_id, GameTag.EXHAUSTED, 0)),
+        option=option,
+        unusable_reason=reason,
+        targets=listed.valid_targets() if listed is not None else (),
+        needs_target=True if reason == NO_TARGET else store.needs_target.get(entity_id),
+        passive=option == "absent" and entity_id not in store.first_listed,
+    )
+
+
 def _trinkets(store: EntityStore, controller: int) -> tuple[str, ...]:
     ids = sorted(
         e
@@ -262,6 +294,7 @@ def player_view(store: EntityStore) -> PlayerView | None:
             if store.tag(e, GameTag.CARDTYPE) != CardType.HERO  # 选英雄阶段的备选英雄也在手牌区
         ),
         trinkets=_trinkets(store, player_id),
+        hero_power=hero_power(store, player_id),
     )
 
 

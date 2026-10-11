@@ -7,7 +7,7 @@ import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-from lscs.advisor.context import build_context
+from lscs.advisor.context import build_context, hero_power_used
 from lscs.advisor.display import AdviceSink
 from lscs.advisor.models import Action, Advice, Plan
 from lscs.advisor.rules import rule_plans
@@ -28,6 +28,7 @@ TRIGGERS = frozenset(
         EventType.GOLD_CHANGED,
         EventType.BOARD_CHANGED,
         EventType.HAND_CHANGED,
+        EventType.HERO_POWER_CHANGED,  # 选项到了（技能能不能用）、用过了技能
     }
 )
 
@@ -45,6 +46,9 @@ def _still_pending(action: Action, old: GameState, new: GameState) -> bool:
             return any(m.entity_id == action.entity_id for m in me_new.board)
         case "upgrade":
             return me_new.tavern_tier == me_old.tavern_tier
+        case "hero_power":
+            hp = me_new.hero_power
+            return hp is not None and not hero_power_used(hp)
         case "refresh":
             old_ids = {s.entity_id for s in old.shop}
             return not new_shop or bool(old_ids & set(new_shop))

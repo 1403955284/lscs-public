@@ -82,3 +82,24 @@ def test_turn_6_starts_after_trinket_choice(updates):
 def test_shop_keywords(updates):
     shop = recruit(updates, 13).shop
     assert shop[0].keywords == ("DIVINE_SHIELD", "WINDFURY")
+
+
+def test_hero_power_usable_at_each_recruit_start_then_used(updates):
+    # 凯瑞尔的"定罪"0 费、不需要目标，这局每回合都用了
+    for turn in range(1, 14):
+        hp = recruit(updates, turn).me.hero_power
+        assert (hp.card_id, hp.cost, hp.option, hp.used_this_turn, hp.needs_target) == (
+            "BG21_HERO_000p",
+            0,
+            "usable",
+            False,
+            False,
+        ), turn
+        later = [
+            s.me.hero_power
+            for s, _ in updates
+            if s.phase == Phase.RECRUIT and s.turn == turn and s.me.hero_power.used_this_turn
+        ]
+        assert later, turn
+        assert later[-1].option == "unusable"
+        assert later[-1].unusable_reason == "REQ_NOT_EXHAUSTED_HERO_POWER"

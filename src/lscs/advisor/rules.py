@@ -1,11 +1,12 @@
-"""精简的规则建议：三连、按节奏升本、按身材买牌、剩余铸币刷新（M2 设计文档第 5 节）。"""
+"""精简的规则建议：三连、按节奏升本、按身材买牌、用掉免费的英雄技能、剩余铸币刷新
+（M2 设计文档第 5 节；英雄技能见 2026-10-11 英雄技能建议设计）。"""
 
 from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Callable, Mapping
 
-from lscs.advisor.context import MINION, TurnContext, is_golden
+from lscs.advisor.context import MINION, TurnContext, hero_power_used, is_golden
 from lscs.advisor.models import Action, Plan
 from lscs.advisor.names import keyword_zh, tribe_zh
 from lscs.advisor.rules_config import RulesConfig
@@ -114,6 +115,25 @@ class _Draft:
             self.buy(best, self.buy_reason(best, first))
             first = False
 
+    def maybe_hero_power(self) -> None:
+        """只安排现在能用、不需要目标、0 费的技能；付费或要选目标的交给 AI 判断。"""
+        hp = self.ctx.hero_power
+        if (
+            hp is None
+            or hp.option != "usable"
+            or hero_power_used(hp)
+            or hp.needs_target is not False
+            or hp.cost != 0
+        ):
+            return
+        if self.ctx.hand_minions > 0 or any(a.type == "buy" for a in self.actions):
+            # 买来的随从在手牌里（本方案买的，或这回合早些时候买的）：
+            # 给随从加属性的技能要等它打出去才作用到它
+            reason = "免费技能，买的随从打出去后再用"
+        else:
+            reason = "免费技能，每回合都用掉"
+        self.actions.append(Action(type="hero_power", reason=reason))
+
     def maybe_refresh(self) -> None:
         cost = self.ctx.refresh_cost
         if cost is None or self.gold < cost:
@@ -122,6 +142,19 @@ class _Draft:
         goal = "找三连" if has_pair else "找更好的牌"
         self.actions.append(Action(type="refresh", reason=f"剩 {self.gold} 金，刷新{goal}"))
         self.gold -= cost
+
+
+def _buy_summary(actions: list[Action]) -> str:
+    """按方案里实际有的动作写总结。"""
+    types = {a.type for a in actions}
+    if "buy" in types:
+        return "买最好的身材"
+    parts = []
+    if "hero_power" in types:
+        parts.append("用掉免费的英雄技能")
+    if "refresh" in types:
+        parts.append("刷新找牌")
+    return "，".join(parts) or "本回合不需要操作"
 
 
 def rule_plans(ctx: TurnContext, cfg: RulesConfig, name: Namer) -> list[Plan]:
@@ -141,6 +174,7 @@ def rule_plans(ctx: TurnContext, cfg: RulesConfig, name: Namer) -> list[Plan]:
         d = _Draft(ctx, cfg, name)
         d.buy(triple, f"凑成三连：{name(triple.card_id)}变金色，还能发现一张高一本的随从")
         d.fill_buys()
+        d.maybe_hero_power()
         d.maybe_refresh()
         drafts.append(("三连优先", d))
 
@@ -155,13 +189,15 @@ def rule_plans(ctx: TurnContext, cfg: RulesConfig, name: Namer) -> list[Plan]:
             reason = f"血量健康，第 {ctx.turn} 回合可以提前升 {ctx.tier + 1} 本"
         d.upgrade(reason)
         d.fill_buys()
+        d.maybe_hero_power()
         d.maybe_refresh()
         upgrade_draft = ("按节奏升本", d)
 
     buy = _Draft(ctx, cfg, name)
     buy.fill_buys()
+    buy.maybe_hero_power()
     buy.maybe_refresh()
-    buy_draft = ("买最好的身材" if buy.actions else "本回合不需要操作", buy)
+    buy_draft = (_buy_summary(buy.actions), buy)
 
     if upgrade_draft is not None and ctx.effective_health > cfg.safe_below:
         drafts += [upgrade_draft, buy_draft]

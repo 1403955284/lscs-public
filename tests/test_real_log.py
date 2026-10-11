@@ -115,3 +115,15 @@ def test_seven_opponents_on_leaderboard(updates):
     assert len(state.opponents) == 7
     places = [o.place for o in state.opponents.values()]
     assert len(set(places)) == 7 and set(places) <= set(range(1, 9))
+
+
+def test_passive_hero_power_is_absent_from_options(updates):
+    # 米尔豪斯的"法力风暴"是被动技能，从不出现在选项里
+    for turn in range(1, 17):
+        state, _ = at(updates, EventType.RECRUIT_STARTED, turn)
+        hp = state.me.hero_power
+        assert (hp.card_id, hp.option, hp.used_this_turn) == (
+            "TB_BaconShop_HP_054",
+            "absent",
+            False,
+        )

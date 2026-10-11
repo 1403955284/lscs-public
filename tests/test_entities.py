@@ -1,6 +1,14 @@
 from hearthstone.enums import CardType, GameTag, Zone
 
-from lscs.parsing.feed import CardRevealed, GameMeta, GameStarted, PlayerDeclared, TagSet
+from lscs.parsing.feed import (
+    CardRevealed,
+    GameMeta,
+    GameStarted,
+    OptionListed,
+    OptionsStarted,
+    PlayerDeclared,
+    TagSet,
+)
 from lscs.state.entities import EntityStore
 
 
@@ -57,3 +65,107 @@ def test_game_started_resets_everything():
     assert store.meta == {}
     assert store.card_id(10) is None
     assert store.in_zone(2, Zone.PLAY) == []
+
+
+def test_options_are_kept_per_main_entity_for_the_turn_they_arrived_in():
+    store = make_store()
+    store.apply(TagSet(1, GameTag.TURN, 3))
+    for change in [
+        OptionsStarted(),
+        OptionListed("option", None, "INVALID"),
+        OptionListed("option", 15, None),
+        OptionListed("target", 10, None),
+        OptionListed("target", 11, "REQ_MINION_TARGET"),
+        OptionListed("option", 21, "REQ_ENOUGH_MANA"),
+    ]:
+        store.apply(change)
+    assert store.options_turn == 3
+    power = store.options[15]
+    assert (power.error, power.valid_targets()) == (None, (10,))
+    upgrade = store.options[21]
+    assert (upgrade.error, upgrade.valid_targets()) == ("REQ_ENOUGH_MANA", ())
+    assert None not in store.options
+    assert store.needs_target == {15: True}  # 只记 error=NONE 列出的操作
+
+
+def apply_group(store, *listed):
+    store.apply(OptionsStarted())
+    for change in listed:
+        store.apply(OptionListed(*change))
+
+
+def test_target_requirement_is_remembered_from_the_last_usable_listing():
+    # 带错误码的选项从来没有目标行（真实日志里没有一个例外），所以要记住能用时的样子
+    store = make_store()
+    store.apply(TagSet(1, GameTag.TURN, 3))
+    apply_group(store, ("option", 15, "REQ_ENOUGH_MANA"))
+    assert store.needs_target.get(15) is None
+    apply_group(store, ("option", 15, None), ("target", 10, None), ("target", 11, "127"))
+    assert store.needs_target[15] is True
+    apply_group(store, ("option", 15, "REQ_ENOUGH_MANA"))
+    assert store.needs_target[15] is True
+    store.apply(TagSet(1, GameTag.TURN, 5))
+    apply_group(store, ("option", 15, None))
+    assert store.needs_target[15] is False
+
+
+def test_targets_are_deduped_and_choose_one_targets_must_suit_every_choice():
+    store = make_store()
+    apply_group(
+        store,
+        ("option", 15, None),
+        ("target", 10, None),
+        ("target", 10, None),
+        ("subOption", 40, None),
+        ("target", 11, None),
+        ("target", 12, None),
+        ("subOption", 41, None),
+        ("target", 12, None),
+        ("target", 13, None),
+        ("option", 21, None),
+        ("subOption", 42, None),
+        ("target", 14, None),
+        ("subOption", 43, None),  # 这一项不需要目标：没有对每一项都合法的目标
+    )
+    assert store.options[15].valid_targets() == (10, 12)
+    assert store.options[21].valid_targets() == ()
+    assert store.needs_target == {15: True, 21: True}
+
+
+def test_first_option_group_of_each_turn_is_remembered():
+    store = make_store()
+    store.apply(TagSet(1, GameTag.TURN, 3))
+    apply_group(store, ("option", 15, None))
+    apply_group(store, ("option", 21, None))
+    assert store.first_listed == {15}
+    store.apply(TagSet(1, GameTag.TURN, 5))
+    apply_group(store, ("option", 21, None))
+    assert store.first_listed == {21}
+
+
+def test_new_option_group_replaces_the_old_one():
+    store = make_store()
+    store.apply(TagSet(1, GameTag.TURN, 3))
+    store.apply(OptionsStarted())
+    store.apply(OptionListed("option", 15, None))
+    store.apply(TagSet(1, GameTag.TURN, 5))
+    store.apply(OptionsStarted())
+    store.apply(OptionListed("option", 21, None))
+    assert store.options_turn == 5
+    assert set(store.options) == {21}
+
+
+def test_targets_without_an_option_are_ignored():
+    store = make_store()
+    store.apply(OptionsStarted())
+    store.apply(OptionListed("target", 10, None))
+    assert store.options == {}
+
+
+def test_game_started_clears_options():
+    store = make_store()
+    store.apply(OptionsStarted())
+    store.apply(OptionListed("option", 15, None))
+    store.apply(GameStarted(100))
+    assert (store.options, store.options_turn) == ({}, None)
+    assert (store.needs_target, store.first_listed) == ({}, set())

@@ -1,8 +1,9 @@
 import json
 from pathlib import Path
 
+import pytest
 from factory import make_state, minion, shop_minion
-from helpers import FIXTURES, TEST_POOL
+from helpers import FIXTURES, NEEDS_USER_LOG, REAL_LOG, TEST_POOL, USER_LOG
 
 from lscs.advisor.display import AdviceDisplay
 from lscs.advisor.models import Action, Plan
@@ -158,3 +159,63 @@ def test_tick_errors_do_not_stop_watch():
     runner = AdviceRunner(RULES, CARDS.name, display, BrokenScheduler())
     runner.tick()
     assert out == ["  🤖 AI 结果处理出错，本次忽略"]
+
+
+def test_remaining_plan_drops_hero_power_once_used():
+    from factory import power
+
+    plan = Plan(source="llm", actions=(Action(type="hero_power"), Action(type="refresh")))
+    old = make_state(shop=SHOP, hero_power_state=power())
+    still = make_state(shop=SHOP, hero_power_state=power(), seq=2)
+    used = make_state(shop=SHOP, hero_power_state=power(used=True), seq=3)
+    assert remaining_plan(plan, old, still).actions == plan.actions
+    assert remaining_plan(plan, old, used).actions == (Action(type="refresh"),)
+    by_options = make_state(
+        shop=SHOP,
+        hero_power_state=power(option="unusable", reason="REQ_NOT_EXHAUSTED_HERO_POWER"),
+        seq=4,
+    )
+    assert remaining_plan(plan, old, by_options).actions == (Action(type="refresh"),)
+
+
+def test_ai_plan_with_a_needless_target_agrees_with_rules():
+    from factory import power
+
+    from lscs.state.models import Event, EventType
+
+    answer = json.dumps({"actions": [{"type": "hero_power", "entity_id": 99, "reason": "免费"}]})
+    out = []
+    runner = make_runner([answer], out)
+    state = make_state(turn=3, gold=0, shop=SHOP, hero_power_state=power())
+    runner.on_update(state, [Event(type=EventType.RECRUIT_STARTED, turn=3)])
+    runner.tick()
+    assert out[-1] == "  🤖 ✓ AI 同意规则建议（0.0 秒）"
+
+
+@pytest.mark.parametrize(
+    ("path", "line"),
+    [
+        (REAL_LOG, "英雄技能：法力风暴（被动，不能主动使用——不要安排 hero_power）"),
+        pytest.param(
+            USER_LOG,
+            "英雄技能：BG21_HERO_000p（0 金，本回合可用，不需要目标）",
+            marks=NEEDS_USER_LOG,
+        ),
+    ],
+)
+def test_ai_request_at_recruit_start_already_knows_the_hero_power(path, line):
+    from lscs.replay import read_log_lines
+
+    provider = FakeProvider([])
+    scheduler = LLMScheduler(
+        provider,
+        LLMConfig(api_key="sk-x-123456789", max_calls_per_game=40),
+        CARDS,
+        guide="",
+        clock=lambda: 100.0,
+        run_async=lambda job: job(),
+    )
+    runner = AdviceRunner(RULES, CARDS.name, AdviceDisplay(CARDS.name, lambda _: None), scheduler)
+    run(read_log_lines(path), runner)
+    starts = [user for _, user, _ in provider.calls if user.startswith("第 1 回合")]
+    assert starts and any(text.startswith(line) for text in starts[0].splitlines())

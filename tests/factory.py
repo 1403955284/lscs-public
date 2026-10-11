@@ -3,6 +3,7 @@
 from lscs.state.models import (
     GameState,
     HandCard,
+    HeroPower,
     Minion,
     Phase,
     PlayerView,
@@ -83,6 +84,36 @@ def hand_spell(entity_id, card_id):
     )
 
 
+AUTO = object()
+
+
+def power(
+    card_id="BG21_HERO_000p",
+    *,
+    entity_id=5,
+    cost=0,
+    option="usable",
+    used=False,
+    reason=None,
+    targets=(),
+    needs_target=AUTO,
+    passive=AUTO,
+):
+    """我方英雄技能；默认是凯瑞尔的"定罪"：0 费、现在能用、不需要目标。
+    needs_target 默认看有没有 targets；passive 默认 option == "absent"。"""
+    return HeroPower(
+        entity_id=entity_id,
+        card_id=card_id,
+        cost=cost,
+        used_this_turn=used,
+        option=option,
+        unusable_reason=reason,
+        targets=tuple(targets),
+        needs_target=bool(targets) if needs_target is AUTO else needs_target,
+        passive=option == "absent" if passive is AUTO else passive,
+    )
+
+
 def make_state(
     *,
     turn=1,
@@ -103,6 +134,7 @@ def make_state(
     trinkets=(),
     global_dbfs=(),
     main_action=True,
+    hero_power_state=None,
 ):
     return GameState(
         seq=seq,
@@ -112,7 +144,7 @@ def make_state(
         me=PlayerView(
             player_id=1,
             hero_card_id=hero,
-            hero_power_card_id=hero_power,
+            hero_power_card_id=hero_power_state.card_id if hero_power_state else hero_power,
             health=health,
             armor=armor,
             gold=gold,
@@ -122,6 +154,7 @@ def make_state(
             board=tuple(board),
             hand=tuple(hand),
             trinkets=tuple(trinkets),
+            hero_power=hero_power_state,
         ),
         shop=tuple(shop),
         tribes=frozenset(tribes),

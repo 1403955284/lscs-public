@@ -135,3 +135,41 @@ def test_second_game_with_different_player_id_is_parsed(run_log, mini_lines):
     assert [s.final_place for s in ends] == [5, 5]
     recruits = [s for s, e in updates if s.phase == Phase.RECRUIT]
     assert recruits and all(s.me is not None for s in recruits)
+
+
+def _recruit_tracker(mini_lines):
+    """喂到第 1 回合招募开始并 flush，返回 tracker。"""
+    from helpers import TEST_POOL
+
+    from lscs.parsing.feed import PowerFeed
+    from lscs.state.tracker import StateTracker
+
+    feed, tracker = PowerFeed(), StateTracker(TEST_POOL)
+    for line in mini_lines:
+        tracker.apply(feed.feed(line))
+        if "tag=STEP value=MAIN_ACTION" in line:
+            break
+    return tracker
+
+
+def test_waiting_for_options_after_recruit_starts(mini_lines):
+    from lscs.parsing.feed import OptionsStarted
+
+    tracker = _recruit_tracker(mini_lines)
+    assert tracker.awaiting_options
+    tracker.apply([OptionsStarted()])
+    assert not tracker.awaiting_options
+    tracker = _recruit_tracker(mini_lines)
+    tracker.flush()
+    assert not tracker.awaiting_options  # 招募开始已经发出去了，不再等
+
+
+def test_hero_power_change_emits_event(mini_lines):
+    from lscs.parsing.feed import OptionListed, OptionsStarted
+
+    tracker = _recruit_tracker(mini_lines)
+    tracker.flush()
+    tracker.apply([OptionsStarted(), OptionListed("option", 15, None)])
+    state, events = tracker.flush()
+    assert state.me.hero_power.option == "usable"
+    assert [e.type for e in events] == [EventType.HERO_POWER_CHANGED]

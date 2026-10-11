@@ -5,6 +5,8 @@ hslog 负责解析每一行；它把结果组织成数据包树，适合事后�
 按注册顺序收集数据包，再展开成 TagSet 等扁平变化。
 FULL_ENTITY 之类的包在注册之后还会陆续追加 tag= 行，
 因此最后一个包保持"打开"，只输出新增的 tag。
+选项列表（GameState.DebugPrintOptions，"现在能执行哪些操作"）也展开成扁平变化：
+每组开头一个 OptionsStarted，之后每个选项、目标各一个 OptionListed。
 """
 
 from __future__ import annotations
@@ -21,6 +23,8 @@ log = logging.getLogger(__name__)
 
 _GAME_META = re.compile(r"GameState\.DebugPrintGame\(\) - (\w+)=([^,\s]+)\s*$")
 _CREATE_GAME = "GameState.DebugPrintPower() - CREATE_GAME"
+# hslog 不注册选项组本身（只注册组里的每个选项），所以组的开头从原始行认出来
+_OPTIONS_START = re.compile(r"GameState\.DebugPrintOptions\(\) - id=\d+\s*$")
 _ENTITY_PACKETS = (packets.FullEntity, packets.ShowEntity, packets.ChangeEntity)
 
 
@@ -55,7 +59,21 @@ class TagSet:
     value: int
 
 
-PowerChange = GameStarted | GameMeta | PlayerDeclared | CardRevealed | TagSet
+@dataclass(frozen=True)
+class OptionsStarted:
+    """新的一组选项开始：之前的选项全部作废。"""
+
+
+@dataclass(frozen=True)
+class OptionListed:
+    kind: str  # "option"（一个操作）、"subOption"（抉择的一项）或 "target"（可选的目标）
+    entity_id: int | None  # 操作的主实体或目标实体；结束回合之类没有实体
+    error: str | None  # None 表示 error=NONE（现在可以执行）；否则是错误码，如 REQ_ENOUGH_MANA
+
+
+PowerChange = (
+    GameStarted | GameMeta | PlayerDeclared | CardRevealed | TagSet | OptionsStarted | OptionListed
+)
 
 
 def _entity_id(entity: int | PlayerReference | None) -> int | None:
@@ -102,6 +120,8 @@ class PowerFeed:
         m = _GAME_META.search(line)
         if m:
             changes.append(GameMeta(m.group(1), m.group(2)))
+        elif _OPTIONS_START.search(line):
+            changes.append(OptionsStarted())
         return changes
 
     def _drain(self) -> list[PowerChange]:
@@ -157,4 +177,13 @@ class PowerFeed:
                 self.dropped += 1
                 return []
             return [TagSet(entity_id, int(packet.tag), int(packet.value))]
+        if isinstance(packet, packets.Option):
+            entity_id = _entity_id(packet.entity)
+            return [
+                OptionListed(
+                    str(packet.optype),
+                    entity_id if isinstance(entity_id, int) else None,
+                    None if packet.error is None else str(packet.error),
+                )
+            ]
         return []

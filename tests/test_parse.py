@@ -41,11 +41,11 @@ def test_non_finite_confidence_is_ignored():
         ('{"summary": "x"}', "缺少 actions 列表"),
         (
             '{"actions": [{"type": "refresh"}, {"type": "refresh"}, {"type": "refresh"},'
-            ' {"type": "refresh"}, {"type": "refresh"}]}',
-            "动作超过 4 个",
+            ' {"type": "refresh"}, {"type": "refresh"}, {"type": "refresh"}]}',
+            "动作超过 5 个",
         ),
         ('{"actions": ["buy"]}', "第 1 个动作不是对象"),
-        ('{"actions": [{"type": "hero_power"}]}', "第 1 个动作类型未知：hero_power"),
+        ('{"actions": [{"type": "discover"}]}', "第 1 个动作类型未知：discover"),
         ('{"actions": [{"type": "buy"}]}', "第 1 个动作缺少 entity_id"),
         ('{"actions": [{"type": "sell", "entity_id": true}]}', "第 1 个动作缺少 entity_id"),
     ],
@@ -70,4 +70,19 @@ def test_running_totals_are_accepted_and_ignored():
     assert plan.actions == (
         Action(type="buy", entity_id=50, reason="凑对子"),
         Action(type="upgrade"),
+    )
+
+
+def test_hero_power_with_or_without_target():
+    plan = parse_plan(
+        '{"actions": [{"type": "buy", "entity_id": 50}, {"type": "buy", "entity_id": 51},'
+        ' {"type": "hero_power", "reason": "买完再加属性"},'
+        ' {"type": "hero_power", "entity_id": "#451"}, {"type": "freeze"}]}'
+    )
+    assert plan.actions == (
+        Action(type="buy", entity_id=50),
+        Action(type="buy", entity_id=51),
+        Action(type="hero_power", reason="买完再加属性"),
+        Action(type="hero_power", entity_id=451),
+        Action(type="freeze"),
     )

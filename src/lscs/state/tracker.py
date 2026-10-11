@@ -6,7 +6,7 @@ from collections.abc import Iterable
 
 from hearthstone.enums import CardType, GameTag, Step, Zone
 
-from lscs.parsing.feed import GameStarted, PowerChange, TagSet
+from lscs.parsing.feed import GameStarted, OptionsStarted, PowerChange, TagSet
 from lscs.state.build import (
     BOB_HERO_PREFIX,
     HERO_PLACEHOLDER,
@@ -38,6 +38,14 @@ class StateTracker:
     def state(self) -> GameState:
         return self._state
 
+    @property
+    def awaiting_options(self) -> bool:
+        """招募刚开始（还没 flush），本回合的选项还没到。
+
+        选项在 STEP 变成 MAIN_ACTION 之后约 0.1 秒、换了时间戳才写进日志；
+        Pipeline 据此把选项并进招募开始的那次更新，开局的建议就知道英雄技能能不能用。"""
+        return self._awaiting_options
+
     def _reset_game(self) -> None:
         self._state = GameState(seq=self._seq)
         self._tribes = TribeInference(self._pool_config.tribe_count)
@@ -47,6 +55,7 @@ class StateTracker:
         self._combat_opponent: int | None = None
         self._board_captured = True
         self._uncertain = False
+        self._awaiting_options = False
 
     def mark_uncertain(self) -> None:
         self._uncertain = True
@@ -61,12 +70,15 @@ class StateTracker:
             self._store.apply(change)
             if isinstance(change, TagSet):
                 self._after_tag(change)
+            elif isinstance(change, OptionsStarted):
+                self._awaiting_options = False
             self._dirty = True
 
     def flush(self) -> tuple[GameState, list[Event]] | None:
         if not self._dirty:
             return None
         self._dirty = False
+        self._awaiting_options = False
         for item in shop_items(self._store):
             self._tribes.observe(item.races)
         self._seq += 1
@@ -100,6 +112,7 @@ class StateTracker:
                 and raw_turn(store) % 2 == 1
             ):
                 self._pending.append(Event(type=EventType.RECRUIT_STARTED, turn=bg_turn(store)))
+                self._awaiting_options = True
             return
         if change.tag != GameTag.HERO_ENTITY:
             return
@@ -178,6 +191,8 @@ def _diff_events(old: GameState, new: GameState) -> tuple[list[Event], list[Even
             after.append(Event(type=EventType.HAND_CHANGED, turn=new.turn))
         if old_me is None or old_me.gold != new.me.gold:
             after.append(Event(type=EventType.GOLD_CHANGED, turn=new.turn))
+        if old_me is not None and old_me.hero_power != new.me.hero_power:
+            after.append(Event(type=EventType.HERO_POWER_CHANGED, turn=new.turn))
     if new.phase == Phase.GAME_OVER and old.phase != Phase.GAME_OVER:
         after.append(
             Event(type=EventType.GAME_ENDED, turn=new.turn, data={"place": new.final_place})

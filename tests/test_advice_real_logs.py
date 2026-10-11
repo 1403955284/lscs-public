@@ -59,7 +59,7 @@ def test_user_game_turn_2_suggests_upgrading():
     _, checked = replay_with_rules(USER_LOG)
     turn, plan = checked[1]
     assert turn == 2
-    assert [a.type for a in plan.actions] == ["upgrade"]
+    assert [a.type for a in plan.actions] == ["upgrade", "hero_power"]  # 定罪 0 费，每回合都用
 
 
 @pytest.mark.parametrize("path", [REAL_LOG, pytest.param(USER_LOG, marks=NEEDS_USER_LOG)])

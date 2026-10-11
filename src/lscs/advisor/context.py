@@ -6,7 +6,17 @@ from collections import Counter
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
-from lscs.state.models import GameState, HandCard, Minion, Phase, ShopItem
+from lscs.state.models import (
+    ALREADY_USED,
+    NO_TARGET,
+    NOT_ENOUGH_GOLD,
+    GameState,
+    HandCard,
+    HeroPower,
+    Minion,
+    Phase,
+    ShopItem,
+)
 from lscs.state.pool import GOLDEN_SUFFIX, base_card_id
 from lscs.state.tribes import IGNORED_RACES
 
@@ -29,6 +39,7 @@ class TurnContext:
     hand: tuple[HandCard, ...]
     copies: Mapping[str, int]  # 普通卡 ID -> 场面 + 手牌里的非金色张数
     main_tribe: str | None
+    hero_power: HeroPower | None = None
 
     @property
     def board_minions(self) -> int:
@@ -49,6 +60,28 @@ class TurnContext:
         if item.card_type == SPELL and item.cost is not None:
             return item.cost
         return self.buy_cost
+
+
+def hero_power_used(hp: HeroPower) -> bool:
+    """本回合已经用过：EXHAUSTED，或者选项说 REQ_NOT_EXHAUSTED_HERO_POWER。"""
+    return hp.used_this_turn or hp.unusable_reason == ALREADY_USED
+
+
+def hero_power_blocker(hp: HeroPower | None) -> str | None:
+    """英雄技能现在为什么不能用；能用（或者只差铸币）返回 None。铸币由调用方按模拟的铸币判断。"""
+    if hp is None:
+        return "没有英雄技能"
+    if hero_power_used(hp):
+        return "本回合已经用过英雄技能"
+    if hp.option == "absent":
+        return "英雄技能是被动的，不能主动使用" if hp.passive else "英雄技能现在不能用"
+    if hp.option == "unknown":
+        return "还不知道英雄技能现在能不能用"
+    if hp.option == "unusable" and hp.unusable_reason != NOT_ENOUGH_GOLD:
+        if hp.unusable_reason == NO_TARGET:
+            return "英雄技能现在没有可选的目标"
+        return f"英雄技能现在不能用（{hp.unusable_reason}）"
+    return None
 
 
 def is_golden(card_id: str, golden: bool) -> bool:
@@ -91,4 +124,5 @@ def build_context(state: GameState, buy_cost: int) -> TurnContext | None:
         hand=me.hand,
         copies=dict(copies),
         main_tribe=_main_tribe(minions, state.tribes),
+        hero_power=me.hero_power,
     )

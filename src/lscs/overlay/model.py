@@ -19,6 +19,7 @@ from lscs.advisor.display import format_plan
 from lscs.advisor.models import Advice, Plan
 from lscs.advisor.runner import remaining_plan
 from lscs.llm.notices import AUTH_DISABLED, BUDGET_EXHAUSTED
+from lscs.llm.parse import MAX_ACTIONS  # 每个方案最多显示几步：和 AI 回答的上限一致
 from lscs.overlay.geometry import STEP_SEP
 from lscs.state.models import Event, EventType, GameState, Phase
 
@@ -35,7 +36,6 @@ DONE = "已按建议操作完"
 NOTHING_TO_DO = "无需操作"
 REFRESHED = "商店已刷新"
 AI_REFRESHED = "商店已刷新，等待新的 AI 建议"
-MAX_ACTIONS = 4  # 每个方案最多显示几步
 MAX_REASON = 40  # "思路：……"整行最多几个字，超出加"…"
 # 调度器关闭 AI 的提示 → 之后回合常驻的一行（以及是否在新的一局清除）
 AI_OFF = {
