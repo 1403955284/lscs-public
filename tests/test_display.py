@@ -392,3 +392,157 @@ def test_display_group_forwards_show_choice():
     state, advice = choice_state(), choice_advice()
     DisplayGroup(first, second).show_choice(state, advice)
     assert first.calls == second.calls == [("show_choice", (state, advice))]
+
+
+def pool_note(card_id, card_name, have, left, shop=0):
+    from lscs.advisor.pool import PoolNote
+
+    return PoolNote(card_id, card_name, have, left, shop)
+
+
+PAIR_NOTES = (
+    pool_note("BG36_099", "蚀脑怪", 2, 11),
+    pool_note("BG36_116", "孢林卵怪", 1, 14, shop=1),
+    pool_note("BG36_113", "飘荡祭品", 0, 11, shop=1),  # 只是要找的牌：不写进对子行
+)
+
+
+def test_show_rules_lists_pairs_with_pool_counts():
+    out = []
+    display = AdviceDisplay(name, out.append)
+    plan = Plan(source="rules", actions=(Action(type="buy", entity_id=20, reason="好"),))
+    display.show_rules(STATE, Advice(state_seq=1, turn=3, plan=plan, pool_notes=PAIR_NOTES))
+    assert out == [
+        "  📋 规则：① 买 海盗 3/2（好）",
+        "          对子：蚀脑怪 ×2（池里还剩约 11 张）；孢林卵怪 ×1 商店有（还剩约 14 张）",
+    ]
+    # 方案不变、对子变了（买了一张）：再打印一次
+    fewer = (pool_note("BG36_099", "蚀脑怪", 3, 10),)
+    display.show_rules(STATE, Advice(state_seq=2, turn=3, plan=plan, pool_notes=fewer))
+    display.show_rules(STATE, Advice(state_seq=3, turn=3, plan=plan, pool_notes=fewer))
+    assert out[2:] == [
+        "  📋 规则：① 买 海盗 3/2（好）",
+        "          对子：蚀脑怪 ×3（池里还剩约 10 张）",
+    ]
+
+
+def test_show_rules_without_pairs_has_no_pair_line():
+    out = []
+    plan = Plan(source="rules", actions=(Action(type="refresh"),))
+    notes = (PAIR_NOTES[2],)
+    AdviceDisplay(name, out.append).show_rules(
+        STATE, Advice(state_seq=1, turn=3, plan=plan, pool_notes=notes)
+    )
+    assert out == ["  📋 规则：① 刷新"]
+
+
+def test_look_for_shows_pool_counts():
+    out = []
+    plan = Plan(
+        source="llm",
+        actions=(Action(type="refresh"),),
+        direction="畸变",
+        look_for=("飘荡祭品", "深渊使者", "蚀脑怪(金)"),
+    )
+    advice = Advice(state_seq=1, turn=3, plan=plan, elapsed=1.0, pool_notes=PAIR_NOTES)
+    AdviceDisplay(name, out.append).show_ai(STATE, advice, False)
+    assert out[-1] == (
+        "          方向：畸变   要找：飘荡祭品（还剩约 11 张）、深渊使者、蚀脑怪(金)（还剩约 11 张）"
+    )
+    out.clear()
+    AdviceDisplay(name, out.append).show_ai(STATE, advice, True)  # 同意规则时也写
+    assert out[-1].endswith("要找：飘荡祭品（还剩约 11 张）、深渊使者、蚀脑怪(金)（还剩约 11 张）")
+
+
+OPP_NAMES = {"H2": "洛卡拉", "H3": "厄祖玛特", "H4": "布莱恩", "H5": "詹迪斯", "H6": "范克里夫"}
+OPP_NAMES.update({"P": "夺金健将", "W": "飘荡祭品", "E": "电音合成师", "B": "蚀脑怪"})
+
+
+def opp_name(card_id):
+    return OPP_NAMES.get(card_id, card_id)
+
+
+def opponents_state(next_id=5, turn=10):
+    from lscs.state.models import OpponentView
+
+    def opp(player_id, health, armor, place, tier, board=(), seen=None):
+        return OpponentView(
+            player_id=player_id,
+            hero_card_id=f"H{player_id}",
+            health=health,
+            armor=armor,
+            place=place,
+            tavern_tier=tier,
+            last_board=tuple(board),
+            last_seen_turn=seen,
+        )
+
+    aberrations = [minion(i, "W", 10, 10, tier=3, races=["ABERRATION"]) for i in (1, 2)]
+    ghost = [minion(5, "P", 7, 7, golden=True, races=["PIRATE"]), minion(6, "E", 3, 5, tier=2)]
+    opponents = {
+        2: opp(2, 30, 9, 1, 5, aberrations, 9),
+        3: opp(3, 30, 3, 3, 5, [minion(3, "B", 90, 90, tier=2, races=["ABERRATION"])], 8),
+        4: opp(4, 28, 0, None, None),
+        5: opp(5, 0, 0, 8, 2, ghost, 4),
+        6: opp(6, -9, 0, 7, 5, [minion(7, "B", 3, 4)], 5),
+    }
+    return make_state(turn=turn, tribes={"ABERRATION", "PIRATE"}).model_copy(
+        update={"opponents": opponents, "next_opponent_id": next_id}
+    )
+
+
+def test_show_opponents_block():
+    from lscs.advisor.opponents import summarize_opponents
+
+    out = []
+    state = opponents_state()
+    AdviceDisplay(opp_name, out.append).show_opponents(state, summarize_opponents(state))
+    assert out == [
+        "  👥 对手（主打：畸变 2 家、未知 1）",
+        "     第 1 名 洛卡拉 30+9 · 5 本 · 畸变×2 身材 40 · 飘荡祭品、飘荡祭品 · 第 9 回合见 · 威胁 48",
+        "   ★ 第 3 名 厄祖玛特 30+3 · 5 本 · 畸变×1 身材 180 · 蚀脑怪 · 第 8 回合见 · 威胁 93",
+        "     第 ? 名 布莱恩 28+0 · ? 本 · 还没见过阵容 · 威胁 14",
+        # 下一个对手是已淘汰的玩家：打它的残影，阵容全列出来
+        "   ▶ 第 8 名 詹迪斯 已淘汰（残影）· 第 4 回合见到的阵容：夺金健将(金)、电音合成师",
+        "     已淘汰：范克里夫",  # 其他淘汰的合成一行
+    ]
+
+
+def test_show_opponents_marks_next_and_strongest_together():
+    from lscs.advisor.opponents import summarize_opponents
+
+    out = []
+    state = opponents_state(next_id=3)
+    AdviceDisplay(opp_name, out.append).show_opponents(state, summarize_opponents(state))
+    assert out[2].startswith("  ▶★ 第 3 名 厄祖玛特")
+    assert out[4:] == ["     已淘汰：范克里夫、詹迪斯"]  # 按名次
+
+
+def test_display_group_forwards_show_opponents():
+    from lscs.advisor.opponents import summarize_opponents
+
+    first, second = Recorder(), Recorder()
+    state = opponents_state()
+    view = summarize_opponents(state)
+    DisplayGroup(first, second).show_opponents(state, view)
+    assert first.calls == second.calls == [("show_opponents", (state, view))]
+
+
+def test_empty_captured_board_is_written_as_such():
+    from lscs.advisor.opponents import summarize_opponents
+    from lscs.state.models import OpponentView
+
+    empty = OpponentView(
+        player_id=7,
+        hero_card_id="H7",
+        health=20,
+        armor=0,
+        place=2,
+        tavern_tier=3,
+        last_board=(),
+        last_seen_turn=5,
+    )
+    state = opponents_state().model_copy(update={"opponents": {7: empty}, "next_opponent_id": 7})
+    out = []
+    AdviceDisplay(opp_name, out.append).show_opponents(state, summarize_opponents(state))
+    assert out[1] == "  ▶★ 第 2 名 H7 20+0 · 3 本 · 第 5 回合见到空场 · 威胁 35"

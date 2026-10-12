@@ -13,8 +13,35 @@ from lscs.state.models import Event, EventType, Phase
 
 pytestmark = pytest.mark.gui
 
-NAMES = {"B": "海盗", "C": "蚀脑怪"}
+NAMES = {"B": "海盗", "C": "蚀脑怪", "H2": "洛卡拉", "H3": "厄祖玛特", "H5": "詹迪斯"}
 STATE = make_state(turn=3, gold=5, tier=2, upgrade_cost=6, shop=[shop_minion(20, "B", 3, 2)])
+
+
+def rivals():
+    from factory import minion
+
+    from lscs.state.models import OpponentView
+
+    def opp(player_id, health, place, board=(), seen=None):
+        return OpponentView(
+            player_id=player_id,
+            hero_card_id=f"H{player_id}",
+            health=health,
+            armor=0,
+            place=place,
+            tavern_tier=4,
+            last_board=tuple(board),
+            last_seen_turn=seen,
+        )
+
+    big = [minion(30, "C", 20, 20, races=["ABERRATION"])]
+    return {2: opp(2, 30, 1), 3: opp(3, 25, 2, big, 2), 5: opp(5, 0, 8, big, 1)}
+
+
+# 战斗中：面板列出所有对手（第 3 回合打的是已淘汰的詹迪斯的残影）
+COMBAT = make_state(turn=3, phase=Phase.COMBAT, seq=3).model_copy(
+    update={"opponents": rivals(), "next_opponent_id": 5}
+)
 
 
 def test_overlay_window_renders_states_and_closes():
@@ -49,7 +76,11 @@ def test_overlay_window_renders_states_and_closes():
         ),
         lambda: model.show_ai(STATE, Advice(state_seq=1, turn=3, plan=deep, lane="deep"), False),
         lambda: model.on_update(STATE.model_copy(update={"uncertain": True, "seq": 2}), []),
-        lambda: model.on_update(make_state(turn=3, phase=Phase.COMBAT, seq=3), []),
+        lambda: model.on_update(
+            STATE.model_copy(update={"seq": 3, "opponents": rivals(), "next_opponent_id": 3}), []
+        ),
+        lambda: model.on_update(make_state(turn=3, phase=Phase.COMBAT, seq=4), []),
+        lambda: model.on_update(COMBAT.model_copy(update={"seq": 5}), []),
         lambda: model.show_message("监听已停止，请查看终端"),
     ]
     snapshots = []
@@ -77,6 +108,11 @@ def test_overlay_window_renders_states_and_closes():
     assert any(t.startswith("分析：畸变核心") for t in texts)
     assert "⚠ 状态可能不准" in texts
     assert "第 3 回合 · 战斗中" in texts
+    # 招募时最下面的"对手"区：下一个对手就是最强威胁，合成一行
+    assert "对手" in texts and any(t.startswith("▶★ 厄祖玛特 25+0") for t in texts)
+    assert "第 3 回合 · 战斗中 · 对手 詹迪斯" in texts
+    assert any(t.startswith("▶ 第8名 詹迪斯 已淘汰（残影）") for t in texts)
+    assert "第8名 詹迪斯 已淘汰" not in texts
     assert snapshots[-1][0] == ["监听已停止，请查看终端"]
     full = next(size for shown, size in snapshots if "⚠ 状态可能不准" in shown)
     compact = snapshots[-1][1]

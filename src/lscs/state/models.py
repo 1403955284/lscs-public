@@ -133,6 +133,11 @@ class OpponentView(_Frozen):
     last_board: tuple[Minion, ...] = ()
     last_seen_turn: int | None = None
 
+    @property
+    def alive(self) -> bool:
+        """还在场上；淘汰后 health 为 0 或负数（护甲为 0）。"""
+        return self.health > 0
+
 
 class HeroOption(_Frozen):
     """选英雄阶段的一个备选英雄（我方手牌区里 CARDTYPE=HERO 的实体）。"""
@@ -200,6 +205,8 @@ class GameState(_Frozen):
     next_opponent_id: int | None = None
     tribes: frozenset[str] = frozenset()
     tribes_confidence: TribesConfidence = TribesConfidence.INFERRING
+    # 不查卡牌库的卡池粗估（衍生物也在里面、旧式金色卡没映射）；显示和 AI 用的是
+    # advisor.pool.PoolEstimator 查过卡牌库的估计
     pool_estimate: dict[str, int] = {}
     uncertain: bool = False
     final_place: int | None = None

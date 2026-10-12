@@ -3,10 +3,18 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Protocol
 
 from lscs.advisor.models import Action, Advice, ChoiceAdvice, Expired, HeroAdvice, Lane, Plan
+from lscs.advisor.names import minion_label, tribe_zh
+from lscs.advisor.opponents import (
+    OpponentOverview,
+    OpponentSummary,
+    contested_parts,
+    eliminated_names,
+)
+from lscs.advisor.pool import PoolNote, note_for
 from lscs.state.models import GameState
 
 log = logging.getLogger(__name__)
@@ -92,8 +100,34 @@ def one_line(text: str) -> str:
     return " ".join(text.split())
 
 
-def thought_lines(plan: Plan, summary: bool = True, extra: tuple[str, ...] = ()) -> list[str]:
-    """AI 方案下面的"分析"一行（没有分析时用"思路"），以及"方向 / 要找"一行。"""
+def pairs_line(notes: Sequence[PoolNote]) -> str | None:
+    """规则块里的"对子"一行：对子写"×N"，差一张成对子的写"×1 商店有"；没有时为 None。"""
+    parts = []
+    for note in notes:
+        if note.have >= 2:
+            parts.append(f"{note.name} ×{note.have}（池里还剩约 {note.left} 张）")
+        elif note.pair:
+            parts.append(f"{note.name} ×1 商店有（还剩约 {note.left} 张）")
+    return "对子：" + "；".join(parts) if parts else None
+
+
+def look_for_text(look_for: Sequence[str], notes: Sequence[PoolNote]) -> str:
+    """要找的牌名：查得到张数的后面加"（还剩约 N 张）"。"""
+    parts = []
+    for text in look_for:
+        note = note_for(text, notes)
+        parts.append(f"{text}（还剩约 {note.left} 张）" if note is not None else text)
+    return "、".join(parts)
+
+
+def thought_lines(
+    plan: Plan,
+    summary: bool = True,
+    extra: tuple[str, ...] = (),
+    notes: Sequence[PoolNote] = (),
+) -> list[str]:
+    """AI 方案下面的"分析"一行（没有分析时用"思路"），以及"方向 / 要找"一行。
+    notes：要找的牌在池里还剩约几张。"""
     lines = []
     if plan.analysis:
         lines.append(f"分析：{one_line(plan.analysis)}")
@@ -103,7 +137,7 @@ def thought_lines(plan: Plan, summary: bool = True, extra: tuple[str, ...] = ())
     if plan.direction:
         tail.append(f"方向：{plan.direction}")
     if plan.look_for:
-        tail.append("要找：" + "、".join(plan.look_for))
+        tail.append("要找：" + look_for_text(plan.look_for, notes))
     tail += extra
     if tail:
         lines.append("   ".join(tail))
@@ -137,9 +171,62 @@ def choice_pick_text(state: GameState, pick: int, name: Namer) -> str:
     return f"左数第 {option.index + 1} 个 {name(option.card_id)}"
 
 
+def opponent_marks(summary: OpponentSummary) -> str:
+    """▶ 下一个对手、★ 最强威胁；两个都是时 ▶★，都不是时为空。"""
+    return ("▶" if summary.next else "") + ("★" if summary.strongest else "")
+
+
+def _place(summary: OpponentSummary) -> str:
+    return f"第 {summary.place if summary.place is not None else '?'} 名"
+
+
+def _hero(summary: OpponentSummary, name: Namer) -> str:
+    return name(summary.hero_card_id) if summary.hero_card_id else "未知"
+
+
+def opponent_line(summary: OpponentSummary, state: GameState, name: Namer) -> str:
+    """终端 👥 块里一个对手的一行（不带前面的标记）。"""
+    head = f"{_place(summary)} {_hero(summary, name)}"
+    if not summary.alive:
+        if not summary.next:
+            return f"{head} 已淘汰"
+        opp = state.opponents.get(summary.player_id)
+        board = opp.last_board if opp is not None else ()
+        if summary.seen_turn is None:
+            return f"{head} 已淘汰（残影）· 还没见过阵容"
+        if not board:
+            return f"{head} 已淘汰（残影）· 第 {summary.seen_turn} 回合见到空场"
+        cards = "、".join(minion_label(m, name) for m in board)
+        return f"{head} 已淘汰（残影）· 第 {summary.seen_turn} 回合见到的阵容：{cards}"
+    tier = "?" if summary.tavern_tier is None else summary.tavern_tier
+    parts = [f"{head} {summary.health}+{summary.armor}", f"{tier} 本"]
+    if summary.seen_turn is None:
+        parts.append("还没见过阵容")
+    elif summary.empty_board:
+        parts.append(f"第 {summary.seen_turn} 回合见到空场")
+    else:
+        stats = f"身材 {summary.total_stats}"
+        if summary.main_tribe is not None:
+            stats = f"{tribe_zh(summary.main_tribe)}×{summary.tribe_count} {stats}"
+        parts.append(stats)
+        if summary.key_cards:
+            parts.append("、".join(minion_label(m, name) for m in summary.key_cards))
+        parts.append(f"第 {summary.seen_turn} 回合见")
+    parts.append(f"威胁 {summary.threat}")
+    return " · ".join(parts)
+
+
+def opponents_header(overview: OpponentOverview) -> str:
+    parts = contested_parts(overview)
+    if overview.unknown:
+        parts.append(f"未知 {overview.unknown}")
+    return f"👥 对手（主打：{'、'.join(parts)}）" if parts else "👥 对手"
+
+
 class AdviceSink(Protocol):
     """AdviceRunner 输出建议的对象：终端（AdviceDisplay）、悬浮面板或 DisplayGroup。"""
 
+    def show_opponents(self, state: GameState, overview: OpponentOverview) -> None: ...
     def show_rules(self, state: GameState, advice: Advice) -> None: ...
     def rules_error(self, hero: bool = False) -> None: ...
     def ai_pending(self, lane: Lane = "fast") -> None: ...
@@ -163,14 +250,31 @@ class AdviceDisplay:
         for line in lines[1:]:
             self._out(f"{INDENT}{line}")
 
+    def show_opponents(self, state: GameState, overview: OpponentOverview) -> None:
+        """每回合开始时的对手一览：活着的对手每人一行，▶ 下一个对手、★ 最强威胁；下一个对手
+        是已淘汰的玩家（残影）时它单独一行，其他淘汰的合成一行"已淘汰：……"。"""
+        self._out(f"  {opponents_header(overview)}")
+        for summary in overview.opponents:
+            if not summary.alive and not summary.next:
+                continue
+            marks = opponent_marks(summary)
+            prefix = f"  {marks} " if len(marks) == 2 else f"   {marks or ' '} "
+            self._out(prefix + opponent_line(summary, state, self._name))
+        gone = eliminated_names(overview, self._name)
+        if gone:
+            self._out("     已淘汰：" + "、".join(gone))
+
     def show_rules(self, state: GameState, advice: Advice) -> None:
-        key = (advice.turn, advice.plan.signature())
+        key = (advice.turn, advice.plan.signature(), advice.pool_notes)
         if key == self._last_rules:
             return
         self._last_rules = key
         lines = format_plan(advice.plan, state, self._name)
         if advice.plan.direction:
             lines[-1] += f"   方向：{advice.plan.direction}"
+        pairs = pairs_line(advice.pool_notes)
+        if pairs is not None:
+            lines.append(pairs)
         if state.uncertain:
             lines.append("⚠ 状态可能不准")
         self._block("📋 规则：", lines)
@@ -196,9 +300,11 @@ class AdviceDisplay:
     def show_ai(self, state: GameState, advice: Advice, agrees: bool) -> None:
         plan, deep = advice.plan, advice.lane == "deep"
         icon = ICONS[advice.lane]
+        notes = advice.pool_notes
         if advice.expired is not None:
             # 冒号而不是括号：原因里本身带括号，不嵌套
-            self._block(icon, [f"深度分析：{EXPIRED_LABELS[advice.expired]}", *thought_lines(plan)])
+            label = f"深度分析：{EXPIRED_LABELS[advice.expired]}"
+            self._block(icon, [label, *thought_lines(plan, notes=notes)])
             return
         if advice.elapsed is None:
             seconds = "?"
@@ -206,11 +312,12 @@ class AdviceDisplay:
             seconds = f"{advice.elapsed:.0f} 秒" if deep else f"{advice.elapsed:.1f} 秒"
         if agrees:
             who = "深度分析" if deep else "AI "
-            self._block(icon, [f"✓ {who}同意规则建议（{seconds}）", *thought_lines(plan)])
+            agree = f"✓ {who}同意规则建议（{seconds}）"
+            self._block(icon, [agree, *thought_lines(plan, notes=notes)])
             return
         stale = (f"（{advice.stale_note}）",) if advice.stale_note else ()
         lines = format_plan(plan, state, self._name)
-        lines += thought_lines(plan, summary=bool(plan.actions), extra=stale)
+        lines += thought_lines(plan, summary=bool(plan.actions), extra=stale, notes=notes)
         label = f"深度分析（{seconds}）：" if deep else f"AI（{seconds}）："
         self._block(icon + label, lines)
 
@@ -256,6 +363,9 @@ class DisplayGroup:
                 getattr(display, method)(*args)
             except Exception:
                 log.warning("显示建议时出错（%s）", method, exc_info=True)
+
+    def show_opponents(self, state: GameState, overview: OpponentOverview) -> None:
+        self._each("show_opponents", state, overview)
 
     def show_rules(self, state: GameState, advice: Advice) -> None:
         self._each("show_rules", state, advice)

@@ -7,10 +7,12 @@ import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-from lscs.advisor.context import build_context, hero_power_used
+from lscs.advisor.context import MINION, TurnContext, build_context, hero_power_used
 from lscs.advisor.display import AdviceSink
 from lscs.advisor.hero_rules import rule_hero_pick
 from lscs.advisor.models import Action, Advice, HeroAdvice, Lane, Plan
+from lscs.advisor.opponents import summarize_opponents
+from lscs.advisor.pool import PoolEstimator, PoolNote, PoolView, pool_notes
 from lscs.advisor.rules import rule_plans
 from lscs.advisor.rules_config import RulesConfig
 from lscs.advisor.validate import validate_plan
@@ -73,14 +75,19 @@ class AdviceRunner:
         display: AdviceSink,
         scheduler: LLMScheduler | None = None,
         clock: Callable[[], float] = time.monotonic,
+        pool: PoolEstimator | None = None,
     ) -> None:
+        """pool：查过卡牌库的卡池估计；没有卡牌数据时为 None，"还剩约 N 张"都不显示。"""
         self._rules = rules
         self._name = name
         self._display = display
         self._scheduler = scheduler
         self._clock = clock
+        self._pool = pool
+        self._pool_failed = False  # 卡池估计出过错（完整堆栈只记一次）
         self._state: GameState | None = None
         self._rules_error_turn: int | None = None  # 这个回合已经提示过规则出错
+        self._opponents_turn: int | None = None  # 这个回合已经列过对手一览
         self.last_rules: Advice | None = None
         self.last_hero: HeroAdvice | None = None  # 最近一次选英雄的规则建议
 
@@ -89,6 +96,7 @@ class AdviceRunner:
         types = {e.type for e in events}
         if EventType.GAME_STARTED in types:
             self._rules_error_turn = None
+            self._opponents_turn = None
             self.last_hero = None
             if self._scheduler is not None:
                 self._scheduler.reset_game()
@@ -111,9 +119,59 @@ class AdviceRunner:
         if s is not None and EventType.GAME_ENDED in types and s.calls > 0:
             self._display.ai_summary(s.calls, s.input_tokens, s.output_tokens)
 
-    def _advise(self, state: GameState, events: list[Event]) -> None:
+    def _pool_error(self, what: str) -> None:
+        """在 except 里调用：卡池估计出错不影响建议，只是不显示张数；完整堆栈只记一次。"""
+        if self._pool_failed:
+            log.debug("%s时又出错", what, exc_info=True)
+            return
+        self._pool_failed = True
+        log.warning("%s时出错", what, exc_info=True)
+
+    def _pool_view(self, state: GameState) -> PoolView | None:
+        if self._pool is None:
+            return None
         try:
-            ctx = build_context(state, self._rules.buy_cost_for(state.me.hero_card_id))
+            return self._pool.view(state)
+        except Exception:
+            self._pool_error("估计卡池")
+            return None
+
+    def _context(self, state: GameState) -> TurnContext | None:
+        buy_cost = self._rules.buy_cost_for(state.me.hero_card_id)
+        return build_context(state, buy_cost, pool=self._pool_view(state))
+
+    def _notes(
+        self, state: GameState, ctx: TurnContext | None, look_for: tuple[str, ...] = ()
+    ) -> tuple[PoolNote, ...]:
+        """对子和要找的牌的张数（Advice.pool_notes）；没有卡池估计时为空。"""
+        if ctx is None or ctx.pool is None:
+            return ()
+        shop = [s.card_id for s in state.shop if s.card_type == MINION]
+        try:
+            return pool_notes(ctx.pool, ctx, shop, look_for, self._name)
+        except Exception:
+            self._pool_error("计算对子和要找的牌的张数")
+            return ()
+
+    def _show_opponents(self, state: GameState) -> None:
+        """每回合第一次给建议之前列一次对手一览（招募开始，或者重连后第一次看到这个回合）。
+        出错只记日志，建议照常。"""
+        if self._opponents_turn == state.turn:
+            return
+        self._opponents_turn = state.turn
+        if not state.opponents:
+            return
+        try:
+            overview = summarize_opponents(state)
+        except Exception:
+            log.warning("整理对手一览时出错", exc_info=True)
+            return
+        self._display.show_opponents(state, overview)
+
+    def _advise(self, state: GameState, events: list[Event]) -> None:
+        self._show_opponents(state)
+        try:
+            ctx = self._context(state)
         except Exception:
             self._rules_error(state.turn)
             return
@@ -132,6 +190,7 @@ class AdviceRunner:
                     turn=state.turn,
                     plan=plans[0],
                     alternatives=tuple(plans[1:]),
+                    pool_notes=self._notes(state, ctx),
                 )
                 self.last_rules = advice
                 self._display.show_rules(state, advice)
@@ -222,7 +281,7 @@ class AdviceRunner:
                     return  # 建议的步骤你都已经做了
                 expired = "changed"
             else:
-                ctx = build_context(current, self._rules.buy_cost_for(current.me.hero_card_id))
+                ctx = self._context(current)
                 if ctx is None or validate_plan(plan.actions, ctx) is not None:
                     if lane == "fast":
                         self._display.ai_text("AI 建议已过期（局面变化太大）")
@@ -238,6 +297,12 @@ class AdviceRunner:
             and self.last_rules.turn == current.turn
             and self.last_rules.plan.signature() == plan.signature()
         )
+        # 张数按现在的局面算（结果回来时可能已经买了一张）；深度分析在战斗中才回来时没有招募的
+        # 局面，退回用发出请求时的局面
+        basis, ctx = current, self._context(current)
+        if ctx is None:
+            basis, ctx = request.state, self._context(request.state)
+        notes = self._notes(basis, ctx, plan.look_for)
         advice = Advice(
             state_seq=request.state.seq,
             turn=request.state.turn,
@@ -246,6 +311,7 @@ class AdviceRunner:
             elapsed=result.elapsed,
             lane=lane,
             expired=expired,
+            pool_notes=notes,
         )
         self._display.show_ai(current, advice, agrees)
 

@@ -130,6 +130,16 @@ def _namer(args: argparse.Namespace) -> Namer:
     return cards.name if cards is not None else _identity
 
 
+def _pool_estimator(cards, args: argparse.Namespace):
+    """有卡牌数据时用查过卡牌库的卡池估计（对子、要找的牌还剩约几张）；没有时为 None，
+    "还剩约 N 张"都不显示。"""
+    if cards is None:
+        return None
+    from lscs.advisor.pool import PoolEstimator
+
+    return PoolEstimator(cards, load_pool_config(Path(args.pool)).copies)
+
+
 def _timeline(name: Namer, verbose: bool) -> UpdateHandler:
     def on_update(state: GameState, events: list[Event]) -> None:
         for line in describe(state, events, name, verbose=verbose):
@@ -198,6 +208,8 @@ def _build_scheduler(cards, sync: bool):
         print("选项建议：关闭", flush=True)
     if not llm.repair_invalid:
         print("不合法方案自动改正：关闭", flush=True)
+    if not llm.all_opponents:
+        print("对手摘要：只发下一个对手", flush=True)
     heroes = load_guide(DEFAULT_HEROES) if DEFAULT_HEROES.exists() else None
     extra = {"debounce": 0.0, "hero_debounce": 0.0, "run_async": lambda job: job()} if sync else {}
     return LLMScheduler(
@@ -231,7 +243,12 @@ def _displays(
     if overlay is None:
         return None, terminal
     ai = scheduler is not None
-    model = OverlayModel(name, ai_enabled=ai, choice_ai=ai and scheduler.choice_advice)
+    model = OverlayModel(
+        name,
+        ai_enabled=ai,
+        choice_ai=ai and scheduler.choice_advice,
+        opponents=overlay.overlay.opponents,
+    )
     return model, DisplayGroup(terminal, model)
 
 
@@ -280,7 +297,7 @@ def _cmd_replay(args: argparse.Namespace) -> int:
                 print(exc)
                 return 1
         model, display = _displays(name, overlay, scheduler)
-        runner = AdviceRunner(rules, name, display, scheduler)
+        runner = AdviceRunner(rules, name, display, scheduler, pool=_pool_estimator(cards, args))
         if model is not None:
             handlers.append(model.on_update)  # 先更新面板的回合，再出建议
         handlers.append(runner.on_update)
@@ -377,7 +394,7 @@ def _cmd_watch(args: argparse.Namespace) -> int:
             print(exc)
             return 1
     model, display = _displays(name, overlay, scheduler)
-    runner = AdviceRunner(rules, name, display, scheduler)
+    runner = AdviceRunner(rules, name, display, scheduler, pool=_pool_estimator(cards, args))
     print(f"正在监听 {install / 'Logs'}，按 Ctrl+C 退出。")
     handlers = [_timeline(name, args.verbose)]
     if model is not None:

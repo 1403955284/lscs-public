@@ -12,6 +12,10 @@
 "下一步"（选项建议设计文档第 7 节）：面板最上面只写现在该做的一步，和面板上显示的方案一致
 （选项 → 选英雄 → 深度 → 快速 → 规则），带上画面高亮要框的位置（Target）。游戏弹出"选一个"
 时多一个"选择"区，★ 标在 AI 推荐的前面；那组选完就消失。
+
+对手一览（对手一览与卡池估计设计文档第 7 节）：招募时最下面的"对手"区两行（▶ 下一个对手、
+★ 最强威胁），面板超高时最先去掉；战斗中整个面板列出所有对手。规则区多一行"对子"，
+要找的牌后面写池里还剩约几张。
 """
 
 from __future__ import annotations
@@ -24,7 +28,9 @@ from typing import Literal
 
 from lscs.advisor.display import format_plan, hero_comment_lines, hero_name
 from lscs.advisor.models import Action, Advice, ChoiceAdvice, HeroAdvice, Lane, Plan
-from lscs.advisor.names import armor_zh, choice_title
+from lscs.advisor.names import armor_zh, choice_title, tribe_zh
+from lscs.advisor.opponents import OpponentOverview, OpponentSummary, summarize_opponents
+from lscs.advisor.pool import PoolNote, note_for
 from lscs.advisor.runner import remaining_plan
 from lscs.llm.notices import AUTH_DISABLED, BUDGET_EXHAUSTED
 from lscs.llm.parse import MAX_ACTIONS  # 每个方案最多显示几步：和 AI 回答的上限一致
@@ -36,9 +42,10 @@ log = logging.getLogger(__name__)
 
 Namer = Callable[[str], str]
 Tone = Literal["text", "muted"]
-# 面板太高时：先去掉 direction，再去掉 look_for、note 和 comment（选英雄的点评）、
-# 把 reason 截成一行（见 condense）
-Role = Literal["main", "direction", "look_for", "reason", "note", "comment"]
+# 面板太高时：先去掉 threat（最强威胁那一行）和 direction，再去掉 opponent（其他对手）、
+# look_for（要找、对子）、note 和 comment（选英雄的点评、已淘汰的对手），把 reason 截成一行
+# （见 condense）
+Role = Literal["main", "direction", "look_for", "reason", "note", "comment", "opponent", "threat"]
 Row = Literal["shop", "board", "choice", "hero"]  # 画面上的一排牌
 Button = Literal["upgrade", "refresh", "freeze", "hero_power"]  # 画面上的按钮
 
@@ -49,7 +56,8 @@ NOTHING_TO_DO = "无需操作"
 REFRESHED = "商店已刷新"
 AI_REFRESHED = "商店已刷新，等待新的 AI 建议"
 MAX_REASON = 40  # "目标：……"（没有目标时"分析：……"）整行最多几个字，超出加"…"
-MAX_LOOK_FOR = 24  # "要找：……"整行最多几个字，超出加"…"
+# "要找：……"整行最多几个字，按整张牌截断、后面加"…"（界面按像素折行，这里只是防止 AI 列十张牌）
+MAX_LOOK_FOR = 40
 HERO_TITLE = "选英雄 · 护甲越少越强"
 PENDING = "分析中…"
 REPAIRING = "改正中…"  # AI 的回答不合法，正在让它改正（还在等，和"分析中…"一样）
@@ -112,6 +120,7 @@ class OverlayView:
     version: int = 0
     next_step: NextStep | None = None  # compact 时为 None
     choice: tuple[Line, ...] = ()  # "选择"区：游戏正弹着"选一个"时才有
+    opponents: tuple[Line, ...] = ()  # "对手"区：招募时两行，战斗中列出所有对手
 
 
 def slots_text(row: Row, index: int, count: int) -> str:
@@ -120,20 +129,27 @@ def slots_text(row: Row, index: int, count: int) -> str:
 
 
 def condense(view: OverlayView, level: int) -> OverlayView:
-    """面板超高时逐级精简：1 去掉"方向"；2 再去掉"要找"、附注（如"基于 N 秒前的局面"）
-    和选英雄的逐个点评。"目标"（或没有目标时的"分析"）截成一行由界面按像素处理。
-    标题、动作、选英雄的推荐和警告总是保留。"""
+    """面板超高时逐级精简：1 去掉最强威胁那一行和"方向"；2 再去掉下一个对手（战斗中是
+    其他对手）、"要找"和"对子"、附注（如"基于 N 秒前的局面"）、选英雄的逐个点评和已淘汰的
+    对手。"目标"（或没有目标时的"分析"）截成一行由界面按像素处理。
+    标题、"下一步"、动作、选英雄的推荐、战斗中正在打的对手和警告总是保留。"""
     dropped: set[str] = set()
     if level >= 1:
-        dropped.add("direction")
+        dropped.update(("threat", "direction"))
     if level >= 2:
-        dropped.update(("look_for", "note", "comment"))
+        dropped.update(("opponent", "look_for", "note", "comment"))
 
     def keep(lines: tuple[Line, ...]) -> tuple[Line, ...]:
         return tuple(line for line in lines if line.role not in dropped)
 
     # "下一步"的第一行和小圆点总是保留，理由由界面在第 2 级截成一行
-    return replace(view, rules=keep(view.rules), ai=keep(view.ai), choice=keep(view.choice))
+    return replace(
+        view,
+        rules=keep(view.rules),
+        ai=keep(view.ai),
+        choice=keep(view.choice),
+        opponents=keep(view.opponents),
+    )
 
 
 @dataclass(frozen=True)
@@ -146,6 +162,7 @@ class _PlanEntry:
     stale_note: str | None = None
     agrees: bool = False  # AI 同意规则建议：只写"✓ 同意规则建议"，不列动作
     expired: bool = False  # 深度分析的操作已经不能用，只看思路
+    notes: tuple[PoolNote, ...] = ()  # 对子和要找的牌还剩约几张（Advice.pool_notes）
 
 
 Entry = _PlanEntry | tuple[Line, ...]
@@ -177,14 +194,40 @@ def _clip(text: str, limit: int) -> str:
     return text[:limit] + "…" if len(text) > limit else text
 
 
-def _thought_lines(plan: Plan) -> tuple[Line, ...]:
-    """一行"要找"，一行"目标"。目标用 AI 的一句话总结（提示词要求 25 字以内）；
-    完整的分析通常一百多字，截断后常停在半句话，所以只在没有总结时才退回显示"分析"。"""
+def _look_for_text(look_for: tuple[str, ...], notes: tuple[PoolNote, ...]) -> str:
+    """要找的牌一行，按整张牌截断：放得下几张写几张，后面还有就加"…"；一张都放不下时按字截。"""
+    parts = []
+    for text in look_for:
+        note = note_for(text, notes)
+        parts.append(f"{text}（约 {note.left} 张）" if note is not None else text)
+    shown: list[str] = []
+    for part in parts:
+        if len("要找：" + "、".join([*shown, part])) > MAX_LOOK_FOR:
+            break
+        shown.append(part)
+    if not shown:
+        return _clip("要找：" + parts[0], MAX_LOOK_FOR)
+    return "要找：" + "、".join(shown) + ("…" if len(shown) < len(parts) else "")
+
+
+def _pairs_line(notes: tuple[PoolNote, ...]) -> Line | None:
+    """规则区的"对子"一行：对子写"×N"，差一张成对子的写"×1 商店有"；没有时为 None。"""
+    parts = []
+    for note in notes:
+        if note.have >= 2:
+            parts.append(f"{note.name}×{note.have} · 还剩约 {note.left} 张")
+        elif note.pair:
+            parts.append(f"{note.name}×1 商店有 · 还剩约 {note.left} 张")
+    return Line("对子：" + "；".join(parts), role="look_for") if parts else None
+
+
+def _thought_lines(plan: Plan, notes: tuple[PoolNote, ...] = ()) -> tuple[Line, ...]:
+    """一行"要找"（查得到的写池里还剩约几张），一行"目标"。目标用 AI 的一句话总结（提示词
+    要求 25 字以内）；完整的分析通常一百多字，截断后常停在半句话，所以只在没有总结时才退回
+    显示"分析"。"""
     lines = []
     if plan.look_for:
-        lines.append(
-            Line(_clip("要找：" + "、".join(plan.look_for), MAX_LOOK_FOR), role="look_for")
-        )
+        lines.append(Line(_look_for_text(plan.look_for, notes), role="look_for"))
     if plan.summary:
         lines.append(Line(_clip("目标：" + plan.summary, MAX_REASON), role="reason"))
     elif plan.analysis:
@@ -211,6 +254,80 @@ def _choosing(state: GameState | None) -> bool:
     return state is not None and state.phase == Phase.HERO_SELECT and state.hero_select is not None
 
 
+def _opponent_text(
+    s: OpponentSummary, name: Namer, turn: int, *, place: bool, seen: bool, threat: bool
+) -> str:
+    """面板上一个对手的写法：名字 血量+护甲 · N本 · 主种族×数 身材 S（· 第 T 回合见）
+    （· 威胁 N）；淘汰的只写"已淘汰"，残影写它最后的阵容有几个、多大。place：前面加名次。"""
+    hero = name(s.hero_card_id) if s.hero_card_id else "未知"
+    head = f"第{s.place if s.place is not None else '?'}名 {hero}" if place else hero
+    when = "本回合见" if s.seen_turn == turn else f"第 {s.seen_turn} 回合见"
+    if not s.alive:
+        if not s.next:
+            return f"{head} 已淘汰"
+        if s.seen_turn is None:
+            return f"{head} 已淘汰（残影）· 还没见过阵容"
+        if s.empty_board:
+            return f"{head} 已淘汰（残影）· {when}到空场"
+        return f"{head} 已淘汰（残影）· {when} {s.minions} 个 · 身材 {s.total_stats}"
+    tier = "?" if s.tavern_tier is None else s.tavern_tier
+    parts = [f"{head} {s.health}+{s.armor}", f"{tier}本"]
+    if s.seen_turn is None:
+        parts.append("还没见过阵容")
+    elif s.empty_board:
+        parts.append(f"{when}到空场" if seen else "见到空场")
+    else:
+        stats = f"身材 {s.total_stats}"
+        if s.main_tribe is not None:
+            stats = f"{tribe_zh(s.main_tribe)}×{s.tribe_count} {stats}"
+        parts.append(stats)
+        if seen:
+            parts.append(when)
+    if threat:
+        parts.append(f"威胁 {s.threat}")
+    return " · ".join(parts)
+
+
+def recruit_opponent_lines(overview: OpponentOverview, name: Namer) -> tuple[Line, ...]:
+    """招募时的两行：▶ 下一个对手（role opponent）、★ 最强威胁（role threat）；
+    是同一个对手时只有一行"▶★ …"。"""
+    turn = overview.turn
+    nxt = next((s for s in overview.opponents if s.next), None)
+    best = next((s for s in overview.opponents if s.strongest), None)
+    lines = []
+    if nxt is not None:
+        text = _opponent_text(nxt, name, turn, place=False, seen=True, threat=nxt.strongest)
+        lines.append(Line(f"{'▶★' if nxt.strongest else '▶'} {text}", role="opponent"))
+    if best is not None and not best.next:
+        text = _opponent_text(best, name, turn, place=False, seen=False, threat=True)
+        lines.append(Line(f"★ {text}", role="threat"))
+    return tuple(lines)
+
+
+def combat_opponent_lines(overview: OpponentOverview, name: Namer) -> tuple[Line, ...]:
+    """战斗中列出所有对手：正在打的（▶，role main）排第一，其他按名次；★ 那一行 role threat，
+    其他活着的 role opponent，已淘汰的灰字（role comment）。"""
+    turn = overview.turn
+    current = [s for s in overview.opponents if s.next]
+    lines = []
+    for s in current:
+        text = _opponent_text(s, name, turn, place=True, seen=True, threat=s.strongest)
+        lines.append(Line(f"{'▶★' if s.strongest else '▶'} {text}"))
+    for s in overview.opponents:
+        if s.next:
+            continue
+        if not s.alive:
+            text = _opponent_text(s, name, turn, place=True, seen=False, threat=False)
+            lines.append(Line(text, "muted", role="comment"))
+        elif s.strongest:
+            text = _opponent_text(s, name, turn, place=True, seen=False, threat=True)
+            lines.append(Line(f"★ {text}", role="threat"))
+        else:
+            text = _opponent_text(s, name, turn, place=True, seen=True, threat=False)
+            lines.append(Line(text, role="opponent"))
+    return tuple(lines)
+
+
 def _recruit_title(state: GameState) -> str:
     parts = [f"第 {state.turn} 回合"]
     me = state.me
@@ -224,9 +341,17 @@ def _recruit_title(state: GameState) -> str:
 
 
 class OverlayModel:
-    def __init__(self, name: Namer, ai_enabled: bool = True, choice_ai: bool = True) -> None:
-        """choice_ai：弹出选项时会不会调用 AI（config.toml 的 choice_advice）。"""
+    def __init__(
+        self,
+        name: Namer,
+        ai_enabled: bool = True,
+        choice_ai: bool = True,
+        opponents: bool = True,
+    ) -> None:
+        """choice_ai：弹出选项时会不会调用 AI（config.toml 的 choice_advice）。
+        opponents：显示对手一览（config.toml 的 [overlay] opponents）。"""
         self._name = name
+        self._opponents_enabled = opponents
         self._ai_enabled = ai_enabled
         self._choice_enabled = ai_enabled and choice_ai
         self._lock = threading.Lock()
@@ -243,6 +368,7 @@ class OverlayModel:
         self._choice_ai: ChoiceEntry = ()  # 选项的 AI 建议，或"分析中…"、错误提示
         self._ai_off: tuple[str, bool] | None = None  # (常驻提示, 新的一局是否清除)
         self._message: str | None = None
+        self._overview_failed = False  # 整理对手一览出过错（只记一次警告）
 
     # ---- 界面线程 ----
 
@@ -275,10 +401,13 @@ class OverlayModel:
             self._message = text
             self._commit()
 
+    def show_opponents(self, state: GameState, overview: OpponentOverview) -> None:
+        """面板每次 on_update 都自己整理对手一览（战斗中也要更新），这里什么都不做。"""
+
     def show_rules(self, state: GameState, advice: Advice) -> None:
         with self._lock:
             self._enter_turn(advice.turn)
-            self._rules = _PlanEntry(advice.plan, state)
+            self._rules = _PlanEntry(advice.plan, state, notes=advice.pool_notes)
             self._commit()
 
     def rules_error(self, hero: bool = False) -> None:
@@ -339,6 +468,7 @@ class OverlayModel:
             stale_note=advice.stale_note,
             agrees=agrees,
             expired=advice.expired is not None,
+            notes=advice.pool_notes,
         )
         with self._lock:
             self._enter_turn(advice.turn)
@@ -400,7 +530,10 @@ class OverlayModel:
         """deep：深度分析的步骤做完后仍然显示它的思路。"""
         if isinstance(entry, tuple):
             return entry
-        thoughts = _thought_lines(entry.plan) if entry.thoughts else ()
+        thoughts = _thought_lines(entry.plan, entry.notes) if entry.thoughts else ()
+        # 对子只写在规则区（AI 区写在"要找"后面）
+        pairs = _pairs_line(entry.notes) if not entry.thoughts else None
+        extra = (pairs,) if pairs is not None else ()
         if entry.agrees:
             return (Line("✓ 同意规则建议"), *thoughts)
         refreshed = _shop_refreshed(entry.base, state)
@@ -413,11 +546,11 @@ class OverlayModel:
             # 刷新后买的那几张不在商店里了，不能说成"已按建议操作完"；等规则的新建议
             done = REFRESHED if refreshed else DONE
             status = Line(done if entry.plan.actions else NOTHING_TO_DO, "muted")
-            return (status, *thoughts) if deep else (status,)
+            return (status, *thoughts) if deep else (status, *extra)
         steps = format_plan(plan, state, self._name, reasons=False)
         if len(steps) > MAX_ACTIONS:
             steps = [*steps[:MAX_ACTIONS], "…"]
-        lines = [Line(STEP_SEP.join(steps))]
+        lines = [Line(STEP_SEP.join(steps)), *extra]
         if plan.direction:
             lines.append(Line(f"方向：{plan.direction}", role="direction"))
         lines += thoughts
@@ -437,7 +570,7 @@ class OverlayModel:
         direction = deep.plan.direction
         thoughts = (
             *((Line(f"方向：{direction}", role="direction"),) if direction else ()),
-            *_thought_lines(deep.plan),
+            *_thought_lines(deep.plan, deep.notes),
         )
         if not thoughts:
             return fast, AI_TITLE
@@ -457,7 +590,7 @@ class OverlayModel:
             place = f" · 第 {state.final_place} 名" if state.final_place else ""
             return OverlayView(title=f"对局结束{place}")
         if state.phase == Phase.COMBAT:
-            return OverlayView(title=f"第 {state.turn} 回合 · 战斗中")
+            return self._combat_view(state)
         ai, ai_title = self._render_ai(state)
         choice = state.choice
         if choice is not None and isinstance(self._choice_ai, tuple) and self._choice_ai:
@@ -478,6 +611,42 @@ class OverlayModel:
             warning=UNCERTAIN if state.uncertain else None,
             next_step=self._choice_step(choice) if choice else self._recruit_step(state),
             choice=self._choice_lines(choice) if choice else (),
+            opponents=self._recruit_opponents(state),
+        )
+
+    # ---- 对手 ----
+
+    def _overview(self, state: GameState) -> OpponentOverview | None:
+        """面板每次重画都自己整理对手一览（战斗中阵容截到后也要更新）；关掉、没有对手的数据
+        或者出错时为 None。"""
+        if not self._opponents_enabled or not state.opponents:
+            return None
+        try:
+            return summarize_opponents(state)
+        except Exception:
+            if not self._overview_failed:
+                self._overview_failed = True
+                log.warning("整理对手一览时出错，面板不显示对手", exc_info=True)
+            return None
+
+    def _recruit_opponents(self, state: GameState) -> tuple[Line, ...]:
+        overview = self._overview(state)
+        return recruit_opponent_lines(overview, self._name) if overview is not None else ()
+
+    def _combat_view(self, state: GameState) -> OverlayView:
+        """战斗中：标题带正在打的对手，下面列出所有对手；关掉对手一览时只有一行标题。"""
+        title = f"第 {state.turn} 回合 · 战斗中"
+        overview = self._overview(state)
+        if overview is None:
+            return OverlayView(title=title)
+        current = next((s for s in overview.opponents if s.next), None)
+        if current is not None and current.hero_card_id:
+            title += f" · 对手 {self._name(current.hero_card_id)}"
+        return OverlayView(
+            title=title,
+            compact=False,
+            opponents=combat_opponent_lines(overview, self._name),
+            warning=UNCERTAIN if state.uncertain else None,
         )
 
     # ---- 选项 ----

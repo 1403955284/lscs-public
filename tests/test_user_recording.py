@@ -227,3 +227,46 @@ def test_triple_reward_choice(updates):
     assert state.choice.kind == "triple"
     assert [o.entity_id for o in state.choice.options] == [9723, 9727, 9725]
     assert resolved_data(updates, 15)["picked"] == 9725
+
+
+def combat(updates, turn):
+    """第 turn 回合战斗中的第一个快照。"""
+    return next(s for s, _ in updates if s.phase == Phase.COMBAT and s.turn == turn)
+
+
+def test_eliminated_opponent_keeps_its_last_board_but_returns_it_to_the_pool(updates):
+    state = recruit(updates, 5)
+    gone = state.opponents[5]
+    assert (gone.health, gone.place, gone.alive, len(gone.last_board)) == (0, 8, False, 4)
+    pool = state.pool_estimate
+    # 夺金健将：对手 1、3 各一张金色（6 张）；已淘汰的对手 5 的两张金色不扣
+    assert pool["BG32_236"] == 10
+    assert pool["BG29_888"] == 14
+    assert "BG26_963" not in pool  # 电音合成师只有已淘汰的对手 5 拿过
+
+
+def test_five_opponents_eliminated_by_turn_13(updates):
+    state = recruit(updates, 13)
+    gone = {p: o.health for p, o in state.opponents.items() if not o.alive}
+    assert gone == {1: -8, 4: 0, 5: 0, 7: -9, 8: -9}
+    pool = state.pool_estimate
+    assert (pool["BG36_116"], pool["BG36_099"], pool["BG36_098"]) == (14, 11, 15)
+
+
+def test_next_opponent_can_be_an_eliminated_player(updates):
+    state = recruit(updates, 10)
+    assert state.next_opponent_id == 5
+    assert not state.opponents[5].alive  # 打它的残影
+
+
+def test_next_opponent_during_combat_is_the_current_one(updates):
+    assert combat(updates, 5).next_opponent_id == 8
+
+
+def test_opponent_tavern_tiers_are_live(updates):
+    early = recruit(updates, 2).opponents
+    for player_id in (4, 7, 8):
+        assert (early[player_id].tavern_tier, early[player_id].last_seen_turn) == (2, None)
+    assert [recruit(updates, t).opponents[1].tavern_tier for t in range(1, 14)] == [1] * 13
+    tiers = [recruit(updates, t).opponents[2].tavern_tier for t in range(1, 14)]
+    assert tiers == sorted(tiers) and tiers[-1] == 6

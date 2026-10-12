@@ -287,7 +287,7 @@ def test_replay_with_ai_calls_model_and_hides_key(monkeypatch, tmp_path, capsys)
     assert "AI：deepseek-flash（Key sk-c…abcd，思考模式 disabled）" in out
     assert "深度分析：开启（思考 low，每回合开始时约 20 秒出结果）" in out
     assert "建议改回 disabled" not in out and "选英雄建议" not in out  # 开启时不多打印一行
-    assert "自动改正" not in out
+    assert "自动改正" not in out and "对手摘要" not in out
     # 选英雄：规则马上出，AI 在"选择英雄"之前出；耗时取决于机器，不断言
     hero = out.index("  🤖 AI（")
     assert out.index("  📋 规则：护甲信息不全，等 AI 建议") < hero < out.index("选择英雄")
@@ -373,11 +373,12 @@ def test_replay_with_repair_off(monkeypatch, tmp_path, capsys):
     from helpers import MINI_LOG
 
     answer = json.dumps({"actions": [{"type": "buy", "entity_id": 31, "reason": "海盗"}]})
-    extra = "deep_analysis = false\nrepair_invalid = false\n"
+    extra = "deep_analysis = false\nrepair_invalid = false\nall_opponents = false\n"
     _ai_cli_setup(monkeypatch, tmp_path, [MINI_HERO] + [answer] * 2, extra=extra)
     assert main(["replay", str(MINI_LOG), "--ai"]) == 0
     out = capsys.readouterr().out
     assert "不合法方案自动改正：关闭" in out
+    assert "对手摘要：只发下一个对手" in out
     assert "  🤖 AI 建议无效，已忽略" in out
     assert out.count("改正") == 1  # 只有启动时那一行
     assert "本局 AI 调用 3 次" in out
@@ -580,7 +581,8 @@ def test_watch_catch_up_mid_game_calls_once_for_the_current_turn():
     for job in jobs:
         job()
     assert {c.thinking for c in provider.calls} == {"disabled", "low"}
-    assert all(c.user.split("\n\n", 1)[1].startswith("第 7 回合") for c in provider.calls)
+    # 去掉开头的本局卡池和对手
+    assert all(c.user.split("\n\n", 2)[2].startswith("第 7 回合") for c in provider.calls)
 
 
 @NEEDS_USER_LOG
@@ -925,3 +927,47 @@ def test_highlight_test_on_this_platform_previews(monkeypatch, tmp_path, capsys)
     assert main(["highlight-test", "--seconds", "1"]) == 0
     assert shown == [7 + 7 + 4]  # 默认只画商店、场面和四个按钮
     assert "不是 Windows：在一个 1280×720 的预览窗口里画出要检查的位置" in capsys.readouterr().out
+
+
+def test_pool_estimator_only_with_card_data(monkeypatch, capsys):
+    from helpers import FIXTURES, MINI_LOG
+
+    import lscs.cli
+    from lscs.advisor.pool import PoolEstimator
+    from lscs.advisor.runner import AdviceRunner
+    from lscs.cards.db import CardDB
+
+    pools = []
+
+    def spy(*args, **kwargs):
+        pools.append(kwargs.get("pool"))
+        return AdviceRunner(*args, **kwargs)
+
+    monkeypatch.setattr(lscs.cli, "AdviceRunner", spy)
+    monkeypatch.setattr(
+        lscs.cli, "_load_cards", lambda: CardDB.from_json_file(FIXTURES / "cards_mini.json")
+    )
+    assert main(["replay", str(MINI_LOG), "--advice"]) == 0  # 不要中文卡名：不加载卡牌数据
+    assert main(["replay", str(MINI_LOG), "--advice", "--names"]) == 0
+    capsys.readouterr()
+    assert pools[0] is None
+    assert isinstance(pools[1], PoolEstimator)
+
+
+def test_overlay_opponents_setting_reaches_the_panel():
+    from factory import make_state
+
+    import lscs.cli
+    from lscs.config import AppConfig, OverlayConfig
+    from lscs.state.models import OpponentView, Phase
+
+    rival = OpponentView(player_id=3, hero_card_id="H", health=30, armor=0, place=1, tavern_tier=2)
+    combat = make_state(turn=4, phase=Phase.COMBAT)
+    combat = combat.model_copy(update={"opponents": {3: rival}, "next_opponent_id": 3})
+    compact = {}
+    for enabled in (True, False):
+        cfg = AppConfig(overlay=OverlayConfig(opponents=enabled))
+        model, _ = lscs.cli._displays(lambda c: c, cfg, None)
+        model.on_update(combat, [])
+        compact[enabled] = model.snapshot().compact
+    assert compact == {True: False, False: True}  # 关掉时战斗中还是一行标题

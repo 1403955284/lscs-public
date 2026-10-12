@@ -422,7 +422,8 @@ def test_look_for_and_analysis_are_cut():
     names = tuple(f"很长的牌名{i}" for i in range(6))
     model.show_ai(T3, llm_advice(BUY_21, analysis="分" * 50, look_for=names), False)
     look_for, analysis = model.snapshot().ai[1:]
-    assert look_for.text == ("要找：" + "、".join(names))[:24] + "…"
+    # 按整张牌截断：放得下的前 5 张，后面加"…"（不会截出半个牌名）
+    assert look_for.text == "要找：" + "、".join(names[:5]) + "…"
     assert analysis.text == ("分析：" + "分" * 37) + "…"
 
 
@@ -1075,3 +1076,223 @@ def test_choice_lane_notice_without_budget_lets_the_player_choose():
     view = model.snapshot()
     assert view.ai == (Line("这次不再分析：本局 AI 预算已用完", "muted"),)
     assert view.next_step == NextStep("▶ 自己选一个（AI 没有建议）", tone="muted")
+
+
+# ---- 对手一览、对子和要找的张数 ----
+
+OPP_NAMES = {
+    "H2": "洛卡拉",
+    "H3": "厄祖玛特",
+    "H4": "布莱恩",
+    "H5": "詹迪斯",
+    "H6": "范克里夫",
+    "W": "飘荡祭品",
+    "P": "夺金健将",
+    "E": "电音合成师",
+}
+NAMES.update(OPP_NAMES)
+
+
+def rival(player_id, health, armor, place, tier, board=(), seen=None):
+    from lscs.state.models import OpponentView
+
+    return OpponentView(
+        player_id=player_id,
+        hero_card_id=f"H{player_id}",
+        health=health,
+        armor=armor,
+        place=place,
+        tavern_tier=tier,
+        last_board=tuple(board),
+        last_seen_turn=seen,
+    )
+
+
+GHOST_BOARD = (
+    minion(50, "P", 7, 7, races=["PIRATE"], golden=True),
+    minion(51, "E", 3, 5, tier=2, races=["DRAGON"]),
+)
+RIVALS = {
+    2: rival(2, 30, 9, 1, 5, [minion(40 + i, "W", 10, 9, 3, ["ABERRATION"]) for i in (1, 2)], 9),
+    3: rival(3, 30, 3, 3, 5, [minion(43, "C", 90, 90, 2, ["ABERRATION"])], 8),
+    4: rival(4, 28, 0, 2, 4),
+    5: rival(5, 0, 0, 8, 2, GHOST_BOARD, 4),  # 已淘汰，下一个对手是它的残影
+    6: rival(6, -9, 0, 7, 5, [minion(44, "E", 3, 4)], 5),
+}
+
+
+def with_rivals(state, next_id=5, opponents=None):
+    update = {"opponents": opponents or RIVALS, "next_opponent_id": next_id}
+    return state.model_copy(update=update)
+
+
+T10 = with_rivals(make_state(turn=10, gold=10, tier=6, upgrade_cost=None, shop=SHOP))
+GHOST = Line("▶ 詹迪斯 已淘汰（残影）· 第 4 回合见 2 个 · 身材 22", role="opponent")
+STRONGEST = Line("★ 厄祖玛特 30+3 · 5本 · 畸变×1 身材 180 · 威胁 93", role="threat")
+
+
+def test_recruit_shows_the_next_opponent_and_the_strongest_at_the_bottom():
+    model = OverlayModel(name)
+    model.on_update(T10, started(10))
+    assert model.snapshot().opponents == (GHOST, STRONGEST)
+    model.on_update(with_rivals(T10, next_id=4).model_copy(update={"seq": 2}), [])
+    assert model.snapshot().opponents == (
+        Line("▶ 布莱恩 28+0 · 4本 · 还没见过阵容", role="opponent"),
+        STRONGEST,
+    )
+    model.on_update(with_rivals(T10, next_id=3).model_copy(update={"seq": 3}), [])
+    assert model.snapshot().opponents == (
+        Line("▶★ 厄祖玛特 30+3 · 5本 · 畸变×1 身材 180 · 第 8 回合见 · 威胁 93", role="opponent"),
+    )
+
+
+def test_opponent_lines_stay_while_a_choice_is_open():
+    from factory import make_choice
+
+    model = OverlayModel(name)
+    model.on_update(T10.model_copy(update={"choice": make_choice()}), started(10))
+    view = model.snapshot()
+    assert view.choice and view.opponents == (GHOST, STRONGEST)
+
+
+def test_no_opponent_lines_when_switched_off_or_unknown():
+    model = OverlayModel(name, opponents=False)
+    model.on_update(T10, started(10))
+    assert model.snapshot().opponents == ()
+    model = OverlayModel(name)
+    model.on_update(T3, started(3))  # 没有对手的数据
+    assert model.snapshot().opponents == ()
+
+
+def test_condense_drops_the_strongest_first_then_the_next_opponent():
+    model = OverlayModel(name)
+    model.on_update(T10, started(10))
+    model.show_ai(T10, llm_advice(BUY_21, turn=10, **DEEP), False)
+    view = model.snapshot()
+    one = condense(view, 1)
+    assert one.opponents == (GHOST,)
+    assert "direction" not in {line.role for line in one.ai}
+    two = condense(view, 2)
+    assert two.opponents == ()
+    assert [line.text for line in two.ai] == ["① 买 蚀脑怪 3/4", "目标：提前升 5 本找畸变核心"]
+    assert two.next_step == view.next_step
+
+
+COMBAT_10 = with_rivals(make_state(turn=10, phase=Phase.COMBAT, seq=5))
+
+
+def test_combat_lists_every_opponent():
+    model = OverlayModel(name)
+    model.on_update(COMBAT_10, [Event(type=EventType.COMBAT_STARTED, turn=10)])
+    view = model.snapshot()
+    assert (view.title, view.compact, view.next_step) == (
+        "第 10 回合 · 战斗中 · 对手 詹迪斯",
+        False,
+        None,
+    )
+    assert (view.rules, view.ai) == ((), ())
+    assert view.opponents == (
+        Line("▶ 第8名 詹迪斯 已淘汰（残影）· 第 4 回合见 2 个 · 身材 22"),
+        Line("第1名 洛卡拉 30+9 · 5本 · 畸变×2 身材 38 · 第 9 回合见", role="opponent"),
+        Line("第2名 布莱恩 28+0 · 4本 · 还没见过阵容", role="opponent"),
+        Line("★ 第3名 厄祖玛特 30+3 · 5本 · 畸变×1 身材 180 · 威胁 93", role="threat"),
+        Line("第7名 范克里夫 已淘汰", "muted", role="comment"),
+    )
+    two = condense(view, 2)
+    assert two.opponents == view.opponents[:1]  # 正在打的那一行总是保留
+
+
+def test_combat_row_says_this_turn_once_the_board_is_captured():
+    model = OverlayModel(name)
+    model.on_update(COMBAT_10, [Event(type=EventType.COMBAT_STARTED, turn=10)])
+    seen = dict(RIVALS)
+    seen[5] = rival(5, 0, 0, 8, 2, GHOST_BOARD[:1], 10)  # 第一次攻击时截到本回合的阵容
+    model.on_update(with_rivals(COMBAT_10, opponents=seen).model_copy(update={"seq": 6}), [])
+    first = model.snapshot().opponents[0]
+    assert first == Line("▶ 第8名 詹迪斯 已淘汰（残影）· 本回合见 1 个 · 身材 14")
+
+
+def test_combat_strongest_being_fought_is_one_main_row():
+    model = OverlayModel(name)
+    model.on_update(with_rivals(COMBAT_10, next_id=3), [])
+    rows = model.snapshot().opponents
+    assert rows[0] == Line("▶★ 第3名 厄祖玛特 30+3 · 5本 · 畸变×1 身材 180 · 第 8 回合见 · 威胁 93")
+    assert [line.role for line in rows] == ["main", "opponent", "opponent", "comment", "comment"]
+
+
+def test_combat_stays_one_line_when_opponents_are_off_or_unknown():
+    model = OverlayModel(name, opponents=False)
+    model.on_update(COMBAT_10, [])
+    view = model.snapshot()
+    assert (view.title, view.compact, view.opponents) == ("第 10 回合 · 战斗中", True, ())
+    model = OverlayModel(name)
+    model.on_update(make_state(turn=3, phase=Phase.COMBAT), [])
+    assert (model.snapshot().title, model.snapshot().compact) == ("第 3 回合 · 战斗中", True)
+
+
+def pool_note(card_id, card_name, have, left, shop=0):
+    from lscs.advisor.pool import PoolNote
+
+    return PoolNote(card_id, card_name, have, left, shop)
+
+
+def test_pairs_line_in_the_rules_and_pool_counts_after_look_for():
+    notes = (
+        pool_note("C", "蚀脑怪", 2, 11),
+        pool_note("B", "海盗", 1, 14, shop=1),
+        pool_note("W", "飘荡祭品", 0, 11),
+    )
+    model = OverlayModel(name)
+    model.on_update(T3, started(3))
+    model.show_rules(T3, rules_advice().model_copy(update={"pool_notes": notes}))
+    assert model.snapshot().rules == (
+        Line("① 买 海盗 3/2  ② 刷新"),
+        Line("对子：蚀脑怪×2 · 还剩约 11 张；海盗×1 商店有 · 还剩约 14 张", role="look_for"),
+        Line("方向：海盗", role="direction"),
+    )
+    advice = llm_advice(BUY_21, look_for=("飘荡祭品", "深渊使者"), summary="找祭品")
+    model.show_ai(T3, advice.model_copy(update={"pool_notes": notes}), False)
+    assert model.snapshot().ai == (
+        Line("① 买 蚀脑怪 3/4"),
+        Line("要找：飘荡祭品（约 11 张）、深渊使者", role="look_for"),
+        Line("目标：找祭品", role="reason"),
+    )
+    view = model.snapshot()
+    assert "对子" not in " ".join(line.text for line in condense(view, 2).rules)
+
+
+def test_empty_captured_board_on_the_panel():
+    seen_empty = {
+        2: rival(2, 20, 0, 1, 3, (), 5),
+        5: rival(5, 0, 0, 8, 2, (), 4),
+    }
+    model = OverlayModel(name)
+    model.on_update(with_rivals(T10, next_id=5, opponents=seen_empty), started(10))
+    assert model.snapshot().opponents == (
+        Line("▶ 詹迪斯 已淘汰（残影）· 第 4 回合见到空场", role="opponent"),
+        Line("★ 洛卡拉 20+0 · 3本 · 见到空场 · 威胁 35", role="threat"),
+    )
+    model.on_update(with_rivals(COMBAT_10, next_id=2, opponents=seen_empty), [])
+    assert model.snapshot().opponents[0] == Line(
+        "▶★ 第1名 洛卡拉 20+0 · 3本 · 第 5 回合见到空场 · 威胁 35"
+    )
+
+
+def test_look_for_with_pool_counts_is_cut_between_cards():
+    notes = (
+        pool_note("W", "飘荡祭品", 0, 11),
+        pool_note("C", "蚀脑怪", 0, 11),
+        pool_note("D", "深渊使者", 0, 12),
+        pool_note("M", "残忍的精神鞭笞者", 0, 12),
+    )
+    model = OverlayModel(name)
+    model.on_update(T3, started(3))
+    look_for = ("飘荡祭品", "蚀脑怪", "深渊使者", "残忍的精神鞭笞者")
+    advice = llm_advice(BUY_21, look_for=look_for).model_copy(update={"pool_notes": notes})
+    model.show_ai(T3, advice, False)
+    assert model.snapshot().ai[1] == Line(
+        "要找：飘荡祭品（约 11 张）、蚀脑怪（约 11 张）、深渊使者（约 12 张）…", role="look_for"
+    )
+    one = llm_advice(BUY_21, look_for=("长" * 50,))
+    model.show_ai(T3, one, False)
+    assert model.snapshot().ai[1].text == "要找：" + "长" * 37 + "…"  # 一张就放不下：按字截

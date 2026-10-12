@@ -214,3 +214,17 @@ def test_highlight_values_are_read(tmp_path):
     text = "[highlight]\nenabled = false\nshop_y = 0.3\nhero_power = [0.6, 0.8, 0.05]\n"
     cfg = load_config(write(tmp_path, text)).highlight
     assert (cfg.enabled, cfg.shop_y, cfg.hero_power) == (False, 0.3, (0.6, 0.8, 0.05))
+
+
+def test_all_opponents_defaults_on_and_can_be_switched_off(tmp_path):
+    assert load_config(tmp_path / "config.toml").llm.all_opponents is True
+    cfg = load_config(write(tmp_path, "[llm]\nall_opponents = false\n"))
+    assert cfg.llm.all_opponents is False
+    assert "\nall_opponents = true " in EXAMPLE.read_text(encoding="utf-8")
+
+
+def test_overlay_opponents_defaults_on_and_can_be_switched_off(tmp_path):
+    assert load_config(tmp_path / "config.toml").overlay.opponents is True
+    cfg = load_config(write(tmp_path, "[overlay]\nopponents = false\n"))
+    assert cfg.overlay.opponents is False
+    assert "\nopponents = true " in EXAMPLE.read_text(encoding="utf-8")

@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -38,6 +39,14 @@ def make_runner(answers, out, deep=False):
     return AdviceRunner(RULES, CARDS.name, display, scheduler)
 
 
+OPPONENT_ROW = re.compile(r"^  (?:▶★| [▶★ ]) 第 ")
+
+
+def advice_lines(out):
+    """去掉每回合开头的对手一览（👥 块的格式在 test_display、test_runner 里测）。"""
+    return [line for line in out if not line.startswith("  👥") and not OPPONENT_ROW.match(line)]
+
+
 def run(lines, runner):
     def on_update(state, events):
         runner.on_update(state, events)
@@ -70,7 +79,7 @@ def test_ai_advice_follows_rules_in_terminal(mini_lines):
     out = []
     runner = make_runner([MINI_HERO, agree_turn_1, turn_2], out)
     run(mini_lines, runner)
-    assert out == [
+    assert advice_lines(out) == [
         "  📋 规则：护甲信息不全，等 AI 建议",  # 选英雄：合成日志的英雄没有护甲标签
         "  🤖 AI 分析中…",
         "  🤖 AI（0.0 秒）：选 米尔豪斯·法力风暴 —— 只有一个可选",
@@ -120,7 +129,7 @@ def test_fast_and_deep_advice_in_terminal(mini_lines):
     out = []
     runner = make_runner([MINI_HERO, agree_turn_1, deep_turn_1, turn_2, deep_turn_2], out, True)
     run(mini_lines, runner)
-    assert out == [
+    assert advice_lines(out) == [
         "  📋 规则：护甲信息不全，等 AI 建议",  # 选英雄：合成日志的英雄没有护甲标签
         "  🤖 AI 分析中…",  # 选英雄只用快速模型，不做深度分析
         "  🤖 AI（0.0 秒）：选 米尔豪斯·法力风暴 —— 只有一个可选",
@@ -156,7 +165,7 @@ def test_repair_in_terminal(mini_lines):
     out = []
     runner = make_runner([MINI_HERO, missing, agree_turn_1, missing, missing], out)
     run(mini_lines, runner)
-    assert out[4:] == [
+    assert advice_lines(out)[4:] == [
         "  📋 规则：① 买 刷新畸体 1/4（商店里身材最好，有嘲讽）",
         "          ② 刷新（剩 1 金，刷新找更好的牌）",
         "  🤖 AI 分析中…",
@@ -396,7 +405,7 @@ def test_ai_request_at_recruit_start_already_knows_the_hero_power(path, line):
     runner = AdviceRunner(RULES, CARDS.name, AdviceDisplay(CARDS.name, lambda _: None), scheduler)
     run(read_log_lines(path), runner)
     recruit = [c for c in provider.calls if not c.user.startswith(("选英雄", "选择："))]
-    situations = [c.user.split("\n\n", 1)[1] for c in recruit]  # 去掉开头的本局卡池
+    situations = [c.user.split("\n\n", 2)[2] for c in recruit]  # 去掉开头的本局卡池和对手
     starts = [text for text in situations if text.startswith("第 1 回合")]
     assert starts and any(text.startswith(line) for text in starts[0].splitlines())
 
@@ -599,3 +608,117 @@ def test_user_game_asks_once_per_choice_before_each_pick():
     assert len(choice_calls) == 19 * 2  # FakeProvider 没有回答：空内容各重试一次
     order = [kind for kind, lane in seen if kind == "event" or lane == "choice"]
     assert order == ["pending", "event"] * 19  # 每组都是先发出请求、后选完
+
+
+class AdviceSpy:
+    def __init__(self):
+        self.calls = []
+
+    def __getattr__(self, method):
+        return lambda *args: self.calls.append((method, args))
+
+    def advice(self, method):
+        return [args[1] for name, args in self.calls if name == method]
+
+
+def test_rules_and_ai_advice_carry_pool_counts():
+    from lscs.advisor.pool import PoolEstimator, PoolNote
+    from lscs.state.models import Event, EventType
+
+    spy = AdviceSpy()
+    estimator = PoolEstimator(CARDS, {1: 16, 2: 15, 3: 13})
+    runner = AdviceRunner(RULES, CARDS.name, spy, pool=estimator, clock=lambda: 106.0)
+    brain = minion(10, "BG36_099", 3, 4, tier=2, races=("ABERRATION",))
+    old = make_state(gold=3, board=[brain, brain.model_copy(update={"entity_id": 11})])
+    runner.on_update(old, [Event(type=EventType.RECRUIT_STARTED, turn=1)])
+    pair = PoolNote("BG36_099", "蚀脑怪", have=2, left=13)
+    assert spy.advice("show_rules")[0].pool_notes == (pair,)  # 规则：只有对子
+    # AI 的结果回来时又买了一张：张数按现在的局面算，加上它要找的牌
+    third = brain.model_copy(update={"entity_id": 12})
+    now = make_state(gold=0, board=[*old.me.board, third], seq=2)
+    runner._state = now
+    plan = Plan(source="llm", look_for=("飘荡祭品", "没有这张"))
+    runner._show_result(result_for(old, plan))
+    (advice,) = spy.advice("show_ai")
+    assert advice.pool_notes == (
+        PoolNote("BG36_099", "蚀脑怪", have=3, left=12),
+        PoolNote("BG36_113", "飘荡祭品", have=0, left=13),
+    )
+
+
+def test_without_card_data_there_are_no_pool_counts():
+    from lscs.state.models import Event, EventType
+
+    spy = AdviceSpy()
+    runner = AdviceRunner(RULES, CARDS.name, spy)
+    brain = minion(10, "BG36_099", 3, 4, tier=2)
+    state = make_state(gold=3, board=[brain, brain.model_copy(update={"entity_id": 11})])
+    runner.on_update(state, [Event(type=EventType.RECRUIT_STARTED, turn=1)])
+    assert spy.advice("show_rules")[0].pool_notes == ()
+
+
+def test_pool_errors_do_not_stop_the_advice(caplog):
+    from lscs.state.models import Event, EventType
+
+    class BrokenEstimator:
+        def view(self, _state):
+            raise RuntimeError("坏了")
+
+    spy = AdviceSpy()
+    runner = AdviceRunner(RULES, CARDS.name, spy, pool=BrokenEstimator())
+    for seq in (1, 2):
+        state = make_state(gold=3, seq=seq, shop=SHOP)
+        runner.on_update(state, [Event(type=EventType.RECRUIT_STARTED, turn=1)])
+    assert [advice.pool_notes for advice in spy.advice("show_rules")] == [(), ()]
+    assert caplog.text.count("估计卡池时出错") == 1  # 完整堆栈只记一次
+
+
+@NEEDS_USER_LOG
+def test_user_game_sends_one_opponents_block_per_recruit_turn():
+    """对手在招募中途升本、加护甲（这局有十几次）：同一回合的招募消息仍用同一个对手块。"""
+    import re
+
+    from lscs.replay import read_log_lines
+
+    answer = json.dumps({"actions": []})
+    provider = FakeProvider([answer] * 300)
+    scheduler = LLMScheduler(
+        provider,
+        LLMConfig(api_key="sk-x-123456789", max_calls_per_game=300),
+        CARDS,
+        guide="",
+        clock=lambda: 100.0,
+        run_async=lambda job: job(),
+        debounce=0.0,
+    )
+    runner = AdviceRunner(RULES, CARDS.name, AdviceDisplay(CARDS.name, lambda _: None), scheduler)
+    run(read_log_lines(USER_LOG), runner)
+    blocks: dict[int, set[str]] = {}
+    for call in provider.calls:
+        if not call.user.startswith("【本局卡池"):
+            continue  # 选英雄、选项和改正要求
+        _, block, situation = call.user.split("\n\n", 2)
+        turn = int(re.match(r"第 (\d+) 回合", situation).group(1))
+        blocks.setdefault(turn, set()).add(block)
+    assert sorted(blocks) == list(range(1, 14))
+    assert all(len(found) == 1 for found in blocks.values()), {t: len(b) for t, b in blocks.items()}
+    calls_per_turn = [
+        sum(1 for c in provider.calls if f"\n\n第 {t} 回合（招募）" in c.user) for t in (10, 11, 12)
+    ]
+    assert all(n >= 2 for n in calls_per_turn)  # 这几个回合对手中途升过本，也有好几次调用
+
+
+def test_deep_result_in_combat_still_counts_the_cards_to_look_for():
+    from lscs.advisor.pool import PoolEstimator, PoolNote
+
+    spy = AdviceSpy()
+    estimator = PoolEstimator(CARDS, {1: 16, 2: 15, 3: 13})
+    runner = AdviceRunner(RULES, CARDS.name, spy, pool=estimator)
+    old = make_state(gold=6, shop=SHOP, turn=3)
+    runner._state = make_state(turn=3, phase=Phase.COMBAT, seq=2)  # 战斗中没有招募的局面
+    plan = Plan(source="llm", analysis="找祭品。", look_for=("飘荡祭品",))
+    runner._show_result(result_for(old, plan, lane="deep"))
+    (advice,) = spy.advice("show_ai")
+    assert advice.expired == "changed"
+    # 退回用发出请求时的招募局面算张数
+    assert advice.pool_notes == (PoolNote("BG36_113", "飘荡祭品", have=0, left=13),)

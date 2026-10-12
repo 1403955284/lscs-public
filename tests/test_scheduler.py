@@ -98,8 +98,8 @@ def kinds(events):
 
 
 def situation(user):
-    """局面消息去掉开头的本局卡池。"""
-    return user.split("\n\n", 1)[1]
+    """局面消息去掉开头的本局卡池和对手。"""
+    return user.split("\n\n", 2)[2]
 
 
 def test_recruit_start_calls_immediately():
@@ -1576,3 +1576,59 @@ def test_new_choice_group_without_budget_ends_the_superseded_request():
     assert sched.tick() == [AINotice(NO_BUDGET, "choice")]
     deferred.jobs[0]()
     assert sched.tick() == []
+
+
+def test_only_the_next_opponent_is_sent_when_all_opponents_is_off():
+    from lscs.state.models import OpponentView
+
+    def with_opponents(st):
+        rival = OpponentView(
+            player_id=3, hero_card_id="H3", health=30, armor=0, place=1, tavern_tier=2
+        )
+        other = OpponentView(
+            player_id=4, hero_card_id="H4", health=20, armor=0, place=2, tavern_tier=3
+        )
+        return st.model_copy(update={"opponents": {3: rival, 4: other}, "next_opponent_id": 3})
+
+    for all_opponents, rows in ((True, 3), (False, 1)):
+        sched, provider = scheduler([GOOD], all_opponents=all_opponents)
+        observe(sched, with_opponents(state()), EventType.RECRUIT_STARTED)
+        sched.tick()
+        block = provider.calls[0].user.split("\n\n")[1]
+        assert block.startswith("【对手】")
+        assert len(block.splitlines()) == 1 + rows  # 说明行 + 主打种族行 + 每个对手一行
+
+
+def test_opponents_block_is_frozen_for_the_turn():
+    """对手在招募中途升本：同一回合的消息仍用第一次生成的对手块（前缀缓存），换回合、新对局才重算。"""
+    from lscs.state.models import OpponentView
+
+    def with_rival(st, tier):
+        rival = OpponentView(
+            player_id=3, hero_card_id="H3", health=30, armor=0, place=1, tavern_tier=tier
+        )
+        return st.model_copy(update={"opponents": {3: rival}, "next_opponent_id": 3})
+
+    def block(call):
+        return call.user.split("\n\n")[1]
+
+    def messages():
+        return [c for c in provider.calls if not c.turns]  # 不算改正（多轮对话）
+
+    clock = Clock()
+    sched, provider = scheduler([GOOD] * 8, clock=clock)
+    observe(sched, with_rival(state(), 2), EventType.RECRUIT_STARTED)
+    sched.tick()
+    refreshed = with_rival(state(shop_ids=(30, 31), seq=2), 3)  # 刷新时对手已经升到 3 本
+    observe(sched, refreshed, EventType.SHOP_CHANGED)
+    clock.now += 1.0  # 刷新后等商店稳定
+    sched.tick()
+    first, second = messages()
+    assert block(first) == block(second) and "酒馆 2 本" in block(second)
+    observe(sched, with_rival(state(turn=4, seq=3), 3), EventType.RECRUIT_STARTED)
+    sched.tick()
+    assert "酒馆 3 本" in block(messages()[2])
+    sched.reset_game()
+    observe(sched, with_rival(state(turn=4, seq=4), 4), EventType.RECRUIT_STARTED)
+    sched.tick()
+    assert "酒馆 4 本" in block(messages()[3])  # 新对局：同样的回合数也重算

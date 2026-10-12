@@ -6,6 +6,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
+from lscs.advisor.pool import PoolNote
+
 ActionType = Literal["buy", "sell", "upgrade", "hero_power", "refresh", "freeze"]
 # AI 建议的四路：快速建议、深度分析、选英雄、选项（游戏弹出的"选一个"）
 Lane = Literal["fast", "deep", "hero", "choice"]
@@ -48,6 +50,8 @@ class Advice(_Frozen):
     elapsed: float | None = None  # AI 调用耗时（秒）
     lane: Lane = "fast"
     expired: Expired | None = None  # 深度分析的操作已经不能用，只看思路
+    # 对子和要找的牌在池里还剩约几张（advisor.pool.pool_notes）；没有卡牌数据时为空
+    pool_notes: tuple[PoolNote, ...] = ()
 
 
 class HeroComment(_Frozen):

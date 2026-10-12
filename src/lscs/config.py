@@ -44,6 +44,8 @@ class LLMConfig(BaseModel):
     # AI 的方案或回答不合法时，把原因发回去让它改正一次（四路都适用，每个请求最多一次，
     # 占一次调用）
     repair_invalid: bool = True
+    # 局面消息里附所有对手的摘要（放在本局卡池之后，和它一起命中缓存）；关掉只写下一个对手
+    all_opponents: bool = True
 
     @field_validator("api_key")
     @classmethod
@@ -59,6 +61,7 @@ class OverlayConfig(BaseModel):
     opacity: float = Field(default=0.85, ge=0.3, le=1.0)
     font_size: int = 0  # 像素；0 表示按炉石窗口高度自动
     click_through: bool = True
+    opponents: bool = True  # 对手一览：招募时两行（下一个、最强），战斗中列出全部
 
     @field_validator("font_size")
     @classmethod

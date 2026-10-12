@@ -14,6 +14,7 @@ max_calls_per_game = 100       # 每局最多调用几次（快速、深度、�
 hero_advice = true             # 选英雄时也让 AI 推荐一个（每局 1 次，重随时再 1 次）
 choice_advice = true           # 弹出选项（三连发现、黑暗之赐、饰品、技能升级）时让 AI 选一个
 repair_invalid = true          # AI 的方案不合法时把原因发回去让它改正一次（多等约 2 秒、多一次调用）
+all_opponents = true           # 把所有对手的阵容摘要发给 AI（关掉只写下一个对手）
 # 深度分析：每回合开始时和快速建议同时发出，开思考，约 20 秒（偶尔 1 分钟）出结果
 deep_analysis = true           # false 关闭深度分析（每局大约省 5 毛到 1 块钱）
 deep_thinking = "low"          # 思考强度：low 或 high（high 更慢）
@@ -26,6 +27,7 @@ position = "right"             # 贴在炉石窗口的 right（右侧）、left�
 opacity = 0.85                 # 不透明度，0.3~1.0
 font_size = 0                  # 字号（像素）：0 表示按炉石窗口大小自动，或填 10~40
 click_through = true           # 鼠标点击穿透面板，不影响游戏操作（只在 Windows 上有效）
+opponents = true               # 面板上显示对手一览：招募时两行（下一个、最强），战斗中列出全部
 
 [highlight]
 # 游戏画面上的高亮：给"下一步"指的那张牌或按钮画一个金色框（只在 Windows 上显示）。

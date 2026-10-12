@@ -25,14 +25,30 @@ CARDS = CardDB.from_json_file(FIXTURES / "cards_mini.json")
 RULES = load_rules_config(ROOT / "strategy" / "current" / "rules.toml")
 
 POOL_TURN_2 = """【本局卡池（本局种族的随从和中立随从，按酒馆等级）】
+[1本] 爆裂飓风 2/1（元素）
 [2本] 熔岩潜伏者 2/5（纳迦）每回合从手牌对本随从使用的第一张塑造法术的法术牌永久有效。（还剩1张！）
 [4本] 刷新畸体 4/5（元素）战吼：获得2次免费的刷新。
 【酒馆法术】
 [5本 法术 3金] 护甲储备：将你的护甲值变为5点。"""
 
+OPPONENTS_TITLE = (
+    "【对手】按名次；▶ 下一个对手；★ 最强威胁（0~100，按最近见到的阵容、酒馆等级和血量粗估）。"
+    "阵容是最近一次交手时看到的，之后可能变强了。同一种族被多家主打时，这个种族的牌更难凑。"
+)
+# 拉卡尼休第 1 回合交过手（金色小鬼和刷新畸体），费林大使是下一个对手、还没交过手
+OPPONENTS_TURN_2 = (
+    OPPONENTS_TITLE
+    + """
+主打种族：元素 1 家、未知 1 家
+★ 第 2 名 拉卡尼休 | 血量 30+0 | 酒馆 1 本 | 威胁 78 | 第 1 回合见到 2 个随从，元素为主（1 个），总身材 9，金色 1 张，主力：粗鄙小鬼(金)、刷新畸体
+▶ 第 3 名 费林大使 | 血量 30+0 | 酒馆 1 本 | 威胁 23 | 还没见过阵容"""
+)
+
 # 这份合成日志没有选项列表，所以英雄技能是"还不确定"（真实日志见 test_hero_power_line_*）
 EXPECTED_TURN_2 = (
     POOL_TURN_2
+    + "\n\n"
+    + OPPONENTS_TURN_2
     + """
 
 第 2 回合（招募）| 英雄：米尔豪斯·法力风暴 | 血量 27+0 | 铸币 4 | 酒馆 1 本
@@ -46,9 +62,7 @@ EXPECTED_TURN_2 = (
 场面（已用 1/7）：
   [#31] 海盗无赖 3/1 | 1 本 | 海盗 | 亡语：召唤一个1/1的海盗并使其立即发起攻击。
 手牌：
-  （空）
-下一个对手：费林大使 血量 30+0；还没见过阵容
-其他对手：拉卡尼休 血量 30 第 2 名"""
+  （空）"""
 )
 
 EXPECTED_SYSTEM = """你是《炉石传说》酒馆战棋的高分教练，正在给一位 6000 分以下的新手实时指挥招募阶段的操作。目标是稳定进前四、争取第一。请用简体中文，具体、直接。
@@ -97,16 +111,21 @@ def recruit_state(mini_lines, turn):
     )
 
 
-def full_message(state, memory=None, cards=CARDS):
-    ctx = build_context(state, RULES.buy_cost_for(state.me.hero_card_id))
-    return build_user_message(state, ctx, cards, memory)
+def full_message(state, memory=None, cards=CARDS, pool=None, all_opponents=True):
+    ctx = build_context(state, RULES.buy_cost_for(state.me.hero_card_id), pool=pool)
+    return build_user_message(state, ctx, cards, memory, all_opponents=all_opponents)
 
 
-def message_for(state, memory=None):
-    """去掉开头的本局卡池，只看局面部分。"""
-    pool, situation = full_message(state, memory).split("\n\n", 1)
-    assert pool.startswith("【本局卡池")
-    return situation
+def message_parts(state, memory=None, **kwargs):
+    """（本局卡池, 对手, 局面）三段，用空行分隔。"""
+    pool, opponents, situation = full_message(state, memory, **kwargs).split("\n\n", 2)
+    assert pool.startswith("【本局卡池") and opponents.startswith("【对手】")
+    return pool, opponents, situation
+
+
+def message_for(state, memory=None, **kwargs):
+    """去掉开头的本局卡池和对手，只看局面部分。"""
+    return message_parts(state, memory, **kwargs)[2]
 
 
 def test_user_message_snapshot(mini_lines):
@@ -324,10 +343,14 @@ def test_memory_line_with_this_turns_deep_analysis():
 def test_opponent_board_seen_in_combat(mini_lines):
     state = recruit_state(mini_lines, 2)
     state = state.model_copy(update={"next_opponent_id": 3})
-    assert (
-        "下一个对手：拉卡尼休 血量 30+0；第 1 回合见到的阵容：粗鄙小鬼(金) 2/2、刷新畸体 1/4"
-        in (message_for(state))
-    )
+    _, opponents, situation = message_parts(state)
+    # 下一个对手列完整阵容（带身材），其他对手只写摘要
+    assert opponents.splitlines()[2:] == [
+        "▶★ 第 2 名 拉卡尼休 | 血量 30+0 | 酒馆 1 本 | 威胁 78 | 第 1 回合见到 2 个随从，元素为主（1 个），"
+        "总身材 9，金色 1 张，阵容：粗鄙小鬼(金) 2/2、刷新畸体 1/4",
+        "  第 3 名 费林大使 | 血量 30+0 | 酒馆 1 本 | 威胁 23 | 还没见过阵容",
+    ]
+    assert "下一个对手" not in situation and "其他对手" not in situation
 
 
 def test_trinkets_and_global_mechanics_lines():
@@ -410,7 +433,7 @@ def test_budget_line_when_already_over_the_limit():
 def test_budget_line_survives_zero_buy_cost():
     state = make_state(gold=3)
     ctx = build_context(state, 0)
-    lines = build_user_message(state, ctx, CARDS).split("\n\n", 1)[1].splitlines()
+    lines = build_user_message(state, ctx, CARDS).split("\n\n", 2)[2].splitlines()
     assert lines[2].startswith("预算：铸币 3，只买随从最多 7 张；")
 
 
@@ -428,9 +451,13 @@ def test_other_opponents_without_place():
             }
         }
     )
-    text = message_for(state)
-    assert "其他对手：NOPE2 血量 15 第 2 名；NOPE 血量 20" in text
-    assert "None" not in text
+    _, opponents, _ = message_parts(state)
+    assert opponents.splitlines()[1:] == [
+        "主打种族：未知 2 家",
+        "★ 第 2 名 NOPE2 | 血量 15+0 | 酒馆 3 本 | 威胁 33 | 还没见过阵容",
+        "  第 ? 名 NOPE | 血量 20+0 | 酒馆 2 本 | 威胁 27 | 还没见过阵容",
+    ]
+    assert "None" not in opponents
 
 
 DESC = "购买随从和刷新的消耗改为（2）枚铸币。升级酒馆所需的铸币增加（1）枚。"
@@ -868,3 +895,156 @@ def test_repair_text_for_picks():
         assert repair_text(lane, "推荐的选项不在选项里") == (
             "你刚才的回答不合法：推荐的选项不在选项里。请按同样的规则改正后，重新输出完整的 json。"
         )
+
+
+def test_opponents_block_sits_between_the_pool_and_the_turn(mini_lines):
+    text = full_message(recruit_state(mini_lines, 2))
+    pool, opponents, situation = text.split("\n\n", 2)
+    assert pool == POOL_TURN_2 and opponents == OPPONENTS_TURN_2
+    assert situation.startswith("第 2 回合（招募）")
+
+
+def test_same_turn_messages_share_the_pool_and_opponents_prefix(mini_lines):
+    # 同一回合里刷新、买卖之后：卡池块和对手块逐字相同，前缀缓存能多命中一段
+    state = recruit_state(mini_lines, 2)
+    later = state.model_copy(
+        update={
+            "seq": state.seq + 5,
+            "shop": (shop_minion(60, "BGS_061", 3, 1, races=["PIRATE"]),),
+            "me": state.me.model_copy(update={"gold": 1}),
+        }
+    )
+    first, second = full_message(state), full_message(later)
+    assert first != second
+    assert first.split("\n\n")[:2] == second.split("\n\n")[:2]
+
+
+OPP_CARDS = CardDB(
+    [
+        {"id": "H2", "name": "洛卡拉", "type": "HERO"},
+        {"id": "H5", "name": "詹迪斯", "type": "HERO"},
+        {"id": "H6", "name": "范克里夫", "type": "HERO"},
+        {"id": "H7", "name": "布莱恩", "type": "HERO"},
+        {"id": "P", "name": "夺金健将", "type": "MINION"},
+        {"id": "E", "name": "电音合成师", "type": "MINION"},
+        {"id": "W", "name": "飘荡祭品", "type": "MINION"},
+    ]
+)
+
+
+def opponents_state(next_id):
+    def opp(player_id, health, place, tier, board=(), seen=None, armor=0):
+        return OpponentView(
+            player_id=player_id,
+            hero_card_id=f"H{player_id}",
+            health=health,
+            armor=armor,
+            place=place,
+            tavern_tier=tier,
+            last_board=tuple(board),
+            last_seen_turn=seen,
+        )
+
+    ghost = [
+        minion(1, "P", 7, 7, races=["PIRATE"], golden=True),
+        minion(2, "E", 3, 5, tier=2, races=["DRAGON"]),
+    ]
+    aberrations = [minion(3, "W", 10, 9, tier=3, races=["ABERRATION"]) for _ in range(2)]
+    state = make_state(turn=10, tribes={"ABERRATION", "PIRATE", "DRAGON"})
+    return state.model_copy(
+        update={
+            "opponents": {
+                2: opp(2, 30, 1, 5, aberrations, seen=9, armor=9),
+                5: opp(5, 0, 8, 2, ghost, seen=4),
+                6: opp(6, -9, 7, 5, [minion(4, "E", 3, 4)], seen=5),
+                7: opp(7, 28, 2, None),
+            },
+            "next_opponent_id": next_id,
+        }
+    )
+
+
+def test_opponents_block_with_a_ghost_and_eliminated_players():
+    _, opponents, _ = message_parts(opponents_state(next_id=5), cards=OPP_CARDS)
+    assert opponents.splitlines()[1:] == [
+        "主打种族：畸变 1 家、未知 1 家",
+        "★ 第 1 名 洛卡拉 | 血量 30+9 | 酒馆 5 本 | 威胁 96 | 第 9 回合见到 2 个随从，畸变为主（2 个），"
+        "总身材 38，主力：飘荡祭品、飘荡祭品",
+        "  第 2 名 布莱恩 | 血量 28+0 | 酒馆 ? 本 | 威胁 14 | 还没见过阵容",
+        # 下一个对手已经淘汰：这回合打它的残影，列出那套阵容
+        "▶ 第 8 名 詹迪斯 | 已淘汰，这回合打它的残影 | 第 4 回合见到的阵容：夺金健将(金) 7/7、电音合成师 3/5",
+        "  已淘汰：范克里夫",  # 其他淘汰的合成一行
+    ]
+    _, opponents, _ = message_parts(opponents_state(next_id=2), cards=OPP_CARDS)
+    assert opponents.splitlines()[-1] == "  已淘汰：范克里夫、詹迪斯"
+
+
+def test_only_the_next_opponent_when_all_opponents_is_off():
+    state = opponents_state(next_id=2)
+    _, opponents, _ = message_parts(state, cards=OPP_CARDS, all_opponents=False)
+    assert opponents.splitlines() == [
+        OPPONENTS_TITLE,
+        "▶★ 第 1 名 洛卡拉 | 血量 30+9 | 酒馆 5 本 | 威胁 96 | 第 9 回合见到 2 个随从，畸变为主（2 个），"
+        "总身材 38，阵容：飘荡祭品 10/9、飘荡祭品 10/9",
+    ]
+    nobody = state.model_copy(update={"opponents": {}, "next_opponent_id": None})
+    _, opponents, _ = message_parts(nobody, cards=OPP_CARDS)
+    assert opponents.splitlines() == [OPPONENTS_TITLE, "（还没有对手的信息）"]
+
+
+def pool_line(state, memory=None):
+    from lscs.advisor.pool import PoolEstimator
+
+    view = PoolEstimator(CARDS, {1: 16, 2: 15, 3: 13}).view(state)
+    lines = message_for(state, memory, pool=view).splitlines()
+    found = [line for line in lines if line.startswith("卡池估计")]
+    assert len(found) <= 1
+    if found:  # 紧跟在手牌段后面
+        after_hand = lines.index("手牌：") + 1
+        while lines[after_hand].startswith("  "):
+            after_hand += 1
+        assert lines[after_hand] == found[0]
+    return found[0] if found else None
+
+
+def test_pool_estimate_line_lists_pairs_near_pairs_and_memory():
+    brain = minion(10, "BG36_099", 3, 4, tier=2, races=["ABERRATION"])
+    spawn = minion(12, "BG36_116", 2, 2, tier=2, races=["ABERRATION"])
+    state = make_state(
+        board=[brain, brain.model_copy(update={"entity_id": 11}), spawn],
+        shop=[shop_minion(20, "BG36_116", 2, 2, tier=2, races=["ABERRATION"])],
+        tribes={"ABERRATION", "DEMON"},
+    )
+    memory = AIMemory(turn=1, deep=False, look_for=("飘荡祭品", "没有这张"))
+    assert pool_line(state, memory) == (
+        "卡池估计（还能刷到的张数）：蚀脑怪 还剩约 13 张（你有 2 张）；"
+        "孢林卵怪 还剩约 14 张（你有 1 张，商店里有 1 张）；飘荡祭品 还剩约 13 张"
+    )
+
+
+def test_no_pool_estimate_line_without_cards_or_notes():
+    state = make_state(board=[minion(10, "BG36_099", 3, 4, tier=2)])
+    assert pool_line(state) is None  # 没有对子、没有要找的牌
+    assert not any(line.startswith("卡池估计") for line in message_for(state).splitlines())
+
+
+def test_an_empty_captured_board_in_the_opponents_block():
+    empty = OpponentView(
+        player_id=7,
+        hero_card_id="H7",
+        health=20,
+        armor=0,
+        place=2,
+        tavern_tier=3,
+        last_board=(),
+        last_seen_turn=5,
+    )
+    ghost = empty.model_copy(update={"player_id": 8, "health": 0, "place": 8})
+    state = make_state(turn=6).model_copy(
+        update={"opponents": {7: empty, 8: ghost}, "next_opponent_id": 8}
+    )
+    _, opponents, _ = message_parts(state, cards=OPP_CARDS)
+    assert opponents.splitlines()[2:] == [
+        "★ 第 2 名 布莱恩 | 血量 20+0 | 酒馆 3 本 | 威胁 35 | 第 5 回合见到空场",
+        "▶ 第 8 名 布莱恩 | 已淘汰，这回合打它的残影 | 第 5 回合见到空场",
+    ]

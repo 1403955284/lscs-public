@@ -74,6 +74,7 @@ from lscs.llm.prompt import (
     build_choice_system_prompt,
     build_hero_message,
     build_hero_system_prompt,
+    build_opponents_block,
     build_system_prompt,
     build_user_message,
     repair_text,
@@ -288,6 +289,9 @@ class LLMScheduler:
         self._memory: AIMemory | None = None
         self._last_shop: frozenset[int] = frozenset()
         self._last_turn: int | None = None
+        # (酒馆回合, 对手块)：本回合第一次生成招募消息时算好，整回合复用（对手在招募中途升本、
+        # 加护甲也不改），同一回合的几次调用都能命中这一段前缀缓存
+        self._opponents: tuple[int, str] | None = None
 
     def observe(self, state: GameState, events: Sequence[Event], ctx: TurnContext | None) -> None:
         """每次状态更新都调用；只记下要发的请求，不在这里发出。"""
@@ -504,12 +508,26 @@ class LLMScheduler:
             if lane is self._choice:
                 return build_choice_message(pending.state, self._cards, self._memory)
             assert pending.ctx is not None
-            return build_user_message(pending.state, pending.ctx, self._cards, self._memory)
+            return build_user_message(
+                pending.state,
+                pending.ctx,
+                self._cards,
+                self._memory,
+                opponents_block=self._opponents_block(pending.state),
+            )
         except Exception:
             log.warning("生成 AI 局面消息时出错", exc_info=True)
             notice_lane = "choice" if lane is self._choice else None
             self._events.put(AINotice("生成 AI 局面时出错，本次跳过", notice_lane))
             return None
+
+    def _opponents_block(self, state: GameState) -> str:
+        cached = self._opponents
+        if cached is None or cached[0] != state.turn:
+            block = build_opponents_block(state, self._cards, self._cfg.all_opponents)
+            cached = (state.turn, block)
+            self._opponents = cached
+        return cached[1]
 
     def _start(self, lane: _LaneState, pending: _Pending, user: str) -> bool:
         """发出请求；预算用完、没有发出时返回 False。"""

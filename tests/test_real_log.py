@@ -177,3 +177,20 @@ def test_two_discovers_in_a_row(updates):
         (EventType.CHOICE_OFFERED, 4),
         (EventType.CHOICE_RESOLVED, 4),
     ]
+
+
+def test_eliminated_opponents_return_their_minions_to_the_pool(updates):
+    state, _ = at(updates, EventType.RECRUIT_STARTED, 9)
+    gone = state.opponents[8]
+    assert (gone.health, gone.alive) == (-1, False)
+    assert "BG23_000" not in state.pool_estimate
+    # 费林大使只在第 1 回合交过手，酒馆等级照样实时更新
+    assert (state.opponents[4].tavern_tier, state.opponents[4].last_seen_turn) == (6, 1)
+    state, _ = at(updates, EventType.RECRUIT_STARTED, 15)
+    pool = state.pool_estimate
+    assert (pool["BGS_061"], pool["GIL_681"], pool["BG21_010"]) == (14, 11, 10)
+
+
+def test_next_opponent_during_combat_is_the_current_one(updates):
+    state = next(s for s, _ in updates if s.phase == Phase.COMBAT and s.turn == 5)
+    assert state.next_opponent_id == 6

@@ -352,3 +352,44 @@ def test_paid_targeted_power_remembers_its_target_while_unaffordable(mini_lines)
         True,
         (),
     )
+
+
+def opponent(player_id, health, board, armor=0):
+    from lscs.state.models import OpponentView
+
+    return OpponentView(
+        player_id=player_id,
+        hero_card_id="HERO",
+        health=health,
+        armor=armor,
+        place=player_id,
+        tavern_tier=2,
+        last_board=tuple(board),
+        last_seen_turn=3,
+    )
+
+
+def test_opponent_alive_until_health_reaches_zero():
+    assert opponent(2, 1, []).alive
+    assert not opponent(3, 0, []).alive
+    assert not opponent(4, -3, []).alive  # 淘汰后血量可以是负数
+
+
+def test_held_minions_skip_eliminated_opponents():
+    from factory import hand_minion, hand_spell, make_state, minion
+
+    from lscs.state.build import held_minions
+
+    mine = minion(10, "BG21_029", 1, 1)
+    in_hand = hand_minion(11, "BGS_061", 3, 1)
+    me = make_state(board=[mine], hand=[in_hand, hand_spell(12, "BG28_500")]).me
+    alive = minion(20, "BG23_009", 2, 5)
+    dead = minion(30, "BGS_116", 4, 5)
+    negative = minion(40, "BG21_029_G", 2, 2, golden=True)
+    opponents = {
+        2: opponent(2, 12, [alive]),
+        3: opponent(3, 0, [dead]),
+        4: opponent(4, -3, [negative]),
+    }
+    assert held_minions(me, opponents) == [mine, in_hand, alive]
+    assert held_minions(None, opponents) == [alive]

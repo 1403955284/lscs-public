@@ -137,5 +137,127 @@
   "attack": 1,
   "health": 1,
   "cost": 0
+ },
+ {
+  "id": "BG36_099",
+  "dbfId": 131696,
+  "name": "蚀脑怪",
+  "type": "MINION",
+  "techLevel": 2,
+  "races": [
+   "ABERRATION"
+  ],
+  "attack": 3,
+  "health": 4,
+  "isBattlegroundsPoolMinion": true,
+  "battlegroundsPremiumDbfId": 131697
+ },
+ {
+  "id": "BG36_099_G",
+  "dbfId": 131697,
+  "name": "蚀脑怪",
+  "type": "MINION",
+  "techLevel": 2,
+  "races": [
+   "ABERRATION"
+  ],
+  "attack": 6,
+  "health": 8,
+  "battlegroundsNormalDbfId": 131696
+ },
+ {
+  "id": "BG36_116",
+  "dbfId": 133104,
+  "name": "孢林卵怪",
+  "type": "MINION",
+  "techLevel": 2,
+  "races": [
+   "ABERRATION"
+  ],
+  "attack": 2,
+  "health": 2,
+  "isBattlegroundsPoolMinion": true,
+  "battlegroundsPremiumDbfId": 133105
+ },
+ {
+  "id": "BG36_098",
+  "dbfId": 131694,
+  "name": "虚悯者",
+  "type": "MINION",
+  "techLevel": 1,
+  "races": [
+   "ABERRATION"
+  ],
+  "attack": 3,
+  "health": 2,
+  "isBattlegroundsPoolMinion": true,
+  "battlegroundsPremiumDbfId": 131695
+ },
+ {
+  "id": "BG36_113",
+  "dbfId": 133098,
+  "name": "飘荡祭品",
+  "type": "MINION",
+  "techLevel": 3,
+  "races": [
+   "ABERRATION"
+  ],
+  "attack": 2,
+  "health": 1,
+  "isBattlegroundsPoolMinion": true,
+  "battlegroundsPremiumDbfId": 133099
+ },
+ {
+  "id": "BG23_HERO_201pt5",
+  "dbfId": 91961,
+  "name": "厄祖玛特的触须",
+  "type": "MINION",
+  "techLevel": 1,
+  "races": [
+   "BEAST"
+  ],
+  "attack": 2,
+  "health": 2,
+  "battlegroundsPremiumDbfId": 97431
+ },
+ {
+  "id": "BGFYM_002t",
+  "dbfId": 130613,
+  "name": "畸变触手",
+  "type": "MINION",
+  "techLevel": 1,
+  "races": [
+   "ABERRATION"
+  ],
+  "attack": 0,
+  "health": 2,
+  "battlegroundsPremiumDbfId": 130614
+ },
+ {
+  "id": "TB_BaconUps_159",
+  "dbfId": 64055,
+  "name": "爆裂飓风",
+  "type": "MINION",
+  "techLevel": 1,
+  "races": [
+   "ELEMENTAL"
+  ],
+  "attack": 4,
+  "health": 2,
+  "battlegroundsNormalDbfId": 64054
+ },
+ {
+  "id": "BGS_119",
+  "dbfId": 64054,
+  "name": "爆裂飓风",
+  "type": "MINION",
+  "techLevel": 1,
+  "races": [
+   "ELEMENTAL"
+  ],
+  "attack": 2,
+  "health": 1,
+  "isBattlegroundsPoolMinion": true,
+  "battlegroundsPremiumDbfId": 64055
  }
 ]

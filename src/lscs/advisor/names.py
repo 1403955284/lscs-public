@@ -1,10 +1,11 @@
-"""种族和关键词的中文名，以及"选一个"的标题和选项的写法（时间线、终端、面板共用）。"""
+"""种族和关键词的中文名，随从名（金色加"(金)"），以及"选一个"的标题和选项的写法
+（时间线、终端、面板共用）。"""
 
 from __future__ import annotations
 
 from collections.abc import Callable
 
-from lscs.state.models import Choice, ChoiceKind, ChoiceOption
+from lscs.state.models import Choice, ChoiceKind, ChoiceOption, Minion
 
 Namer = Callable[[str], str]
 
@@ -40,6 +41,12 @@ def tribe_zh(race: str) -> str:
 
 def keyword_zh(keyword: str) -> str:
     return KEYWORD_ZH.get(keyword, keyword)
+
+
+def minion_label(m: Minion, name: Namer) -> str:
+    """随从的名字，金色的加"(金)"（卡名里已经带着就不再加）。"""
+    card = name(m.card_id)
+    return f"{card}(金)" if m.golden and "(金)" not in card else card
 
 
 def armor_zh(armor: int) -> str:

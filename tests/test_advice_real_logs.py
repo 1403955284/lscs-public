@@ -83,8 +83,13 @@ def test_each_recruit_header_is_followed_by_its_own_advice(path):
     headers = [i for i, line in enumerate(out) if "招募开始" in line]
     assert headers
     for i in headers:
-        # 标题后面是商店、场面、手牌三行，紧接着就是这个回合的规则建议
-        assert out[i + 4].startswith("  📋 规则："), out[i : i + 5]
+        # 标题后面是商店、场面、手牌三行，然后是对手一览（活着的对手、残影各一行，
+        # 其他淘汰的合成一行），紧接着就是这个回合的规则建议
+        assert out[i + 4].startswith("  👥 对手"), out[i : i + 5]
+        end = next(j for j in range(i + 5, len(out)) if out[j].startswith("  📋"))
+        rows = out[i + 5 : end]
+        assert rows and all(" 名 " in r or r.strip().startswith("已淘汰：") for r in rows), rows
+        assert out[end].startswith("  📋 规则："), out[i : end + 1]
 
 
 @pytest.mark.parametrize("path", [REAL_LOG, pytest.param(USER_LOG, marks=NEEDS_USER_LOG)])

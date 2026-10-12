@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from lscs.state.models import (
     ALREADY_USED,
@@ -19,6 +20,9 @@ from lscs.state.models import (
 )
 from lscs.state.pool import GOLDEN_SUFFIX, base_card_id
 from lscs.state.tribes import IGNORED_RACES
+
+if TYPE_CHECKING:
+    from lscs.advisor.pool import PoolView
 
 SPELL = "BATTLEGROUND_SPELL"
 MINION = "MINION"
@@ -40,6 +44,8 @@ class TurnContext:
     copies: Mapping[str, int]  # 普通卡 ID -> 场面 + 手牌里的非金色张数
     main_tribe: str | None
     hero_power: HeroPower | None = None
+    # 查过卡牌库的卡池估计；规则和校验不读它，只给提示词写"还剩约 N 张"。没有卡牌数据时为 None
+    pool: PoolView | None = None
 
     @property
     def board_minions(self) -> int:
@@ -88,7 +94,11 @@ def is_golden(card_id: str, golden: bool) -> bool:
     return golden or card_id.endswith(GOLDEN_SUFFIX)
 
 
-def _main_tribe(minions: Iterable[Minion | HandCard], lobby: frozenset[str]) -> str | None:
+def main_tribe_of(
+    minions: Iterable[Minion | HandCard], lobby: frozenset[str]
+) -> tuple[str | None, int]:
+    """数量最多的种族和它的数量；ALL、INVALID 不算，本局种族已知时不在本局的不算。
+    没有种族时是 (None, 0)。"""
     counts: Counter[str] = Counter()
     stats: Counter[str] = Counter()
     for m in minions:
@@ -98,12 +108,15 @@ def _main_tribe(minions: Iterable[Minion | HandCard], lobby: frozenset[str]) -> 
             counts[race] += 1
             stats[race] += (m.atk or 0) + (m.health or 0)
     if not counts:
-        return None
+        return None, 0
     # 数量最多；数量相同时取总身材更高的；再相同时按名字，保证结果确定
-    return max(counts, key=lambda r: (counts[r], stats[r], r))
+    tribe = max(counts, key=lambda r: (counts[r], stats[r], r))
+    return tribe, counts[tribe]
 
 
-def build_context(state: GameState, buy_cost: int) -> TurnContext | None:
+def build_context(
+    state: GameState, buy_cost: int, pool: PoolView | None = None
+) -> TurnContext | None:
     """只在招募阶段有意义；其他阶段返回 None。"""
     if state.phase != Phase.RECRUIT or state.me is None:
         return None
@@ -123,6 +136,7 @@ def build_context(state: GameState, buy_cost: int) -> TurnContext | None:
         board=me.board,
         hand=me.hand,
         copies=dict(copies),
-        main_tribe=_main_tribe(minions, state.tribes),
+        main_tribe=main_tribe_of(minions, state.tribes)[0],
         hero_power=me.hero_power,
+        pool=pool,
     )

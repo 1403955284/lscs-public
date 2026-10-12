@@ -7,7 +7,7 @@ from lscs.advisor.display import AdviceDisplay
 from lscs.advisor.rules_config import load_rules_config
 from lscs.advisor.runner import AdviceRunner
 from lscs.pipeline import Pipeline
-from lscs.state.models import Event, EventType
+from lscs.state.models import Event, EventType, Phase
 from lscs.state.tracker import StateTracker
 
 RULES = load_rules_config(
@@ -28,8 +28,16 @@ def test_rules_advice_printed_during_recruit(mini_lines):
     run_with_runner(mini_lines, runner)
     assert out == [
         "  📋 规则：护甲信息不全，等 AI 建议",  # 选英雄：这份合成日志的英雄没有护甲标签
+        # 每回合开始先列对手一览
+        "  👥 对手（主打：未知 2）",
+        "  ▶★ 第 2 名 TB_BaconShop_HERO_75 30+0 · 1 本 · 还没见过阵容 · 威胁 23",
+        "     第 3 名 BG22_HERO_201 30+0 · 1 本 · 还没见过阵容 · 威胁 23",
         "  📋 规则：① 买 BGS_116 1/4（商店里身材最好，有嘲讽）",
         "          ② 刷新（剩 1 金，刷新找更好的牌）",  # 米尔豪斯买牌只要 2 金
+        "  👥 对手（主打：元素 1 家、未知 1）",
+        "   ★ 第 2 名 TB_BaconShop_HERO_75 30+0 · 1 本 · 元素×1 身材 9"
+        " · BG21_029_G(金)、BGS_116 · 第 1 回合见 · 威胁 78",
+        "   ▶ 第 3 名 BG22_HERO_201 30+0 · 1 本 · 还没见过阵容 · 威胁 23",
         "  📋 规则：① 升本 → 2 本（第 2 回合按节奏该升 2 本了）   方向：海盗",
     ]
     assert runner.last_rules.turn == 2
@@ -46,8 +54,10 @@ def test_rules_error_does_not_stop(mini_lines, monkeypatch):
     spy = SpyScheduler()
     runner = AdviceRunner(RULES, lambda c: c, AdviceDisplay(lambda c: c, out.append), spy)
     run_with_runner(mini_lines, runner)
-    # 每回合只提示一次（第 1、2 回合）；选英雄的规则不受影响
-    assert out == ["  📋 规则：护甲信息不全，等 AI 建议"] + ["  📋 本回合规则建议出错"] * 2
+    # 每回合只提示一次（第 1、2 回合）；选英雄的规则、对手一览不受影响
+    rules = [line for line in out if line.startswith("  📋")]
+    assert rules == ["  📋 规则：护甲信息不全，等 AI 建议"] + ["  📋 本回合规则建议出错"] * 2
+    assert sum(line.startswith("  👥 对手") for line in out) == 2
     # 规则出错时照样把局面交给 AI 调度器（招募阶段的更新都带 ctx）
     assert sum(has_ctx for _, has_ctx in spy.observed) >= 2
 
@@ -178,3 +188,34 @@ def test_choice_offered_before_main_action_lists_the_options():
     done = make_state(turn=6, seq=2, main_action=False)
     runner.on_update(done, [resolved_event(12, turn=6, picked=6933)])
     assert len(display.calls) == 1  # 选完不再提示
+
+
+def test_opponents_overview_once_per_turn_before_the_rules():
+    from lscs.state.models import OpponentView
+
+    display = RecordingDisplay()
+    runner = AdviceRunner(RULES, lambda c: c, display)
+    rival = OpponentView(player_id=3, hero_card_id="H", health=30, armor=0, place=2, tavern_tier=2)
+    shop = [shop_minion(20, "BGS_061", 3, 1)]
+
+    def state(turn, seq, gold=4, **kwargs):
+        made = make_state(turn=turn, gold=gold, shop=shop, seq=seq, **kwargs)
+        return made.model_copy(update={"opponents": {3: rival}, "next_opponent_id": 3})
+
+    runner.on_update(state(2, 1), _events(EventType.RECRUIT_STARTED))
+    runner.on_update(state(2, 2, gold=2), _events(EventType.GOLD_CHANGED))  # 同一回合：不再列
+    runner.on_update(state(2, 3, phase=Phase.COMBAT), _events(EventType.COMBAT_STARTED))
+    # 重连：没有招募开始事件，第一次看到这个回合也列一次
+    runner.on_update(state(3, 4), _events(EventType.SHOP_CHANGED, turn=3))
+    methods = [name for name, _ in display.calls]
+    assert methods == ["show_opponents", "show_rules", "show_rules", "show_opponents", "show_rules"]
+    _, (shown, overview) = display.calls[0]
+    assert shown.seq == 1 and overview.turn == 2
+    assert [s.player_id for s in overview.opponents] == [3]
+
+
+def test_no_overview_without_opponents():
+    display = RecordingDisplay()
+    runner = AdviceRunner(RULES, lambda c: c, display)
+    runner.on_update(make_state(turn=2, gold=4), _events(EventType.RECRUIT_STARTED))
+    assert [name for name, _ in display.calls] == ["show_rules"]

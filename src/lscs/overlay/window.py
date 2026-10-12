@@ -22,13 +22,16 @@ from lscs.overlay.model import NextStep, OverlayModel, OverlayView, condense
 log = logging.getLogger(__name__)
 
 RENDER_MS = 150  # 读取数据模型的间隔
-CONDENSE_LEVELS = 3  # 0 全部；1 去掉"方向"；2 再去掉"要找"、附注和点评，"目标"只留一行
+# 0 全部；1 去掉最强威胁那一行和"方向"；2 再去掉下一个对手（战斗中是其他对手）、"要找"、
+# "对子"、附注和点评，"目标"只留一行
+CONDENSE_LEVELS = 3
 NEXT_SCALE = 1.25  # "下一步"第一行的字比正文大这么多
 PLACE_MS = 500  # 重新定位、判断显示/隐藏的间隔
 BG = "#1e1e24"
 TITLE = "#d4d4dc"
 RULES_TAG = "#e6b450"  # 金黄
 AI_TAG = "#4fc9e0"  # 青色
+OPP_TAG = "#c9a0dc"  # 淡紫
 TEXT = "#f0f0f4"
 MUTED = "#8c8c96"
 WARN = "#ff9f43"  # 橙色
@@ -392,8 +395,8 @@ class OverlayWindow:
         )
 
     def _draw(self) -> None:
-        """画出当前内容；超过最大高度时逐级精简（先去掉"方向"，再去掉"要找"、附注和选项名、
-        "目标"和选项的理由只留一行），最后仍然超高就截掉底部。"""
+        """画出当前内容；超过最大高度时逐级精简（先去掉最强威胁那一行和"方向"，再去掉下一个
+        对手、"要找"、附注和选项名，"目标"和选项的理由只留一行），最后仍然超高就截掉底部。"""
         view, layout = self._view, self._layout
         if view is None or layout is None:
             return
@@ -444,10 +447,12 @@ class OverlayWindow:
                 label = self._label(wrapped(text, inner, text_font, max_lines), color, text_font)
                 label.grid(row=row, column=0, columnspan=2, sticky="w")
                 row += 1
+        # "对手"在最下面：面板超高时最先被精简、截掉，不挤占"下一步"和建议
         sections = (
             ("选择", view.choice, RULES_TAG),
             ("规则", view.rules, RULES_TAG),
             (view.ai_title, view.ai, AI_TAG),
+            ("对手", view.opponents, OPP_TAG),
         )
         for tag, lines, color in sections if not view.compact else ():
             if not lines:

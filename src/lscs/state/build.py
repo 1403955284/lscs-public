@@ -443,6 +443,21 @@ def opponents(store: EntityStore, last_boards: LastBoards) -> dict[int, Opponent
     return result
 
 
+def held_minions(
+    me: PlayerView | None, opponents: Mapping[int, OpponentView]
+) -> list[Minion | HandCard]:
+    """算进卡池扣除的随从：我方场面、手牌里的随从，以及还没淘汰的对手最近一次见到的阵容。
+    淘汰的对手的随从已经回到池里（打它的残影时看到的也是回到池里的牌）。"""
+    held: list[Minion | HandCard] = []
+    if me is not None:
+        held.extend(me.board)
+        held.extend(card for card in me.hand if card.card_type == CardType.MINION.name)
+    for opp in opponents.values():
+        if opp.alive:
+            held.extend(opp.last_board)
+    return held
+
+
 def build_state(
     store: EntityStore,
     *,
@@ -460,12 +475,6 @@ def build_state(
     shop = shop_items(store)
     opps = opponents(store, last_boards)
     me_entity = store.player_entity(me_player_id(store))
-    held = []
-    if me is not None:
-        held.extend(me.board)
-        held.extend(card for card in me.hand if card.card_type == CardType.MINION.name)
-    for opp in opps.values():
-        held.extend(opp.last_board)
     final_place = None
     if phase == Phase.GAME_OVER and me_entity is not None:
         final_place = store.tag(
@@ -484,7 +493,7 @@ def build_state(
         tribes_confidence=tribes_confidence,
         pool_estimate=estimate_pool(
             pool_config.copies,
-            held=held,
+            held=held_minions(me, opps),
             seen=[item for item in shop if item.card_type == CardType.MINION.name],
         ),
         uncertain=uncertain,

@@ -11,7 +11,14 @@ from pathlib import Path
 
 from lscs.advisor.context import MINION, TurnContext, hero_power_blocker, hero_power_used
 from lscs.advisor.models import Lane
-from lscs.advisor.names import armor_zh, choice_title, keyword_zh, tribe_zh
+from lscs.advisor.names import armor_zh, choice_title, keyword_zh, minion_label, tribe_zh
+from lscs.advisor.opponents import (
+    OpponentSummary,
+    contested_parts,
+    eliminated_names,
+    summarize_opponents,
+)
+from lscs.advisor.pool import PoolNote, in_lobby, pool_notes
 from lscs.cards.db import CardDB, CardInfo
 from lscs.llm.parse import MAX_ACTIONS
 from lscs.state.models import (
@@ -138,6 +145,13 @@ REPAIR_PICK = "你刚才的回答不合法：{problem}。请按同样的规则�
 
 MAX_TAVERN_TIER = 6  # 酒馆最高 6 本；7 本的牌不会出现在商店里，不让 AI 叫新手去找
 POOL_TITLE = "【本局卡池（本局种族的随从和中立随从，按酒馆等级）】"
+# 对手块（对手一览与卡池估计设计文档第 8 节）：自带说明，系统提示不改
+OPPONENTS_TITLE = (
+    "【对手】按名次；▶ 下一个对手；★ 最强威胁（0~100，按最近见到的阵容、酒馆等级和血量粗估）。"
+    "阵容是最近一次交手时看到的，之后可能变强了。同一种族被多家主打时，这个种族的牌更难凑。"
+)
+NO_OPPONENTS = "（还没有对手的信息）"
+POOL_LINE_TITLE = "卡池估计（还能刷到的张数）："
 SPELLS_TITLE = "【酒馆法术】"
 
 
@@ -191,11 +205,6 @@ def _in_tavern(card: CardInfo) -> bool:
     return (card.tier or 0) <= MAX_TAVERN_TIER
 
 
-def _in_lobby(card: CardInfo, tribes: frozenset[str]) -> bool:
-    """本局种族的随从、中立随从（没有种族）和全种族随从。"""
-    return not card.races or "ALL" in card.races or bool(tribes.intersection(card.races))
-
-
 def _races_zh(card: CardInfo) -> str:
     return "、".join(tribe_zh(r) for r in card.races) or "中立"
 
@@ -204,7 +213,7 @@ def card_pool_block(cards: CardDB, tribes: frozenset[str]) -> str:
     """本局卡池：放在局面消息开头，和系统提示一起组成稳定的前缀（只在本局种族变化时才变）。
     种族还在推断中时用当前推断出的种族。不列 7 本的随从和法术。"""
     minions = sorted(
-        (c for c in cards.pool_minions() if _in_tavern(c) and _in_lobby(c, tribes)),
+        (c for c in cards.pool_minions() if _in_tavern(c) and in_lobby(c, tribes)),
         key=lambda c: (c.tier or 0, _races_zh(c), c.name),
     )
     lines = [POOL_TITLE]
@@ -382,10 +391,103 @@ def _trinkets_line(trinkets: Sequence[str], w: _Writer) -> str:
     return "饰品：" + "；".join(f"{w.name(t)}（{w.text(t)}）" for t in trinkets)
 
 
+def _seen_text(s: OpponentSummary, board: Sequence[Minion], full: bool, w: _Writer) -> str:
+    """见过的阵容：几个随从、主种族、总身材、金色；full 时列完整阵容（带身材），否则只列主力。"""
+    if s.empty_board:
+        return f"第 {s.seen_turn} 回合见到空场"
+    parts = [f"第 {s.seen_turn} 回合见到 {s.minions} 个随从"]
+    if s.main_tribe is not None:
+        parts.append(f"{tribe_zh(s.main_tribe)}为主（{s.tribe_count} 个）")
+    parts.append(f"总身材 {s.total_stats}")
+    if s.golden:
+        parts.append(f"金色 {s.golden} 张")
+    if full and board:
+        parts.append("阵容：" + "、".join(w.minion_parts(m)[0] for m in board))
+    elif s.key_cards:
+        parts.append("主力：" + "、".join(minion_label(m, w.name) for m in s.key_cards))
+    return "，".join(parts)
+
+
+def _opponent_line(s: OpponentSummary, state: GameState, w: _Writer) -> str:
+    marks = ("▶" if s.next else "") + ("★" if s.strongest else "")
+    prefix = f"{marks} " if len(marks) == 2 else f"{marks or ' '} "
+    head = f"{prefix}第 {s.place if s.place is not None else '?'} 名 {w.name(s.hero_card_id)}"
+    opp = state.opponents.get(s.player_id)
+    board = opp.last_board if opp is not None else ()
+    if not s.alive:
+        if not s.next:
+            return f"{head} | 已淘汰"
+        if s.seen_turn is None:
+            seen = "还没见过阵容"
+        elif not board:
+            seen = f"第 {s.seen_turn} 回合见到空场"
+        else:
+            cards = "、".join(w.minion_parts(m)[0] for m in board)
+            seen = f"第 {s.seen_turn} 回合见到的阵容：{cards}"
+        return f"{head} | 已淘汰，这回合打它的残影 | {seen}"
+    tier = "?" if s.tavern_tier is None else s.tavern_tier
+    seen = "还没见过阵容" if s.seen_turn is None else _seen_text(s, board, s.next, w)
+    return f"{head} | 血量 {s.health}+{s.armor} | 酒馆 {tier} 本 | 威胁 {s.threat} | {seen}"
+
+
+def build_opponents_block(state: GameState, cards: CardDB, all_opponents: bool = True) -> str:
+    """对手块：放在卡池块之后、回合内容之前。阵容只在战斗之后变；对手的酒馆等级和血量在招募
+    中途也会变（升本、加护甲），所以调度器每回合第一次生成后整回合复用它，同一回合内不变，
+    能多命中一段前缀缓存。all_opponents=False 时只写说明行和下一个对手。"""
+    w = _Writer(cards)
+    overview = summarize_opponents(state)
+    lines = [OPPONENTS_TITLE]
+    if all_opponents and overview.opponents:
+        parts = contested_parts(overview)
+        if overview.unknown:
+            parts.append(f"未知 {overview.unknown} 家")
+        lines.append("主打种族：" + ("、".join(parts) or "看不出"))
+    shown = [s for s in overview.opponents if s.next or (all_opponents and s.alive)]
+    lines += [_opponent_line(s, state, w) for s in shown]
+    gone = eliminated_names(overview, w.name)
+    if all_opponents and gone:
+        lines.append("  已淘汰：" + "、".join(gone))  # 残影以外的淘汰玩家合成一行
+    if len(lines) == 1:
+        lines.append(NO_OPPONENTS)
+    return "\n".join(lines)
+
+
+def _pool_note_text(note: PoolNote) -> str:
+    owned = []
+    if note.have:
+        owned.append(f"你有 {note.have} 张")
+    if note.shop:
+        owned.append(f"商店里有 {note.shop} 张")
+    tail = f"（{'，'.join(owned)}）" if owned else ""
+    return f"{note.name} 还剩约 {note.left} 张{tail}"
+
+
+def _pool_line(
+    state: GameState, ctx: TurnContext, memory: AIMemory | None, w: _Writer
+) -> str | None:
+    """对子、差一张成对子和记忆里要找的牌还剩约几张；没有卡池估计或没有这些牌时为 None。"""
+    if ctx.pool is None:
+        return None
+    shop = [s.card_id for s in state.shop if s.card_type == MINION]
+    look_for = memory.look_for if memory is not None else ()
+    notes = pool_notes(ctx.pool, ctx, shop, look_for, w.name)
+    if not notes:
+        return None
+    return POOL_LINE_TITLE + "；".join(_pool_note_text(n) for n in notes)
+
+
 def build_user_message(
-    state: GameState, ctx: TurnContext, cards: CardDB, memory: AIMemory | None = None
+    state: GameState,
+    ctx: TurnContext,
+    cards: CardDB,
+    memory: AIMemory | None = None,
+    all_opponents: bool = True,
+    opponents_block: str | None = None,
 ) -> str:
-    """本局卡池 + 空行 + 局面；有记忆时末尾加一行之前的判断。不附规则建议（AI 曾经照抄）。"""
+    """本局卡池 + 空行 + 对手 + 空行 + 局面；有记忆时末尾加一行之前的判断。不附规则建议
+    （AI 曾经照抄）。卡池块和对手块在前：跨回合的缓存前缀（系统提示 + 卡池块）不变，
+    对手块同一回合内不变。opponents_block：调度器这一回合已经生成的对手块；
+    None 时按 state 现生成。"""
     me = state.me
     assert me is not None
     w = _Writer(cards)
@@ -412,33 +514,20 @@ def build_user_message(
     lines += w.section("商店：", state.shop)
     lines += w.section(f"场面（已用 {len(me.board)}/7）：", me.board)
     lines += w.section("手牌：", me.hand)
-
-    nxt = state.opponents.get(state.next_opponent_id) if state.next_opponent_id else None
-    if nxt is not None:
-        if nxt.last_board:
-            board = "、".join(" ".join(w.minion_parts(m)[:1]) for m in nxt.last_board)
-            seen = f"第 {nxt.last_seen_turn} 回合见到的阵容：{board}"
-        else:
-            seen = "还没见过阵容"
-        lines.append(
-            f"下一个对手：{w.name(nxt.hero_card_id)} 血量 {nxt.health}+{nxt.armor}；{seen}"
-        )
-    others = sorted(
-        (o for o in state.opponents.values() if o is not nxt and o.health > 0),
-        key=lambda o: (o.place or 99, o.player_id),
-    )
-    if others:
-        lines.append(
-            "其他对手："
-            + "；".join(
-                f"{w.name(o.hero_card_id)} 血量 {o.health}"
-                + (f" 第 {o.place} 名" if o.place is not None else "")
-                for o in others
-            )
-        )
+    pool = _pool_line(state, ctx, memory, w)
+    if pool is not None:
+        lines.append(pool)
     if memory is not None:
         lines.append(_memory_line(memory, state.turn))
-    return card_pool_block(cards, state.tribes) + "\n\n" + "\n".join(lines)
+    return "\n\n".join(
+        (
+            card_pool_block(cards, state.tribes),
+            opponents_block
+            if opponents_block is not None
+            else build_opponents_block(state, cards, all_opponents),
+            "\n".join(lines),
+        )
+    )
 
 
 def _hero_power_part(dbf: int | None, cards: CardDB) -> str:

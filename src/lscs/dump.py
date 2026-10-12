@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from lscs.advisor.names import armor_zh, choice_option_text, choice_title
+from lscs.advisor.names import armor_zh, choice_option_text, choice_title, minion_label
 from lscs.state.models import Event, EventType, GameState, Minion, TribesConfidence
 
 Namer = Callable[[str], str]
@@ -25,8 +25,7 @@ def _identity(card_id: str) -> str:
 
 
 def _minion(m: Minion, name: Namer) -> str:
-    golden = "(金)" if m.golden and "(金)" not in name(m.card_id) else ""
-    return f"{name(m.card_id)}{golden} {m.atk}/{m.health}"
+    return f"{minion_label(m, name)} {m.atk}/{m.health}"
 
 
 def _list(items: list[str]) -> str:

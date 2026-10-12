@@ -11,6 +11,7 @@ from lscs.state.pool import GOLDEN_SUFFIX, base_card_id
 
 _TAGS = re.compile(r"<[^>]+>")
 _SEPARATOR = re.compile(r"[0-9@]{0,2}")
+GOLDEN_MARKS = ("(金)", "（金）")  # 卡名后面的金色标记（AI 写的"要找"可能带着）
 MIN_REPEAT = 6  # 重复的那一段至少这么长，避免把"+1+1"之类的短文本当成重复
 
 
@@ -51,6 +52,7 @@ class CardInfo:
     duos_only: bool
     dbf_id: int | None = None
     cost: int | None = None  # 铸币费用（酒馆法术）
+    normal_dbf_id: int | None = None  # battlegroundsNormalDbfId：金色卡对应的普通卡
 
 
 class CardDB:
@@ -73,10 +75,12 @@ class CardDB:
                 duos_only=bool(raw.get("isBattlegroundsDuosExclusive")),
                 dbf_id=raw.get("dbfId"),
                 cost=raw.get("cost"),
+                normal_dbf_id=raw.get("battlegroundsNormalDbfId"),
             )
             self._cards[info.card_id] = info
             if info.dbf_id is not None:
                 self._by_dbf[info.dbf_id] = info
+        self._pool_by_name: dict[str, CardInfo] | None = None  # 第一次按卡名查时才建
 
     @classmethod
     def from_json_file(cls, path: Path) -> CardDB:
@@ -94,6 +98,30 @@ class CardDB:
             return card_id
         golden = card_id.endswith(GOLDEN_SUFFIX) and info.card_id != card_id
         return f"{info.name}(金)" if golden else info.name
+
+    def normal_id(self, card_id: str) -> str:
+        """金色卡对应的普通卡 ID：以 _G 结尾的去掉后缀；旧式金色卡（TB_BaconUps_*）按
+        battlegroundsNormalDbfId 查；都不是（或查不到）时原样返回。"""
+        if card_id.endswith(GOLDEN_SUFFIX):
+            return base_card_id(card_id)
+        info = self._cards.get(card_id)
+        if info is not None and info.normal_dbf_id is not None:
+            normal = self._by_dbf.get(info.normal_dbf_id)
+            if normal is not None:
+                return normal.card_id
+        return card_id
+
+    def find_pool_minion(self, name: str) -> CardInfo | None:
+        """按卡名精确查卡池随从（去掉首尾空白和末尾的"(金)"）；同名多张取酒馆等级最低的。"""
+        name = name.strip()
+        for golden in GOLDEN_MARKS:
+            name = name.removesuffix(golden).strip()
+        if self._pool_by_name is None:
+            index: dict[str, CardInfo] = {}
+            for card in self.pool_minions():  # 按酒馆等级排好序：同名的先放进去的等级最低
+                index.setdefault(card.name, card)
+            self._pool_by_name = index
+        return self._pool_by_name.get(name) if name else None
 
     def pool_minions(self, include_duos: bool = False) -> list[CardInfo]:
         return sorted(
