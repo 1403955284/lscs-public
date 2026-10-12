@@ -36,7 +36,7 @@ DONE = "已按建议操作完"
 NOTHING_TO_DO = "无需操作"
 REFRESHED = "商店已刷新"
 AI_REFRESHED = "商店已刷新，等待新的 AI 建议"
-MAX_REASON = 40  # "分析：……"（或"思路：……"）整行最多几个字，超出加"…"
+MAX_REASON = 40  # "目标：……"（没有目标时"分析：……"）整行最多几个字，超出加"…"
 MAX_LOOK_FOR = 24  # "要找：……"整行最多几个字，超出加"…"
 AI_TITLE = "AI"
 DEEP_TITLE = "AI（深度）"
@@ -68,7 +68,7 @@ class OverlayView:
 
 def condense(view: OverlayView, level: int) -> OverlayView:
     """面板超高时逐级精简：1 去掉"方向"；2 再去掉"要找"和附注（如"基于 N 秒前的局面"）。
-    "分析"截成一行由界面按像素处理。标题、动作和警告总是保留。"""
+    "目标"（或没有目标时的"分析"）截成一行由界面按像素处理。标题、动作和警告总是保留。"""
     dropped: set[str] = set()
     if level >= 1:
         dropped.add("direction")
@@ -87,7 +87,7 @@ class _PlanEntry:
 
     plan: Plan
     base: GameState
-    thoughts: bool = False  # AI 的方案：显示"要找"和"分析"
+    thoughts: bool = False  # AI 的方案：显示"要找"和"目标"
     stale_note: str | None = None
     agrees: bool = False  # AI 同意规则建议：只写"✓ 同意规则建议"，不列动作
     expired: bool = False  # 深度分析的操作已经不能用，只看思路
@@ -102,16 +102,17 @@ def _clip(text: str, limit: int) -> str:
 
 
 def _thought_lines(plan: Plan) -> tuple[Line, ...]:
-    """一行"要找"，一行"分析"（没有分析时用"思路"）。"""
+    """一行"要找"，一行"目标"。目标用 AI 的一句话总结（提示词要求 25 字以内）；
+    完整的分析通常一百多字，截断后常停在半句话，所以只在没有总结时才退回显示"分析"。"""
     lines = []
     if plan.look_for:
         lines.append(
             Line(_clip("要找：" + "、".join(plan.look_for), MAX_LOOK_FOR), role="look_for")
         )
-    if plan.analysis:
+    if plan.summary:
+        lines.append(Line(_clip("目标：" + plan.summary, MAX_REASON), role="reason"))
+    elif plan.analysis:
         lines.append(Line(_clip("分析：" + plan.analysis, MAX_REASON), role="reason"))
-    elif plan.summary:
-        lines.append(Line(_clip("思路：" + plan.summary, MAX_REASON), role="reason"))
     return tuple(lines)
 
 
@@ -276,7 +277,7 @@ class OverlayModel:
 
     def _render_ai(self, state: GameState) -> tuple[tuple[Line, ...], str]:
         """AI 区的内容和标题。有本回合的深度分析时优先显示它；它的操作已经过期（刷新过、
-        不合法）时，只拿它的"方向""要找"和"分析"，配上快速建议现在的动作（或状态）和附注。"""
+        不合法）时，只拿它的"方向""要找"和"目标"，配上快速建议现在的动作（或状态）和附注。"""
         fast = self._render(self._ai, state, is_ai=True)
         deep = self._deep
         if deep is None:

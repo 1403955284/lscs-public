@@ -19,7 +19,7 @@ from lscs.overlay.model import OverlayModel, OverlayView, condense
 log = logging.getLogger(__name__)
 
 RENDER_MS = 150  # 读取数据模型的间隔
-CONDENSE_LEVELS = 3  # 0 全部；1 去掉"方向"；2 再去掉"要找"和附注、"分析"只留一行
+CONDENSE_LEVELS = 3  # 0 全部；1 去掉"方向"；2 再去掉"要找"和附注、"目标"只留一行
 PLACE_MS = 500  # 重新定位、判断显示/隐藏的间隔
 BG = "#1e1e24"
 TITLE = "#d4d4dc"
@@ -310,7 +310,7 @@ class OverlayWindow:
 
     def _draw(self) -> None:
         """画出当前内容；超过最大高度时逐级精简（先去掉"方向"，再去掉"要找"和附注、
-        "分析"只留一行），最后仍然超高就截掉底部。"""
+        "目标"只留一行），最后仍然超高就截掉底部。"""
         view, layout = self._view, self._layout
         if view is None or layout is None:
             return

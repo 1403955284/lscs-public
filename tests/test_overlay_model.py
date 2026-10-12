@@ -65,7 +65,7 @@ def test_a_whole_turn():
     assert model.snapshot().ai == (Line("分析中…", "muted"),)
 
     model.show_ai(T3, ai_advice(summary="先保血"), agrees=False)
-    assert model.snapshot().ai == (Line("① 买 蚀脑怪 3/4"), Line("思路：先保血", role="reason"))
+    assert model.snapshot().ai == (Line("① 买 蚀脑怪 3/4"), Line("目标：先保血", role="reason"))
 
     combat = make_state(turn=3, phase=Phase.COMBAT, seq=2)
     model.on_update(combat, [Event(type=EventType.COMBAT_STARTED, turn=3)])
@@ -107,7 +107,7 @@ def test_stale_ai_and_long_summary_and_many_steps():
     ai = model.snapshot().ai
     assert ai == (
         Line("① 刷新  ② 刷新  ③ 刷新  ④ 刷新  ⑤ 刷新  …"),  # AI 方案最多 5 步
-        Line("思路：" + "先" * 37 + "…", role="reason"),  # 整行最多 40 字，超出加"…"
+        Line("目标：" + "先" * 37 + "…", role="reason"),  # 整行最多 40 字，超出加"…"
         Line("基于 6 秒前的局面", "muted", role="note"),
     )
     assert len(ai[1].text) == 41
@@ -117,7 +117,7 @@ def test_summary_that_fits_is_not_cut():
     model = OverlayModel(name)
     model.on_update(T3, started(3))
     model.show_ai(T3, ai_advice(summary="先" * 37), False)
-    assert model.snapshot().ai[-1] == Line("思路：" + "先" * 37, role="reason")
+    assert model.snapshot().ai[-1] == Line("目标：" + "先" * 37, role="reason")
 
 
 BOUGHT = make_state(
@@ -194,7 +194,7 @@ def test_ai_steps_already_done_are_dropped():
     actions = (Action(type="buy", entity_id=20), Action(type="buy", entity_id=21))
     model.show_ai(T3, ai_advice(summary="两张都要", actions=actions), False)
     model.on_update(BOUGHT, [])
-    assert model.snapshot().ai == (Line("① 买 蚀脑怪 3/4"), Line("思路：两张都要", role="reason"))
+    assert model.snapshot().ai == (Line("① 买 蚀脑怪 3/4"), Line("目标：两张都要", role="reason"))
     model.on_update(BOUGHT.model_copy(update={"shop": (), "seq": 4}), [])
     assert model.snapshot().ai == (Line("已按建议操作完", "muted"),)
 
@@ -371,16 +371,21 @@ BUY_21 = (Action(type="buy", entity_id=21, reason="身材好"),)
 BUY_20 = (Action(type="buy", entity_id=20, reason="海盗"),)
 DEEP = {
     "analysis": "畸变核心在 5 本，提前升本。",
+    "summary": "提前升 5 本找畸变核心",
     "direction": "畸变",
     "look_for": ("神明", "祭品"),
 }
 
 
-def test_fast_ai_lines_show_look_for_and_analysis():
+def test_fast_ai_lines_show_look_for_and_goal_instead_of_long_analysis():
     model = OverlayModel(name)
     model.on_update(T3, started(3))
     advice = llm_advice(
-        BUY_21, summary="买", analysis="血量健康，先补战力。", direction="海盗", look_for=("船长",)
+        BUY_21,
+        summary="补一张战力，留钱刷新",
+        analysis="血量健康，场面偏薄，" * 10,  # 完整分析很长，只在终端里显示
+        direction="海盗",
+        look_for=("船长",),
     )
     model.show_ai(T3, advice, False)
     view = model.snapshot()
@@ -389,8 +394,15 @@ def test_fast_ai_lines_show_look_for_and_analysis():
         Line("① 买 蚀脑怪 3/4"),
         Line("方向：海盗", role="direction"),
         Line("要找：船长", role="look_for"),
-        Line("分析：血量健康，先补战力。", role="reason"),
+        Line("目标：补一张战力，留钱刷新", role="reason"),
     )
+
+
+def test_analysis_is_shown_only_when_there_is_no_summary():
+    model = OverlayModel(name)
+    model.on_update(T3, started(3))
+    model.show_ai(T3, llm_advice(BUY_21, analysis="血量健康，先补战力。"), False)
+    assert model.snapshot().ai[-1] == Line("分析：血量健康，先补战力。", role="reason")
 
 
 def test_look_for_and_analysis_are_cut():
@@ -418,7 +430,7 @@ def test_deep_analysis_pending_line_and_deep_result_first():
         Line("① 买 海盗 3/2"),
         Line("方向：畸变", role="direction"),
         Line("要找：神明、祭品", role="look_for"),
-        Line("分析：畸变核心在 5 本，提前升本。", role="reason"),
+        Line("目标：提前升 5 本找畸变核心", role="reason"),
     )
     model.on_update(make_state(turn=4, seq=9), started(4))
     view = model.snapshot()
@@ -433,7 +445,7 @@ def test_deep_steps_done_keep_the_thoughts():
     assert model.snapshot().ai == (
         Line("已按建议操作完", "muted"),
         Line("要找：神明、祭品", role="look_for"),
-        Line("分析：畸变核心在 5 本，提前升本。", role="reason"),
+        Line("目标：提前升 5 本找畸变核心", role="reason"),
     )
 
 
@@ -450,7 +462,7 @@ def test_expired_deep_result_shows_its_direction_look_for_and_analysis():
         Line("① 买 蚀脑怪 3/4"),
         Line("方向：畸变", role="direction"),
         Line("要找：神明、祭品", role="look_for"),
-        Line("分析：畸变核心在 5 本，提前升本。", role="reason"),
+        Line("目标：提前升 5 本找畸变核心", role="reason"),
         Line("基于 6 秒前的局面", "muted", role="note"),
     )
     assert [line.text for line in condense(view, 1).ai][:2] == [
@@ -468,7 +480,7 @@ def test_refresh_after_deep_result_keeps_its_thoughts_with_the_new_fast_advice()
     thoughts = (
         Line("方向：畸变", role="direction"),
         Line("要找：神明、祭品", role="look_for"),
-        Line("分析：畸变核心在 5 本，提前升本。", role="reason"),
+        Line("目标：提前升 5 本找畸变核心", role="reason"),
     )
     assert model.snapshot().ai == (Line("商店已刷新，等待新的 AI 建议", "muted"), *thoughts)
     buy_30 = (Action(type="buy", entity_id=30),)
@@ -491,7 +503,7 @@ def test_expired_deep_thoughts_while_the_new_fast_advice_is_pending():
         Line("分析中…", "muted"),
         Line("方向：畸变", role="direction"),
         Line("要找：神明、祭品", role="look_for"),
-        Line("分析：畸变核心在 5 本，提前升本。", role="reason"),
+        Line("目标：提前升 5 本找畸变核心", role="reason"),
     )
 
 
@@ -514,7 +526,7 @@ def test_deep_agreeing_with_rules_keeps_its_thoughts():
     assert view.ai == (
         Line("✓ 同意规则建议"),
         Line("要找：神明、祭品", role="look_for"),
-        Line("分析：畸变核心在 5 本，提前升本。", role="reason"),
+        Line("目标：提前升 5 本找畸变核心", role="reason"),
     )
 
 

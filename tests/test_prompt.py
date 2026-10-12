@@ -52,6 +52,7 @@ EXPECTED_SYSTEM = """你是《炉石传说》酒馆战棋的高分教练，正�
 
 【先分析，再给操作】
 先在 analysis 里用两三句话写清：现在是什么阶段、血量和场面强不强、经济怎么样；本局准备走什么方向（种族/流派）以及理由；本回合的目标（升本？补战力？找对子三连？找核心卡？）。然后再按这个目标给操作。
+summary 用一句话（25 字以内）直接写本回合要做什么、为了什么，它会显示在游戏画面上的小面板里，所以要短、要完整，不要半句话。
 
 【运营方法】
 - 阶段：
@@ -73,7 +74,7 @@ EXPECTED_SYSTEM = """你是《炉石传说》酒馆战棋的高分教练，正�
 5. 不要建议发现选择、黑暗之赐或调整站位。
 
 只输出一个 json 对象，格式：
-{"analysis": "局势判断、本局方向、本回合目标（两三句）", "actions": [{"type": "buy", "entity_id": 1689, "gold_after": 4, "minions_after": 5, "reason": "一句话理由"}, {"type": "refresh", "gold_after": 3, "minions_after": 5, "reason": "..."}], "summary": "一句话说明本回合思路", "direction": "方向/流派", "look_for": ["接下来要找的牌名"], "confidence": 0.7}
+{"analysis": "局势判断、本局方向、本回合目标（两三句）", "actions": [{"type": "buy", "entity_id": 1689, "gold_after": 4, "minions_after": 5, "reason": "一句话理由"}, {"type": "refresh", "gold_after": 3, "minions_after": 5, "reason": "..."}], "summary": "本回合目标，25 字以内，例如：补两张畸变铺场，下回合再升 4 本", "direction": "方向/流派", "look_for": ["接下来要找的牌名"], "confidence": 0.7}
 动作类型：buy（买）、sell（卖）、upgrade（升本）、refresh（刷新）、freeze（冻结）、hero_power（英雄技能）。buy 和 sell 必须带 entity_id。
 
 【攻略要点】

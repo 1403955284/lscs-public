@@ -71,7 +71,7 @@ def test_overlay_window_renders_states_and_closes():
     assert "第 3 回合 · 铸币 5 · 2 本 · 升本 6" in texts
     assert "规则" in texts and "AI" in texts
     assert any("① 买 海盗 3/2" in t for t in texts)
-    assert any(t.startswith("思路：") for t in texts)
+    assert any(t.startswith("目标：") for t in texts)
     assert "深度分析中…" in texts
     assert "AI（深度）" in texts and "要找：神明、飘荡祭品" in texts
     assert any(t.startswith("分析：畸变核心") for t in texts)
