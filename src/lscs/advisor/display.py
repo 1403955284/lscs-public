@@ -6,7 +6,7 @@ import logging
 from collections.abc import Callable
 from typing import Protocol
 
-from lscs.advisor.models import Action, Advice, Expired, HeroAdvice, Lane, Plan
+from lscs.advisor.models import Action, Advice, ChoiceAdvice, Expired, HeroAdvice, Lane, Plan
 from lscs.state.models import GameState
 
 log = logging.getLogger(__name__)
@@ -15,7 +15,7 @@ Namer = Callable[[str], str]
 Output = Callable[[str], None]
 CIRCLED = "①②③④⑤⑥⑦⑧⑨"
 INDENT = "          "  # 让多步方案的后续行与第一步对齐
-ICONS: dict[Lane, str] = {"fast": "🤖 ", "deep": "🧠 ", "hero": "🤖 "}
+ICONS: dict[Lane, str] = {"fast": "🤖 ", "deep": "🧠 ", "hero": "🤖 ", "choice": "🤖 "}
 EXPIRED_LABELS: dict[Expired, str] = {
     "refreshed": "操作已过期（商店刷新了），只看思路",
     "invalid": "操作不可用，只看思路",
@@ -128,6 +128,15 @@ def hero_comment_lines(state: GameState, advice: HeroAdvice, name: Namer) -> lis
     ]
 
 
+def choice_pick_text(state: GameState, pick: int, name: Namer) -> str:
+    """选项的写法，如"左数第 3 个 泰瑞尔"；不在当前这组选项里时用编号。"""
+    options = state.choice.options if state.choice is not None else ()
+    option = next((o for o in options if o.entity_id == pick), None)
+    if option is None:
+        return f"#{pick}"
+    return f"左数第 {option.index + 1} 个 {name(option.card_id)}"
+
+
 class AdviceSink(Protocol):
     """AdviceRunner 输出建议的对象：终端（AdviceDisplay）、悬浮面板或 DisplayGroup。"""
 
@@ -137,6 +146,7 @@ class AdviceSink(Protocol):
     def ai_text(self, text: str, lane: Lane = "fast") -> None: ...
     def show_ai(self, state: GameState, advice: Advice, agrees: bool) -> None: ...
     def show_hero(self, state: GameState, advice: HeroAdvice, agrees: bool = False) -> None: ...
+    def show_choice(self, state: GameState, advice: ChoiceAdvice | None) -> None: ...
     def ai_summary(self, calls: int, input_tokens: int, output_tokens: int) -> None: ...
 
 
@@ -211,6 +221,14 @@ class AdviceDisplay:
             first = f"AI（{seconds}）：选 {pick} —— {advice.reason}"
         self._block("🤖 ", [first, *hero_comment_lines(state, advice, self._name)])
 
+    def show_choice(self, state: GameState, advice: ChoiceAdvice | None) -> None:
+        """advice 为 None 表示游戏刚弹出一组选项：不打印（选项那一行由时间线打印）。"""
+        if advice is None:
+            return
+        seconds = "?" if advice.elapsed is None else f"{advice.elapsed:.1f} 秒"
+        pick = choice_pick_text(state, advice.pick, self._name)
+        self._out(f"  🤖 AI（{seconds}）：选 {pick} —— {advice.reason}")
+
     def ai_summary(self, calls: int, input_tokens: int, output_tokens: int) -> None:
         self._out(
             f"本局 AI 调用 {calls} 次，输入 {input_tokens / 1000:.1f} 千、"
@@ -248,6 +266,9 @@ class DisplayGroup:
 
     def show_hero(self, state: GameState, advice: HeroAdvice, agrees: bool = False) -> None:
         self._each("show_hero", state, advice, agrees)
+
+    def show_choice(self, state: GameState, advice: ChoiceAdvice | None) -> None:
+        self._each("show_choice", state, advice)
 
     def ai_summary(self, calls: int, input_tokens: int, output_tokens: int) -> None:
         self._each("ai_summary", calls, input_tokens, output_tokens)

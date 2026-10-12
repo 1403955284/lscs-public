@@ -331,3 +331,47 @@ def test_rules_error_at_hero_select_says_so():
     display.rules_error()
     display.rules_error(hero=True)
     assert out == ["  📋 本回合规则建议出错", "  📋 选英雄规则建议出错"]
+
+
+def choice_advice(pick=6933, reason="32/32 直接成主力", elapsed=1.43, choice_id=12):
+    from lscs.advisor.models import ChoiceAdvice
+
+    return ChoiceAdvice(choice_id=choice_id, pick=pick, reason=reason, elapsed=elapsed)
+
+
+CHOICE_NAMES = {"BG36_356": "泰瑞尔", "BG36_312": "摧心招募者"}
+
+
+def test_show_choice_prints_only_the_ai_pick():
+    from factory import choice_state
+
+    out = []
+    display = AdviceDisplay(lambda c: CHOICE_NAMES.get(c, c), out.append)
+    state = choice_state()
+    display.show_choice(state, None)  # 选项那一行由时间线打印
+    display.show_choice(state, choice_advice())
+    display.show_choice(state, choice_advice(pick=6931, reason="便宜", elapsed=None))
+    display.show_choice(state, choice_advice(pick=99))
+    assert out == [
+        "  🤖 AI（1.4 秒）：选 左数第 3 个 泰瑞尔 —— 32/32 直接成主力",
+        "  🤖 AI（?）：选 左数第 1 个 摧心招募者 —— 便宜",
+        "  🤖 AI（1.4 秒）：选 #99 —— 32/32 直接成主力",
+    ]
+
+
+def test_choice_lane_pending_and_errors_use_the_robot_icon():
+    out = []
+    display = AdviceDisplay(name, out.append)
+    display.ai_pending("choice")
+    display.ai_text("AI 超时", "choice")
+    display.ai_text("AI 建议无效，已忽略", "choice")
+    assert out == ["  🤖 AI 分析中…", "  🤖 AI 超时", "  🤖 AI 建议无效，已忽略"]
+
+
+def test_display_group_forwards_show_choice():
+    from factory import choice_state
+
+    first, second = Recorder(), Recorder()
+    state, advice = choice_state(), choice_advice()
+    DisplayGroup(first, second).show_choice(state, advice)
+    assert first.calls == second.calls == [("show_choice", (state, advice))]

@@ -17,7 +17,7 @@ import time
 from collections.abc import Callable
 from typing import Protocol
 
-from lscs.config import OverlayConfig
+from lscs.config import HighlightConfig, OverlayConfig
 from lscs.overlay.model import OverlayModel
 
 log = logging.getLogger(__name__)
@@ -44,10 +44,13 @@ def _print(line: str) -> None:
     print(line, flush=True)
 
 
-def create_tk_window(cfg: OverlayConfig) -> OverlayWindowLike:
+def create_tk_window(
+    cfg: OverlayConfig, highlight: HighlightConfig | None = None
+) -> OverlayWindowLike:
+    """highlight：config.toml 的 [highlight]（画面高亮）；None 时不画。"""
     from lscs.overlay.window import OverlayWindow  # 没有 tkinter 时在这里抛出 ImportError
 
-    return OverlayWindow(cfg)
+    return OverlayWindow(cfg, highlight=highlight)
 
 
 class Controller:

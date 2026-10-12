@@ -2,6 +2,11 @@ from hearthstone.enums import CardType, GameTag, Zone
 
 from lscs.parsing.feed import (
     CardRevealed,
+    ChoiceChosen,
+    ChoiceEntity,
+    ChoiceOffered,
+    ChoiceSent,
+    ChoiceSource,
     GameMeta,
     GameStarted,
     OptionListed,
@@ -9,7 +14,7 @@ from lscs.parsing.feed import (
     PlayerDeclared,
     TagSet,
 )
-from lscs.state.entities import EntityStore
+from lscs.state.entities import EntityStore, OpenChoice
 
 
 def make_store():
@@ -169,3 +174,55 @@ def test_game_started_clears_options():
     store.apply(GameStarted(100))
     assert (store.options, store.options_turn) == ({}, None)
     assert (store.needs_target, store.first_listed) == ({}, set())
+
+
+def test_choice_is_built_from_its_rows_and_marked_when_sent():
+    store = make_store()
+    for change in [
+        ChoiceOffered(2, "GENERAL", 1),
+        ChoiceSource(15),
+        ChoiceEntity(62),
+        ChoiceEntity(60),
+    ]:
+        store.apply(change)
+    assert store.choice == OpenChoice(
+        id=2, choice_type="GENERAL", max=1, source=15, entities=[62, 60]
+    )
+    store.apply(ChoiceSent(2, "GENERAL"))
+    store.apply(ChoiceChosen(60))
+    assert (store.choice.sent, store.choice.chosen) == (True, [60])
+
+
+def test_new_choice_replaces_the_unfinished_one():
+    store = make_store()
+    store.apply(ChoiceOffered(3, "GENERAL", 1))
+    store.apply(ChoiceEntity(70))
+    store.apply(ChoiceOffered(4, "GENERAL", 1))
+    store.apply(ChoiceEntity(80))
+    assert (store.choice.id, store.choice.entities, store.choice.source) == (4, [80], None)
+
+
+def test_choices_sent_for_another_id_are_ignored():
+    store = make_store()
+    store.apply(ChoiceOffered(4, "GENERAL", 1))
+    store.apply(ChoiceEntity(80))
+    store.apply(ChoiceSent(3, "GENERAL"))
+    store.apply(ChoiceChosen(70))
+    assert (store.choice.sent, store.choice.chosen) == (False, [])
+    store.apply(ChoiceSent(4, "GENERAL"))
+    store.apply(ChoiceChosen(80))
+    assert (store.choice.sent, store.choice.chosen) == (True, [80])
+
+
+def test_choice_rows_without_an_open_choice_are_ignored():
+    store = make_store()
+    for change in [ChoiceSource(15), ChoiceEntity(60), ChoiceSent(2, "GENERAL"), ChoiceChosen(60)]:
+        store.apply(change)
+    assert store.choice is None
+
+
+def test_game_started_clears_the_choice():
+    store = make_store()
+    store.apply(ChoiceOffered(2, "GENERAL", 1))
+    store.apply(GameStarted(100))
+    assert store.choice is None

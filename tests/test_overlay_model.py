@@ -4,7 +4,7 @@ from factory import hero_select_state, make_state, minion, offered_event, power,
 
 from lscs.advisor.models import Action, Advice, HeroAdvice, HeroComment, Plan
 from lscs.llm.notices import AUTH_DISABLED, BUDGET_EXHAUSTED
-from lscs.overlay.model import IDLE, Line, OverlayModel, OverlayView, condense
+from lscs.overlay.model import IDLE, Line, NextStep, OverlayModel, OverlayView, Target, condense
 from lscs.state.models import Event, EventType, Phase
 
 NAMES = {
@@ -756,3 +756,257 @@ def test_hero_rules_error_keeps_the_hero_rows():
     choosing(model)
     model.rules_error(hero=True)
     assert model.snapshot().rules == HERO_ROWS  # 英雄和护甲照样列出，只是没有 ★
+
+
+# ---- 下一步 ----
+
+
+def step(model):
+    return model.snapshot().next_step
+
+
+def test_next_step_follows_the_rules_plan_and_moves_on():
+    model = OverlayModel(name)
+    model.on_update(T3, started(3))
+    assert step(model) == NextStep("▶ 等建议…", tone="muted")  # 还没有任何方案
+    model.show_rules(T3, rules_advice())
+    assert step(model) == NextStep(
+        "▶ 买 左数第 1 个 海盗",
+        Target(row="shop", index=0, count=2),
+        slots="商店 ● ○",
+        badge="1",
+    )
+    model.on_update(BOUGHT, [])  # 买了：换成第二步，编号是它在完整方案里的序号
+    assert step(model) == NextStep("▶ 刷新商店", Target(button="refresh"), badge="2")
+    model.on_update(REFRESHED, [])
+    assert step(model) == NextStep("✓ 建议的步骤都做完了", tone="muted")
+
+
+def test_next_step_switches_to_the_ai_plan_and_then_the_deep_one():
+    model = OverlayModel(name)
+    model.on_update(T3, started(3))
+    model.show_rules(T3, rules_advice())
+    model.ai_pending()
+    assert step(model).text == "▶ 买 左数第 1 个 海盗"  # AI 分析中：先看规则
+    model.show_ai(T3, ai_advice(), False)
+    assert step(model) == NextStep(
+        "▶ 买 左数第 2 个 蚀脑怪",
+        Target(row="shop", index=1, count=2),
+        slots="商店 ○ ●",
+        badge="1",
+    )
+    model.show_ai(T3, llm_advice((Action(type="upgrade"),), lane="deep"), False)
+    assert step(model) == NextStep("▶ 升本 → 3 本（6 金）", Target(button="upgrade"), badge="1")
+
+
+def test_next_step_waits_for_new_ai_advice_after_a_refresh():
+    model = OverlayModel(name)
+    model.on_update(T3, started(3))
+    model.show_rules(T3, rules_advice())
+    model.show_ai(T3, ai_advice(), False)
+    model.on_update(REFRESHED, [])
+    assert step(model) == NextStep("▶ 等新的建议…", tone="muted")
+    model.ai_text(BUDGET_EXHAUSTED)  # AI 不会再来：退回规则的方案
+    assert step(model).text == "✓ 建议的步骤都做完了"
+
+
+def test_next_step_for_an_expired_deep_plan_uses_the_fast_one():
+    model = OverlayModel(name)
+    model.on_update(T3, started(3))
+    model.show_ai(T3, llm_advice(BUY_20, lane="deep", expired="invalid", **DEEP), False)
+    model.show_ai(T3, ai_advice(), False)
+    assert step(model).text == "▶ 买 左数第 2 个 蚀脑怪"
+
+
+def test_next_step_for_each_kind_of_action():
+    from factory import shop_spell
+
+    hp = power(targets=(10,))
+    state = T3.model_copy(
+        update={
+            "shop": (*SHOP, shop_spell(22, "S", 1)),
+            "me": T3.me.model_copy(update={"hero_power": hp}),
+        }
+    )
+    model = OverlayModel(lambda c: {"S": "香蕉"}.get(c, name(c)))
+    model.on_update(state, started(3))
+
+    def first_step(*actions):
+        plan = Plan(source="rules", actions=tuple(actions))
+        model.show_rules(state, Advice(state_seq=1, turn=3, plan=plan))
+        return step(model)
+
+    assert first_step(Action(type="buy", entity_id=22)) == NextStep(
+        "▶ 买 左数第 3 个 香蕉（法术）",
+        Target(row="shop", index=2, count=3),
+        slots="商店 ○ ○ ●",
+        badge="1",
+    )
+    assert first_step(Action(type="sell", entity_id=10)) == NextStep(
+        "▶ 卖 左数第 1 个 小鬼", Target(row="board", index=0, count=1), slots="场面 ●", badge="1"
+    )
+    assert first_step(Action(type="freeze")) == NextStep(
+        "▶ 冻结商店", Target(button="freeze"), badge="1"
+    )
+    assert first_step(Action(type="hero_power", entity_id=10)) == NextStep(
+        "▶ 用英雄技能 定罪 → 小鬼", Target(button="hero_power"), badge="1"
+    )
+    assert first_step(Action(type="buy", entity_id=99)).target is None  # 不在商店里：只有文字
+    assert first_step() == NextStep("无需操作", tone="muted")
+
+
+def test_next_step_is_none_in_combat_and_without_a_game():
+    model = OverlayModel(name)
+    assert step(model) is None
+    model.on_update(make_state(turn=3, phase=Phase.COMBAT), [])
+    assert step(model) is None
+
+
+def test_next_step_at_hero_select_prefers_the_ai_pick():
+    model = OverlayModel(name)
+    state = hero_select_state()
+    model.on_update(state, [offered_event(state)])
+    assert step(model) == NextStep("▶ 等建议…", tone="muted")
+    signature = state.hero_select.signature()
+    model.show_hero(state, HeroAdvice(source="rules", signature=signature, pick=89, reason="护甲"))
+    assert step(model) == NextStep(
+        "▶ 选 左数第 1 个 凯瑞尔·罗姆",
+        Target(row="hero", index=0, count=4),
+        slots="英雄 ● ○ ○ ○",
+        badge="选",
+    )
+    ai = HeroAdvice(source="llm", signature=signature, pick=92, reason="稳")
+    model.show_hero(state, ai)
+    assert step(model).text == "▶ 选 左数第 4 个 了不起的杰弗里斯"
+    assert step(model).target == Target(row="hero", index=3, count=4)
+
+
+# ---- 选项 ----
+
+CHOICE_NAMES = {"BG36_312": "摧心招募者", "BG33_318": "怒胆喷毒鱼人", "BG36_356": "泰瑞尔"}
+
+
+def choice_name(card_id):
+    return CHOICE_NAMES.get(card_id, name(card_id))
+
+
+def offered_choice(model, **kwargs):
+    from factory import choice_event, choice_state
+
+    state = choice_state(**kwargs)
+    model.on_update(state, [choice_event(state)])
+    model.show_choice(state, None)
+    return state
+
+
+def choice_advice(pick=6933, choice_id=12, reason="32/32 直接成主力"):
+    from lscs.advisor.models import ChoiceAdvice
+
+    return ChoiceAdvice(choice_id=choice_id, pick=pick, reason=reason, elapsed=1.2)
+
+
+def test_choice_section_and_next_step_with_ai():
+    model = OverlayModel(choice_name)
+    state = offered_choice(model)
+    view = model.snapshot()
+    assert view.choice == (
+        Line("黑暗之赐 · 3 选 1"),
+        Line("摧心招募者 · 怒胆喷毒鱼人 · 泰瑞尔", role="comment"),
+    )
+    assert view.next_step == NextStep("▶ 等 AI 选…", tone="muted")
+    model.ai_pending("choice")
+    assert model.snapshot().ai == (Line("分析中…", "muted"),)
+    model.show_choice(state, choice_advice())
+    view = model.snapshot()
+    assert view.choice[1] == Line("摧心招募者 · 怒胆喷毒鱼人 · ★泰瑞尔", role="comment")
+    assert view.next_step == NextStep(
+        "▶ 选 左数第 3 个 泰瑞尔",
+        Target(row="choice", index=2, count=3),
+        slots="选项 ○ ○ ●",
+        reason="32/32 直接成主力",
+        badge="选",
+    )
+    assert view.ai == ()  # 结果到了：AI 区回到招募的内容（这里还没有）
+
+
+def test_choice_without_ai_asks_the_player_to_choose():
+    model = OverlayModel(choice_name, ai_enabled=False)
+    offered_choice(model)
+    assert step(model) == NextStep("▶ 自己选一个（AI 没有建议）", tone="muted")
+    model = OverlayModel(choice_name, choice_ai=False)
+    offered_choice(model)
+    assert step(model).text == "▶ 自己选一个（AI 没有建议）"
+    model = OverlayModel(choice_name)
+    offered_choice(model)
+    model.ai_pending("choice")
+    model.ai_text("AI 超时", "choice")
+    view = model.snapshot()
+    assert view.ai == (Line("AI 超时", "muted"),)
+    assert view.next_step.text == "▶ 自己选一个（AI 没有建议）"
+
+
+def test_choice_section_disappears_once_chosen_and_ignores_stale_advice():
+    model = OverlayModel(choice_name)
+    state = offered_choice(model)
+    model.show_choice(state, choice_advice(choice_id=11))  # 上一组的结果
+    assert step(model).text == "▶ 等 AI 选…"
+    model.show_choice(state, choice_advice())
+    from factory import resolved_event
+
+    done = make_state(turn=9, seq=2, shop=SHOP)
+    model.on_update(done, [resolved_event(12, picked=6933)])
+    view = model.snapshot()
+    assert view.choice == ()
+    assert view.next_step == NextStep("▶ 等建议…", tone="muted")
+    offered_choice(model, seq=3)  # 同一组编号再出现也不会沿用旧的推荐（已经清空）
+    assert step(model).text == "▶ 等 AI 选…"
+
+
+def test_choice_before_main_action_starts_the_turn():
+    model = OverlayModel(choice_name)
+    model.on_update(make_state(turn=5, seq=1), started(5))
+    model.show_rules(make_state(turn=5, seq=1), rules_advice(turn=5))
+    offered_choice(model, turn=6, main_action=False, seq=2)
+    view = model.snapshot()
+    assert view.title == "第 6 回合 · 铸币 3 · 1 本"
+    assert view.rules == ()  # 新回合：上一回合的建议清空
+    assert view.next_step.text == "▶ 等 AI 选…"
+
+
+def test_condense_keeps_the_next_step_and_drops_the_option_names():
+    view = OverlayView(
+        title="第 9 回合",
+        compact=False,
+        next_step=NextStep("▶ 选 左数第 3 个 泰瑞尔", slots="选项 ○ ○ ●", reason="理由"),
+        choice=(Line("黑暗之赐 · 3 选 1"), Line("a · ★b · c", role="comment")),
+    )
+    assert condense(view, 1) == view
+    two = condense(view, 2)
+    assert two.next_step == view.next_step
+    assert two.choice == (Line("黑暗之赐 · 3 选 1"),)
+
+
+def test_concurrent_choice_updates_are_safe():
+    from factory import choice_event, choice_state, resolved_event
+
+    model = OverlayModel(choice_name)
+    errors = []
+
+    def writer(seq0):
+        try:
+            for i in range(200):
+                state = choice_state(seq=seq0 + i)
+                model.on_update(state, [choice_event(state)])
+                model.ai_pending("choice")
+                model.show_choice(state, choice_advice(pick=6931 + i % 3))
+                model.on_update(make_state(turn=9, seq=seq0 + i), [resolved_event(12)])
+                model.snapshot()
+        except Exception as exc:  # pragma: no cover - 失败时才走到
+            errors.append(exc)
+
+    threads = [threading.Thread(target=writer, args=(n * 1000,)) for n in range(3)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == []

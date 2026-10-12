@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import functools
 import logging
 import sys
 import threading
@@ -14,7 +15,13 @@ from lscs import __version__
 from lscs.advisor.display import AdviceDisplay, AdviceSink, DisplayGroup, deep_wait_hint
 from lscs.advisor.rules_config import RulesConfig, load_rules_config
 from lscs.advisor.runner import AdviceRunner
-from lscs.config import DEFAULT_CONFIG, ConfigError, OverlayConfig, load_config, mask_key
+from lscs.config import (
+    DEFAULT_CONFIG,
+    AppConfig,
+    ConfigError,
+    load_config,
+    mask_key,
+)
 from lscs.dump import Namer, describe
 from lscs.logwatch.logconfig import (
     default_log_config_path,
@@ -187,6 +194,8 @@ def _build_scheduler(cards, sync: bool):
         )
     if not llm.hero_advice:
         print("选英雄建议：关闭", flush=True)  # 开启时不打印，少一行
+    if not llm.choice_advice:
+        print("选项建议：关闭", flush=True)
     heroes = load_guide(DEFAULT_HEROES) if DEFAULT_HEROES.exists() else None
     extra = {"debounce": 0.0, "hero_debounce": 0.0, "run_async": lambda job: job()} if sync else {}
     return LLMScheduler(
@@ -200,36 +209,38 @@ def _build_scheduler(cards, sync: bool):
     )
 
 
-def _overlay_config(explicit: bool) -> OverlayConfig | None:
-    """读取 config.toml 的 [overlay]（没有文件时用默认值）；有误时抛出 ConfigError。
-    explicit 表示命令行明确要求打开（replay --overlay），此时不看 enabled。"""
-    cfg = load_config(DEFAULT_CONFIG).overlay
-    if not cfg.enabled and not explicit:
+def _overlay_config(explicit: bool) -> AppConfig | None:
+    """读取 config.toml（没有文件时用默认值），面板要用其中的 [overlay] 和 [highlight]；
+    有误时抛出 ConfigError。explicit 表示命令行明确要求打开（replay --overlay），此时不看
+    [overlay] enabled。面板关闭时返回 None（也就没有画面高亮）。"""
+    cfg = load_config(DEFAULT_CONFIG)
+    if not cfg.overlay.enabled and not explicit:
         print("悬浮面板已在 config.toml 中关闭，只在终端显示建议。")
         return None
     return cfg
 
 
 def _displays(
-    name: Namer, overlay: OverlayConfig | None, scheduler
+    name: Namer, overlay: AppConfig | None, scheduler
 ) -> tuple[OverlayModel | None, AdviceSink]:
     """终端总是显示；打开悬浮面板时，建议同时发给面板的数据模型。"""
     deep_thinking = scheduler.deep_thinking if scheduler is not None else "low"
     terminal = AdviceDisplay(name, deep_thinking=deep_thinking)
     if overlay is None:
         return None, terminal
-    model = OverlayModel(name, ai_enabled=scheduler is not None)
+    ai = scheduler is not None
+    model = OverlayModel(name, ai_enabled=ai, choice_ai=ai and scheduler.choice_advice)
     return model, DisplayGroup(terminal, model)
 
 
 def _run_overlay(
-    work: overlay_app.Work, model: OverlayModel, cfg: OverlayConfig, finished_text: str
+    work: overlay_app.Work, model: OverlayModel, cfg: AppConfig, finished_text: str
 ) -> None:
     overlay_app.run_with_overlay(
         work,
         model,
-        cfg,
-        create_window=overlay_app.create_tk_window,
+        cfg.overlay,
+        create_window=functools.partial(overlay_app.create_tk_window, highlight=cfg.highlight),
         finished_text=finished_text,
     )
 
@@ -402,6 +413,42 @@ def _cmd_overlay_check(args: argparse.Namespace) -> int:
     return 0 if check.run_check(cfg) else 1
 
 
+def _rows(text: str) -> list[str]:
+    """highlight-test 的 --rows：逗号分隔的排名。"""
+    from lscs.overlay.layout import CALIBRATION_ROWS
+
+    rows = [part.strip() for part in text.split(",") if part.strip()]
+    unknown = [row for row in rows if row not in CALIBRATION_ROWS]
+    if not rows or unknown:
+        raise argparse.ArgumentTypeError(
+            f"可选的排：{','.join(CALIBRATION_ROWS)}（不认识：{','.join(unknown) or '空'}）"
+        )
+    return rows
+
+
+def _seconds(text: str) -> float:
+    value = float(text)
+    if not 0 < value <= 600:
+        raise argparse.ArgumentTypeError("应为 0~600 秒")
+    return value
+
+
+def _cmd_highlight_test(args: argparse.Namespace) -> int:
+    from lscs.overlay import calibrate
+    from lscs.overlay.layout import CALIBRATION_ROWS
+
+    try:
+        cfg = load_config(DEFAULT_CONFIG).highlight  # 只用 [highlight]；没有文件时用默认值
+    except ConfigError as exc:
+        print(exc)
+        return 1
+    try:
+        rows = args.rows or CALIBRATION_ROWS
+        return 0 if calibrate.run_highlight_test(cfg, args.seconds, rows) else 1
+    except KeyboardInterrupt:
+        return 0
+
+
 def _setup_output() -> None:
     # Windows 中文系统重定向输出时默认编码是 GBK，打印 ❄ 等字符会抛异常；改为替换无法编码的字符
     reconfigure = getattr(sys.stdout, "reconfigure", None)
@@ -465,6 +512,19 @@ def build_parser() -> argparse.ArgumentParser:
         "overlay-check", help="检查悬浮面板能否贴靠炉石、穿透鼠标（Windows，先打开炉石）"
     )
     p.set_defaults(func=_cmd_overlay_check)
+
+    p = sub.add_parser(
+        "highlight-test",
+        help="在炉石画面上画出高亮的所有位置，截图核对位置（Windows，先打开炉石）",
+    )
+    p.add_argument("--seconds", type=_seconds, default=10.0, help="显示几秒后自动关闭")
+    p.add_argument(
+        "--rows",
+        type=_rows,
+        default=None,
+        help="只画这几排，逗号分隔：shop,board,choice,choice4,hero,buttons（默认全画）",
+    )
+    p.set_defaults(func=_cmd_highlight_test)
     return parser
 
 

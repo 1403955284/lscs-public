@@ -646,3 +646,207 @@ def test_hero_message_after_reroll_without_mechanics():
         "  [#15] UNKNOWN_HERO | 护甲 12 | 技能 未知",
         "  [#89] 凯瑞尔·罗姆 | 护甲 10 | 技能 定罪（0 金）：随机使1个友方随从获得+1/+1。",
     ]
+
+
+# ---- 选项 ----
+
+EXPECTED_CHOICE_SYSTEM = """你是《炉石传说》酒馆战棋的高分教练，正在帮一位 6000 分以下的新手在游戏弹出的几个选项里选一个（三连奖励的发现、黑暗之赐、饰品、英雄技能的升级选项，或者随从效果的发现）。玩家几秒钟内就要点，请用简体中文，直接给结论。
+
+【怎么判断】
+- 先看本局方向和场面：和当前方向（种族/流派）、场上核心配合的选项优先；还没有方向时选单独最强、最稳、新手最容易用好的。
+- 三连奖励 / 发现随从：优先方向核心卡、能成长的牌、有经济价值的牌，其次才看身材；能和手里、场上凑成对子或三连的也值得。
+- 黑暗之赐：每个选项的属性已经算上了赐福。比较"随从本身 + 赐福"对现在阵容的价值；圣盾、复生、风怒这类关键词放在主力随从身上最值。
+- 饰品：看它在接下来几个回合能带来多少收益；和方向配合、现在就能用上的优先；要花铸币的饰品要考虑这回合剩多少铸币、会不会耽误升本。
+- 英雄技能的升级选项：选和自己的阵容、打法最契合的；几个选项差不多时选收益最稳定的。
+- 不知道的事不要编：没有给出的数据不要假装知道。
+
+只输出一个 json 对象，格式：
+{"pick": 6933, "reason": "为什么选它，25 字以内", "confidence": 0.7}
+pick 必须是选项的实体编号；reason 会显示在游戏画面上，25 字以内。
+
+【攻略要点】
+要点"""
+
+
+def test_choice_system_prompt_snapshot():
+    from lscs.llm.prompt import build_choice_system_prompt
+
+    assert build_choice_system_prompt("要点") == EXPECTED_CHOICE_SYSTEM
+
+
+def test_choice_system_prompt_leaves_the_other_prompts_alone():
+    from lscs.llm.prompt import build_choice_system_prompt
+
+    assert build_system_prompt("要点") == EXPECTED_SYSTEM
+    assert build_hero_system_prompt("要点", None) == EXPECTED_HERO_SYSTEM
+    assert build_choice_system_prompt("要点") not in (EXPECTED_SYSTEM, EXPECTED_HERO_SYSTEM)
+
+
+CHOICE_CARDS = CardDB(
+    [
+        {"id": "BG21_HERO_000", "name": "凯瑞尔·罗姆", "type": "HERO"},
+        {
+            "id": "BG21_HERO_000p",
+            "name": "定罪",
+            "type": "HERO_POWER",
+            "text": "随机使1个友方随从获得+1/+1。被动：在每场战斗后，选择一项提升。",
+        },
+        {
+            "id": "BG21_HERO_000p_t1",
+            "name": "结阵姿态",
+            "type": "SPELL",
+            "text": "在本局对战中，“定罪”额外使一个友方随从获得属性值。",
+        },
+        {"id": "BG21_HERO_000_Buddyt", "name": "进攻姿态", "type": "SPELL"},
+        {"id": "BG30_Trinket_1st", "name": "小型饰品", "type": "BATTLEGROUND_TRINKET"},
+        {
+            "id": "BG35_MagicItem_890",
+            "name": "沉没的船锚",
+            "type": "BATTLEGROUND_TRINKET",
+            "text": "随机获取2张悬赏令。",
+        },
+        {"id": "BG30_MagicItem_420", "name": "麦迪文之书", "type": "BATTLEGROUND_TRINKET"},
+        {"id": "BG36_MidGameEffect_010", "name": "酒馆战棋黑暗之赐[DNT]", "type": "SPELL"},
+        {
+            "id": "BG36_312",
+            "name": "摧心招募者",
+            "type": "MINION",
+            "text": "发动（0）：弃一张牌以随机获取一张畸变怪。",
+        },
+        {"id": "BG36_356", "name": "泰瑞尔", "type": "MINION", "text": "发动（1）：…"},
+        {
+            "id": "BG36_MidGameEffect_000t13",
+            "name": "鹰身人之爪",
+            "type": "SPELL",
+            "text": "圣盾。风怒",
+        },
+        {"id": "EDR_100t13e", "name": "鹰身人之爪", "type": "ENCHANTMENT", "text": "圣盾，风怒"},
+        {"id": "TB_BaconShop_Triples_01", "name": "三连奖励", "type": "SPELL"},
+        {"id": "BG23_016", "name": "海礁探险者", "type": "MINION"},
+        {"id": "BGS_061", "name": "海盗无赖", "type": "MINION"},
+        {"id": "BGFYM_011", "dbfId": 132532, "name": "亚煞极", "type": "MINION", "text": "神明。"},
+    ]
+)
+
+
+def choice_message(choice, memory=None, **state_kwargs):
+    from factory import choice_state
+
+    from lscs.llm.prompt import build_choice_message
+
+    kwargs = dict(
+        gold=3,
+        tier=6,
+        health=19,
+        hero="BG21_HERO_000",
+        hero_power="BG21_HERO_000p",
+        tribes=frozenset({"ABERRATION", "MURLOC"}),
+    )
+    kwargs.update(state_kwargs)
+    return build_choice_message(choice_state(choice, **kwargs), CHOICE_CARDS, memory)
+
+
+def test_choice_message_for_a_dark_gift():
+    from factory import choice_option, make_choice
+
+    choice = make_choice(
+        [
+            choice_option(
+                6931,
+                "BG36_312",
+                0,
+                6,
+                2,
+                tier=4,
+                races=("ABERRATION",),
+                gifts=("BG36_MidGameEffect_000t13",),
+            ),
+            choice_option(6932, "BG36_356", 1, 32, 32, tier=6, gifts=("EDR_100t13e",)),
+            choice_option(6933, "BGS_061", 2, 3, 1, tier=1, races=("PIRATE",), keywords=("TAUNT",)),
+        ]
+    )
+    text = choice_message(
+        choice,
+        board=[minion(5805, "BGS_061", 11, 11, races=("PIRATE",))],
+        global_dbfs=(132532,),
+        trinkets=("BG35_MagicItem_890",),
+    )
+    assert text.splitlines() == [
+        "选择：黑暗之赐（3 选 1）",
+        "第 9 回合（招募）| 英雄：凯瑞尔·罗姆 | 血量 19+0 | 铸币 3 | 酒馆 6 本",
+        "本局种族：畸变、鱼人",
+        "本局机制：亚煞极（神明。）",
+        "饰品：沉没的船锚（随机获取2张悬赏令。）",
+        "场面（已用 1/7）：",
+        "  [#5805] 海盗无赖 11/11 | 1 本 | 海盗",
+        "手牌：",
+        "  （空）",
+        "选项：",
+        # 赐福优先用法术的说明；卡牌数据里只有附魔时用附魔的
+        "  [#6931] 左 1 摧心招募者 6/2 | 4 本 | 畸变 | 发动（0）：弃一张牌以随机获取一张畸变怪。"
+        " | 黑暗之赐：鹰身人之爪（圣盾。风怒）",
+        "  [#6932] 左 2 泰瑞尔 32/32 | 6 本 | 中立 | 发动（1）：… | 黑暗之赐：鹰身人之爪（圣盾，风怒）",
+        "  [#6933] 左 3 海盗无赖 3/1 | 1 本 | 海盗 | 嘲讽",
+    ]
+
+
+def test_choice_message_for_trinkets_mentions_the_gold():
+    from factory import choice_option, make_choice
+
+    choice = make_choice(
+        [
+            choice_option(3027, "BG35_MagicItem_890", 0, card_type="BATTLEGROUND_TRINKET", cost=4),
+            choice_option(3028, "BG30_MagicItem_420", 1, card_type="BATTLEGROUND_TRINKET", cost=1),
+            choice_option(3029, "UNKNOWN_TRINKET", 2, card_type="BATTLEGROUND_TRINKET"),
+        ],
+        choice_id=6,
+        kind="trinket",
+        source="BG30_Trinket_1st",
+    )
+    lines = choice_message(choice, gold=10, tribes=frozenset()).splitlines()
+    assert lines[0] == "选择：小型饰品（3 选 1）"
+    assert lines[2] == "本局种族：未知（推断中）"
+    assert lines[-4:] == [
+        "  [#3027] 左 1 沉没的船锚（4 金）：随机获取2张悬赏令。",
+        "  [#3028] 左 2 麦迪文之书（1 金）",
+        "  [#3029] 左 3 UNKNOWN_TRINKET",
+        "铸币 10；饰品的铸币价会从这回合的铸币里扣",
+    ]
+
+
+def test_choice_message_for_hero_power_stances_explains_the_hero_power():
+    from factory import choice_option, make_choice
+
+    choice = make_choice(
+        [
+            choice_option(677, "BG21_HERO_000p_t1", 0, card_type="SPELL"),
+            choice_option(678, "BG21_HERO_000_Buddyt", 1, card_type="SPELL"),
+        ],
+        choice_id=2,
+        kind="hero_power",
+        source="BG21_HERO_000p",
+    )
+    lines = choice_message(choice).splitlines()
+    assert lines[0] == "选择：定罪的升级选项（2 选 1）"
+    assert "英雄技能：定罪：随机使1个友方随从获得+1/+1。被动：在每场战斗后，选择一项提升。" in lines
+    assert lines[-2:] == [
+        "  [#677] 左 1 结阵姿态：在本局对战中，“定罪”额外使一个友方随从获得属性值。",
+        "  [#678] 左 2 进攻姿态",
+    ]
+
+
+def test_choice_message_titles_and_memory():
+    from factory import choice_option, make_choice
+
+    options = [
+        choice_option(9723, "BGS_061", 0, 4, 5, tier=2),
+        choice_option(9725, "BGS_061", 1, 6, 8, tier=2),
+    ]
+    triple = make_choice(options, kind="triple", source="TB_BaconShop_Triples_01")
+    assert choice_message(triple).splitlines()[0] == "选择：三连奖励（2 选 1）"
+    discover = make_choice(options, kind="discover", source="BG23_016")
+    memory = AIMemory(8, False, "畸变", ("泰瑞尔",), "")
+    lines = choice_message(discover, memory).splitlines()
+    assert lines[0] == "选择：发现（2 选 1，来源：海礁探险者）"
+    assert lines[-1] == "你之前的判断（第 8 回合）：方向 畸变；要找：泰瑞尔"
+    assert "英雄技能：" not in "\n".join(lines)  # 只有技能升级选项才写英雄技能

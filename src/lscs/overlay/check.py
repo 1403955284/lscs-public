@@ -12,6 +12,7 @@ from typing import Any
 
 from lscs.config import OverlayConfig
 from lscs.overlay import win32
+from lscs.overlay.geometry import Rect
 
 log = logging.getLogger(__name__)
 
@@ -87,12 +88,17 @@ def _screen() -> str:
     return f"{screen.width}×{screen.height}，左上角 ({screen.x}, {screen.y})"
 
 
-def _hearthstone() -> str:
+MINIMIZED = "炉石现在是最小化状态：请切回炉石（或把炉石改成窗口模式）后再运行一次"
+
+
+def locate_hearthstone() -> tuple[int, Rect | None]:
+    """炉石主窗口的句柄和客户区（取不到时为 None）。最小化时抛出 Note，没找到时抛出
+    RuntimeError，说明都是给玩家看的（overlay-check 和 highlight-test 共用）。"""
     hwnd = win32.find_hearthstone()
     if hwnd is None:
         if win32.hearthstone_windows():
             # 有炉石的 Unity 窗口，只是客户区是 0×0：全屏的炉石切到 PowerShell 时会自动最小化
-            raise Note("炉石现在是最小化状态：请切回炉石（或把炉石改成窗口模式）后再运行一次")
+            raise Note(MINIMIZED)
         others = [
             cls
             for _hwnd, cls, _area in win32.hearthstone_windows(require_unity=False)
@@ -104,7 +110,11 @@ def _hearthstone() -> str:
                 f"Hearthstone.exe 有窗口，但窗口类名是 {classes}，不是 {win32.UNITY_CLASS}"
             )
         raise RuntimeError("没找到炉石的窗口：请先打开炉石再运行")
-    rect = win32.client_rect(hwnd)
+    return hwnd, win32.client_rect(hwnd)
+
+
+def _hearthstone() -> str:
+    _hwnd, rect = locate_hearthstone()
     if rect is None:
         return "找到了，但取不到客户区位置（炉石可能最小化了）"
     return f"找到了，客户区 {rect.width}×{rect.height}，位置 ({rect.x}, {rect.y})"

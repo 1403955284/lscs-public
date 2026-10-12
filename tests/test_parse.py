@@ -208,3 +208,57 @@ def test_hero_reason_missing():
         advice = parse_hero_pick(json.dumps({"pick": 89, "reason": reason}), OFFERED)
         assert advice.reason == "（AI 没有给理由）"
     assert parse_hero_pick('{"pick": 89}', OFFERED).confidence is None
+
+
+# ---- 选项 ----
+
+CHOICE_IDS = [6931, 6932, 6933]
+
+
+def test_choice_pick_is_parsed():
+    from lscs.llm.parse import parse_choice_pick
+
+    advice = parse_choice_pick(
+        '{"pick": 6933, "reason": "32/32 直接成主力", "confidence": 0.8}', CHOICE_IDS, 12
+    )
+    assert (advice.choice_id, advice.pick, advice.reason, advice.confidence) == (
+        12,
+        6933,
+        "32/32 直接成主力",
+        0.8,
+    )
+    assert parse_choice_pick('{"pick": "#6931", "reason": "x"}', CHOICE_IDS).pick == 6931
+
+
+def test_choice_pick_must_be_one_of_the_options():
+    import pytest
+
+    from lscs.llm.parse import ParseError, parse_choice_pick
+
+    with pytest.raises(ParseError, match="推荐的选项不在选项里"):
+        parse_choice_pick('{"pick": 1, "reason": "x"}', CHOICE_IDS)
+    with pytest.raises(ParseError, match="pick"):
+        parse_choice_pick('{"reason": "x"}', CHOICE_IDS)
+    with pytest.raises(ParseError, match="pick"):
+        parse_choice_pick('{"pick": true}', CHOICE_IDS)
+    with pytest.raises(ParseError):
+        parse_choice_pick("[6933]", CHOICE_IDS)
+
+
+def test_choice_reason_is_one_cut_line():
+    from lscs.llm.parse import CHOICE_REASON_CHARS, parse_choice_pick
+
+    long = "很长" * 20
+    advice = parse_choice_pick(f'{{"pick": 6931, "reason": "第一行\\n{long}"}}', CHOICE_IDS)
+    assert advice.reason == ("第一行 " + long)[: CHOICE_REASON_CHARS - 1] + "…"
+    assert CHOICE_REASON_CHARS == 30
+    assert parse_choice_pick('{"pick": 6931}', CHOICE_IDS).reason == "（AI 没有给理由）"
+
+
+def test_empty_choice_answer_can_be_retried():
+    import pytest
+
+    from lscs.llm.parse import EmptyResponse, parse_choice_pick
+
+    with pytest.raises(EmptyResponse):
+        parse_choice_pick("  ", CHOICE_IDS)

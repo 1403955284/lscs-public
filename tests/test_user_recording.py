@@ -137,3 +137,93 @@ def test_hero_select_cleared_once_chosen(updates):
     )
     assert all(state.hero_select is None for state, _ in updates[chosen:])
     assert recruit(updates, 1).hero_select is None
+
+
+CHOICE_EVENTS = (EventType.CHOICE_OFFERED, EventType.CHOICE_RESOLVED)
+
+
+def offered_choice(updates, choice_id):
+    for state, events in updates:
+        for e in events:
+            if e.type == EventType.CHOICE_OFFERED and e.data["id"] == choice_id:
+                return state, e
+    raise AssertionError(f"没有选择 {choice_id}")
+
+
+def resolved_data(updates, choice_id):
+    return next(
+        e.data
+        for _, events in updates
+        for e in events
+        if e.type == EventType.CHOICE_RESOLVED and e.data["id"] == choice_id
+    )
+
+
+def test_every_choice_is_offered_and_resolved_with_a_pick(updates):
+    events = [e for _, events in updates for e in events if e.type in CHOICE_EVENTS]
+    offers = [e for e in events if e.type == EventType.CHOICE_OFFERED]
+    resolves = [e for e in events if e.type == EventType.CHOICE_RESOLVED]
+    assert [e.data["id"] for e in offers] == list(range(2, 21))
+    kinds = [e.data["kind"] for e in offers]
+    assert {k: kinds.count(k) for k in set(kinds)} == {
+        "hero_power": 12,
+        "trinket": 2,
+        "dark_gift": 3,
+        "triple": 2,
+    }
+    assert [e.data["id"] for e in resolves] == list(range(2, 21))
+    assert all(e.data["picked"] is not None for e in resolves)
+    # 每组都是先出现、再选完，不会两组叠在一起
+    assert [e.type for e in events] == list(CHOICE_EVENTS) * 19
+    for state, events in updates:
+        if any(e.type == EventType.CHOICE_RESOLVED for e in events):
+            assert state.choice is None
+
+
+def test_first_hero_power_choice_in_tavern_turn_2(updates):
+    state, event = offered_choice(updates, 2)
+    assert (event.turn, state.phase, state.main_action) == (2, Phase.RECRUIT, False)
+    assert [o.card_id for o in state.choice.options] == [
+        "BG21_HERO_000p_t1",
+        "BG21_HERO_000_Buddyt",
+        "BG21_HERO_000_Buddyt2",
+    ]
+
+
+def test_trinket_choice_before_turn_6_recruit_start(updates):
+    state, event = offered_choice(updates, 6)
+    assert (event.turn, state.main_action) == (6, False)
+    assert state.choice.source_card_id == "BG30_Trinket_1st"
+    options = state.choice.options
+    assert [o.entity_id for o in options] == [3027, 3026, 3025, 3028]  # 日志里的顺序，不按编号
+    assert [o.card_id for o in options] == [
+        "BG35_MagicItem_890",
+        "BG36_MagicItem_402",
+        "BG30_MagicItem_703",
+        "BG30_MagicItem_420",
+    ]
+    # 沉没的船锚创建时 COST=6，紧接着同一时间戳里降成 4（BACON_OVERRIDE_COST_COLOR）
+    assert [o.cost for o in options] == [4, 4, 5, 1]
+    order = [(e.type, e.data.get("id"), e.turn) for _, events in updates for e in events]
+    assert order.index((EventType.CHOICE_RESOLVED, 6, 6)) < order.index(
+        (EventType.RECRUIT_STARTED, None, 6)
+    )
+    assert resolved_data(updates, 6) == {"id": 6, "picked": 3026, "card": "BG36_MagicItem_402"}
+
+
+def test_dark_gift_options_and_their_gifts(updates):
+    state, event = offered_choice(updates, 12)
+    assert state.main_action and state.choice.kind == "dark_gift"
+    assert [(o.entity_id, o.card_id, o.atk, o.health, o.gifts) for o in state.choice.options] == [
+        (6931, "BG36_312", 6, 2, ("BG36_MidGameEffect_000t13",)),
+        (6932, "BG33_318", 1, 20, ("BG36_MidGameEffect_000t2",)),
+        (6933, "BG36_356", 32, 32, ("BG36_MidGameEffect_000t29",)),
+    ]
+    assert resolved_data(updates, 12)["picked"] == 6933
+
+
+def test_triple_reward_choice(updates):
+    state, _ = offered_choice(updates, 15)
+    assert state.choice.kind == "triple"
+    assert [o.entity_id for o in state.choice.options] == [9723, 9727, 9725]
+    assert resolved_data(updates, 15)["picked"] == 9725

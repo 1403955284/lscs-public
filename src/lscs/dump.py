@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from lscs.advisor.names import armor_zh
+from lscs.advisor.names import armor_zh, choice_option_text, choice_title
 from lscs.state.models import Event, EventType, GameState, Minion, TribesConfidence
 
 Namer = Callable[[str], str]
@@ -16,6 +16,7 @@ KEY_EVENTS = (
     EventType.COMBAT_STARTED,
     EventType.COMBAT_ENDED,
     EventType.GAME_ENDED,
+    EventType.CHOICE_OFFERED,
 )
 
 
@@ -82,6 +83,14 @@ def describe(
                 lines.append(f"{prefix} 战斗结束 我方血量 {health} | 对手阵容: {_list(board)}")
             case EventType.GAME_ENDED:
                 lines.append(f"{prefix} 对局结束 名次 {event.data.get('place')}")
+            case EventType.CHOICE_OFFERED if state.choice is not None:
+                choice = state.choice
+                options = "、".join(choice_option_text(o, name) for o in choice.options)
+                count = f"{len(choice.options)} 选 1"
+                lines.append(f"{prefix} 选择 {choice_title(choice, name)}（{count}）：{options}")
+            case EventType.CHOICE_RESOLVED:
+                card = event.data.get("card")
+                lines.append(f"{prefix} 已选 {name(str(card))}" if card else f"{prefix} 选择结束")
             case _:
                 lines.append(f"{prefix} {event.type.value}")
     if state.uncertain and lines:

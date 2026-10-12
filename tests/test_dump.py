@@ -71,3 +71,43 @@ def test_heroes_offered_and_rerolled(run_log):
         "、BG33_HERO_001（护甲 19）、TB_BaconShop_HERO_91（护甲 17）",
         "[T 0] 选择英雄 凯瑞尔·罗姆",
     ]
+
+
+def test_choice_lines(run_log):
+    from helpers import FIXTURES
+
+    from lscs.replay import read_log_lines
+
+    names = {
+        "BG21_HERO_000p": "定罪",
+        "BG21_HERO_000p_t1": "结阵姿态",
+        "BG21_HERO_000_Buddyt": "进攻姿态",
+        "BG21_HERO_000_Buddyt2": "防御姿态",
+        "TB_BaconShop_Triples_01": "三连奖励",
+        "BG23_016": "海礁探险者",
+        "BG23_009": "熔岩潜伏者",
+        "BGS_116": "刷新畸体",
+        "BGS_061": "海盗无赖",
+        "BG21_029": "粗鄙小鬼",
+        "BG36_MidGameEffect_010": "酒馆战棋黑暗之赐[DNT]",
+        "BG36_MidGameEffect_000t13": "鹰身人之爪",
+    }
+    updates = run_log(read_log_lines(FIXTURES / "power" / "choice.log"))
+    lines = [line for line in lines_for(updates, name=lambda c: names.get(c, c)) if "选" in line]
+    assert lines == [
+        "[T 1] 选择 定罪（3 选 1）：结阵姿态、进攻姿态、防御姿态",
+        "[T 1] 选择 三连奖励（3 选 1）：熔岩潜伏者 2/5、刷新畸体 1/4、海盗无赖 3/1",
+        "[T 1] 选择 海礁探险者（3 选 1）：粗鄙小鬼 1/1、海盗无赖 3/1、刷新畸体 1/4",
+        # 黑暗之赐：标题不用卡名；赐福写在随从后面
+        "[T 1] 选择 黑暗之赐（2 选 1）：粗鄙小鬼 1/1〔鹰身人之爪〕、海盗无赖 3/11〔BG36_MidGameEffect_000t2e2〕",
+        "[T 1] 选择 海礁探险者（2 选 1）：粗鄙小鬼 1/1、海盗无赖 3/1",
+    ]
+    verbose = [
+        line for line in lines_for(updates, verbose=True) if "选择结束" in line or "已选" in line
+    ]
+    assert verbose == [
+        "[T 1] 已选 BG21_HERO_000_Buddyt",
+        "[T 1] 选择结束",  # 没选完就换了一组
+        "[T 1] 选择结束",  # 没有 SendChoices，选项离开了 SETASIDE
+        "[T 1] 已选 BGS_061",
+    ]

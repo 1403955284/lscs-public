@@ -68,6 +68,9 @@ def test_should_show_only_when_hearthstone_or_panel_is_foreground():
     assert not should_show(hearthstone=10, foreground=10, panel=20, minimized=True)
     assert not should_show(hearthstone=None, foreground=20, panel=20, minimized=False)
     assert not should_show(hearthstone=10, foreground=None, panel=None, minimized=False)
+    # 画面高亮窗口在前台（比如刚创建时）也算
+    assert should_show(hearthstone=10, foreground=40, panel=20, minimized=False, highlight=40)
+    assert not should_show(hearthstone=10, foreground=40, panel=20, minimized=False, highlight=None)
 
 
 class FakeWindows:
@@ -201,3 +204,40 @@ def test_real_win32_helpers():
     assert hearthstone is None or win32.is_window_valid(hearthstone)
     assert win32.is_window_valid(0) is False
     assert isinstance(win32.hearthstone_windows(require_unity=False), list)
+
+
+# ---- 画面高亮的窗口 ----
+
+
+def test_make_passthrough_only_changes_style_bits(monkeypatch):
+    api = FakeWin32Api().install(monkeypatch)
+    api.styles[9] = WS_EX_LAYERED | 0x100  # Tk 设色键时已经是分层窗口
+    assert win32.has_passthrough_style(9) is False
+    assert win32.make_passthrough(9) is True
+    assert (
+        api.styles[9]
+        == WS_EX_LAYERED | 0x100 | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
+    )
+    assert win32.has_passthrough_style(9) is True
+    assert api.alpha == {}  # 不调 SetLayeredWindowAttributes：LWA_ALPHA 会盖掉色键
+
+
+def test_make_passthrough_reports_style_that_did_not_stick(monkeypatch):
+    api = FakeWin32Api().install(monkeypatch)
+    api.styles[9] = 0x100
+    calls = []
+
+    def set_style(hwnd, index, value):
+        calls.append(value)
+        return 0  # 什么都没改
+
+    api.SetWindowLongW = set_style
+    with pytest.raises(win32.Win32Error, match="SetWindowLongW"):
+        win32.make_passthrough(9)
+    assert calls[-1] == 0x100  # 恢复原样
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="只检查非 Windows 上的空实现")
+def test_passthrough_does_nothing_off_windows():
+    assert win32.make_passthrough(1) is False
+    assert win32.has_passthrough_style(1) is False

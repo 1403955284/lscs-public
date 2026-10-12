@@ -206,3 +206,77 @@ def offered_event(state, changed=0):
 
     count = len(state.hero_select.offered)
     return Event(type=EventType.HEROES_OFFERED, turn=0, data={"count": count, "changed": changed})
+
+
+def choice_option(
+    entity_id,
+    card_id,
+    index,
+    atk=None,
+    health=None,
+    *,
+    card_type="MINION",
+    tier=None,
+    races=(),
+    keywords=(),
+    cost=None,
+    gifts=(),
+):
+    from lscs.state.models import ChoiceOption
+
+    return ChoiceOption(
+        entity_id=entity_id,
+        card_id=card_id,
+        card_type=card_type,
+        index=index,
+        atk=atk,
+        health=health,
+        tier=tier,
+        races=tuple(races),
+        keywords=tuple(keywords),
+        cost=cost,
+        gifts=tuple(gifts),
+    )
+
+
+# 用户录像第 9 回合的黑暗之赐（id=12）：三个随从，属性已经算上了赐福
+DARK_GIFT_OPTIONS = (
+    (6931, "BG36_312", 6, 2, 4, ("ABERRATION",), "BG36_MidGameEffect_000t13"),
+    (6932, "BG33_318", 1, 20, 5, ("MURLOC",), "BG36_MidGameEffect_000t2"),
+    (6933, "BG36_356", 32, 32, 6, (), "BG36_MidGameEffect_000t29"),
+)
+
+
+def make_choice(options=None, *, choice_id=12, kind="dark_gift", source="BG36_MidGameEffect_010"):
+    """一组"选一个"；默认是 DARK_GIFT_OPTIONS。options 可以是 ChoiceOption 的列表。"""
+    from lscs.state.models import Choice, ChoiceKind
+
+    if options is None:
+        options = [
+            choice_option(e, c, i, atk, health, tier=tier, races=races, gifts=(gift,))
+            for i, (e, c, atk, health, tier, races, gift) in enumerate(DARK_GIFT_OPTIONS)
+        ]
+    return Choice(
+        id=choice_id, kind=ChoiceKind(kind), source_card_id=source, options=tuple(options)
+    )
+
+
+def choice_state(choice=None, *, seq=1, turn=9, main_action=True, **kwargs):
+    """招募阶段、游戏正弹着一组"选一个"的局面（默认是黑暗之赐）。"""
+    state = make_state(turn=turn, seq=seq, main_action=main_action, **kwargs)
+    return state.model_copy(update={"choice": choice if choice is not None else make_choice()})
+
+
+def choice_event(state, kind=None):
+    from lscs.state.models import Event, EventType
+
+    choice = state.choice
+    data = {"id": choice.id, "kind": kind or choice.kind.value, "count": len(choice.options)}
+    return Event(type=EventType.CHOICE_OFFERED, turn=state.turn, data=data)
+
+
+def resolved_event(choice_id, turn=9, picked=None, card=None):
+    from lscs.state.models import Event, EventType
+
+    data = {"id": choice_id, "picked": picked, "card": card}
+    return Event(type=EventType.CHOICE_RESOLVED, turn=turn, data=data)

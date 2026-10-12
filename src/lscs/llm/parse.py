@@ -1,5 +1,5 @@
 """把大模型的回答解析成 Plan（M2 设计文档第 7.3 节），选英雄的回答解析成 HeroAdvice
-（选英雄建议设计文档第 5.3 节）。"""
+（选英雄建议设计文档第 5.3 节），选项的回答解析成 ChoiceAdvice（选项建议设计文档第 5.3 节）。"""
 
 from __future__ import annotations
 
@@ -7,13 +7,21 @@ import json
 import math
 from collections.abc import Sequence
 
-from lscs.advisor.models import ACTION_TYPES, Action, HeroAdvice, HeroComment, Plan
+from lscs.advisor.models import (
+    ACTION_TYPES,
+    Action,
+    ChoiceAdvice,
+    HeroAdvice,
+    HeroComment,
+    Plan,
+)
 
 MAX_ACTIONS = 5  # 例如 买、买、英雄技能、刷新、冻结
 MAX_LOOK_FOR = 6  # "要找的牌"最多几个
 LOOK_FOR_CHARS = 20  # 每个最长几个字（超出截断，最后一个字换成"…"）
 HERO_REASON_CHARS = 60  # 选英雄的理由最长几个字（截断方式同上）
 HERO_COMMENT_CHARS = 20  # 每个英雄的点评最长几个字
+CHOICE_REASON_CHARS = 30  # 选项的理由最长几个字（提示词要求 25 字以内）
 NO_REASON = "（AI 没有给理由）"
 
 
@@ -150,5 +158,21 @@ def parse_hero_pick(
         pick=pick,
         reason=_one_line(data.get("reason"), HERO_REASON_CHARS) or NO_REASON,
         comments=_hero_comments(data.get("heroes"), offered),
+        confidence=_confidence(data.get("confidence")),
+    )
+
+
+def parse_choice_pick(text: str, offered: Sequence[int], choice_id: int = 0) -> ChoiceAdvice:
+    """offered：这组选项的实体编号；choice_id：这组的编号，原样放进结果。"""
+    data = _json_object(text)
+    pick = _entity_id(data.get("pick"))
+    if pick is None:
+        raise ParseError("缺少 pick（推荐的选项编号）")
+    if pick not in offered:
+        raise ParseError("推荐的选项不在选项里")
+    return ChoiceAdvice(
+        choice_id=choice_id,
+        pick=pick,
+        reason=_one_line(data.get("reason"), CHOICE_REASON_CHARS) or NO_REASON,
         confidence=_confidence(data.get("confidence")),
     )

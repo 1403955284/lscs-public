@@ -35,6 +35,11 @@ class EventType(StrEnum):
     COMBAT_STARTED = "COMBAT_STARTED"
     COMBAT_ENDED = "COMBAT_ENDED"
     GAME_ENDED = "GAME_ENDED"
+    # 游戏弹出了一组新的"选一个"（GameState.choice）；data：id 编号，kind 种类，count 选项个数
+    CHOICE_OFFERED = "CHOICE_OFFERED"
+    # 那组选完了（或作废了）；data：id 编号，picked 选中的实体编号，card 它的卡牌 ID
+    # （不知道选了哪个时 picked、card 都是 None）
+    CHOICE_RESOLVED = "CHOICE_RESOLVED"
 
 
 class _Frozen(BaseModel):
@@ -151,6 +156,38 @@ class HeroSelect(_Frozen):
         return tuple(sorted((h.entity_id, h.card_id) for h in self.offered))
 
 
+class ChoiceKind(StrEnum):
+    HERO_POWER = "hero_power"  # 英雄技能的升级选项（凯瑞尔的姿态）
+    TRINKET = "trinket"  # 饰品
+    DARK_GIFT = "dark_gift"  # 黑暗之赐
+    TRIPLE = "triple"  # 三连奖励的发现
+    DISCOVER = "discover"  # 其他发现（随从战吼等）
+
+
+class ChoiceOption(_Frozen):
+    entity_id: int
+    card_id: str
+    card_type: str  # MINION / SPELL / BATTLEGROUND_TRINKET
+    index: int  # 在选项里从左到右的序号，0 起（日志 Entities[] 的顺序）
+    atk: int | None  # 只有随从有
+    health: int | None
+    tier: int | None
+    races: tuple[str, ...] = ()
+    keywords: tuple[str, ...] = ()
+    golden: bool = False
+    cost: int | None = None  # COST 标签（饰品的铸币价）；日志不写 0，所以没有就是 None
+    gifts: tuple[str, ...] = ()  # 黑暗之赐：附着的赐福法术的卡牌 ID（查不到法术时是附魔的卡牌 ID）
+
+
+class Choice(_Frozen):
+    """游戏正弹着的"选一个"（2~4 个选项、选 1 个）。"""
+
+    id: int  # 日志里的选择编号，本局内递增
+    kind: ChoiceKind
+    source_card_id: str  # 发起者的卡牌 ID（定罪、小型饰品、三连奖励……）
+    options: tuple[ChoiceOption, ...]  # 按 index 排
+
+
 class GameState(_Frozen):
     seq: int = 0
     phase: Phase = Phase.WAITING
@@ -169,6 +206,8 @@ class GameState(_Frozen):
     global_dbfs: tuple[int, ...] = ()  # 本局全局机制（BACON_GLOBAL_*_DBID）的卡牌 dbfId
     # 只在选英雄阶段、我方手牌区里有备选英雄时不为 None；选完（英雄离开手牌区）就是 None
     hero_select: HeroSelect | None = None
+    # 只在招募阶段、游戏正弹着一组还没选完的"选一个"时不为 None
+    choice: Choice | None = None
 
 
 class Event(_Frozen):

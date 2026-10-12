@@ -1,4 +1,4 @@
-"""Windows 辅助函数：找炉石窗口、取客户区位置、判断前台、让面板鼠标穿透。
+"""Windows 辅助函数：找炉石窗口、取客户区位置、判断前台、让面板和画面高亮鼠标穿透。
 
 只用 ctypes，只在 Windows 上加载（第一次调用时）。非 Windows 上所有函数返回 None / False / ""。
 Windows 上：
@@ -32,6 +32,8 @@ WS_EX_TRANSPARENT = 0x20
 WS_EX_TOOLWINDOW = 0x80
 WS_EX_NOACTIVATE = 0x08000000
 LWA_ALPHA = 2
+# 画面高亮：鼠标穿透、不进任务栏、不抢焦点。分层和色键由 Tk 的 -transparentcolor 设置
+PASSTHROUGH_BITS = WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 PROCESS_PER_MONITOR_DPI_AWARE = 2
 SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN = 76, 77
@@ -67,12 +69,16 @@ def overlay_style(current: int, click_through: bool) -> int:
 
 
 def should_show(
-    hearthstone: int | None, foreground: int | None, panel: int | None, minimized: bool
+    hearthstone: int | None,
+    foreground: int | None,
+    panel: int | None,
+    minimized: bool,
+    highlight: int | None = None,
 ) -> bool:
-    """炉石（或面板自己）在前台、而且没有最小化时才显示。"""
+    """炉石（或面板自己、画面高亮窗口）在前台、而且没有最小化时才显示。"""
     if hearthstone is None or foreground is None or minimized:
         return False
-    return foreground in (hearthstone, panel)
+    return foreground in (hearthstone, panel, highlight)
 
 
 class HearthstoneLocator:
@@ -250,6 +256,29 @@ def make_overlay(hwnd: int, opacity: float, click_through: bool) -> bool:
     except Exception:
         api.SetWindowLongW(hwnd, GWL_EXSTYLE, _signed32(old))
         raise
+    return True
+
+
+def has_passthrough_style(hwnd: int) -> bool:
+    if not IS_WINDOWS:
+        return False
+    current = _api().GetWindowLongW(hwnd, GWL_EXSTYLE) & 0xFFFFFFFF
+    return current & PASSTHROUGH_BITS == PASSTHROUGH_BITS
+
+
+def make_passthrough(hwnd: int) -> bool:
+    """画面高亮窗口：只加上穿透、不进任务栏、不抢焦点的扩展样式。不调
+    SetLayeredWindowAttributes（面板用的 LWA_ALPHA 会盖掉 Tk 设的色键，整个窗口就看不见了）。
+    失败时恢复原样式并抛出 Win32Error。"""
+    if not IS_WINDOWS:
+        return False
+    api = _api()
+    old = api.GetWindowLongW(hwnd, GWL_EXSTYLE) & 0xFFFFFFFF
+    api.SetWindowLongW(hwnd, GWL_EXSTYLE, _signed32(old | PASSTHROUGH_BITS))
+    if not has_passthrough_style(hwnd):
+        error = api.get_last_error()
+        api.SetWindowLongW(hwnd, GWL_EXSTYLE, _signed32(old))
+        raise Win32Error("SetWindowLongW", error)
     return True
 
 

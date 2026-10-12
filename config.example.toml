@@ -10,8 +10,9 @@ api_key = ""                   # 你的 DeepSeek Key
 thinking = "disabled"          # 请保持 disabled；思考交给下面的深度分析
 timeout_seconds = 20
 max_output_tokens = 1500
-max_calls_per_game = 80        # 每局最多调用几次（快速、深度和选英雄一起算）
+max_calls_per_game = 100       # 每局最多调用几次（快速、深度、选英雄和选项一起算）
 hero_advice = true             # 选英雄时也让 AI 推荐一个（每局 1 次，重随时再 1 次）
+choice_advice = true           # 弹出选项（三连发现、黑暗之赐、饰品、技能升级）时让 AI 选一个
 # 深度分析：每回合开始时和快速建议同时发出，开思考，约 20 秒（偶尔 1 分钟）出结果
 deep_analysis = true           # false 关闭深度分析（每局大约省 5 毛到 1 块钱）
 deep_thinking = "low"          # 思考强度：low 或 high（high 更慢）
@@ -24,3 +25,37 @@ position = "right"             # 贴在炉石窗口的 right（右侧）、left�
 opacity = 0.85                 # 不透明度，0.3~1.0
 font_size = 0                  # 字号（像素）：0 表示按炉石窗口大小自动，或填 10~40
 click_through = true           # 鼠标点击穿透面板，不影响游戏操作（只在 Windows 上有效）
+
+[highlight]
+# 游戏画面上的高亮：给"下一步"指的那张牌或按钮画一个金色框（只在 Windows 上显示）。
+# 下面的位置是按 16:9 画面估计的，用 uv run lscs highlight-test 对照截图校准；
+# x 是内容区宽度的比例，y 和尺寸是内容区高度的比例（内容区：客户区里居中的最大 16:9 矩形）。
+enabled = true                 # false 只关高亮，面板的"下一步"照常
+color = "#ffd34d"              # 框的颜色
+aspect = 1.7777777777777777    # 内容区的宽高比（16:9）
+# 一排牌：中心的高度、相邻两张的间距、一张的宽和高
+shop_y = 0.31                  # 商店
+shop_pitch = 0.143
+shop_width = 0.125
+shop_height = 0.175
+board_y = 0.585                # 我方场面
+board_pitch = 0.143
+board_width = 0.125
+board_height = 0.175
+choice_y = 0.5                 # 弹出的 2~3 个选项（发现、黑暗之赐、三连、技能升级）
+choice_pitch = 0.42
+choice_width = 0.33
+choice_height = 0.5
+choice4_y = 0.5                # 弹出的 4 个选项（饰品）
+choice4_pitch = 0.34
+choice4_width = 0.28
+choice4_height = 0.44
+hero_y = 0.47                  # 选英雄
+hero_pitch = 0.36
+hero_width = 0.27
+hero_height = 0.46
+# 按钮：[中心 x, 中心 y, 半径]
+upgrade = [0.19, 0.3, 0.05]    # 升本
+refresh = [0.19, 0.43, 0.045]  # 刷新
+freeze = [0.81, 0.43, 0.045]   # 冻结
+hero_power = [0.585, 0.82, 0.06]  # 英雄技能

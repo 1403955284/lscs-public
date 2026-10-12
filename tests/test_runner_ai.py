@@ -340,7 +340,7 @@ def test_ai_request_at_recruit_start_already_knows_the_hero_power(path, line):
     )
     runner = AdviceRunner(RULES, CARDS.name, AdviceDisplay(CARDS.name, lambda _: None), scheduler)
     run(read_log_lines(path), runner)
-    recruit = [c for c in provider.calls if not c.user.startswith("选英雄")]
+    recruit = [c for c in provider.calls if not c.user.startswith(("选英雄", "选择："))]
     situations = [c.user.split("\n\n", 1)[1] for c in recruit]  # 去掉开头的本局卡池
     starts = [text for text in situations if text.startswith("第 1 回合")]
     assert starts and any(text.startswith(line) for text in starts[0].splitlines())
@@ -433,3 +433,103 @@ def test_hero_advice_from_the_scheduler_end_to_end():
     runner.on_update(st.model_copy(update={"seq": 2}), [])  # 其他更新：不再提示，也不再调用
     runner.tick()
     assert len(out) == 3
+
+
+# ---- 选项的 AI 结果 ----
+
+PICK = json.dumps({"pick": 6933, "reason": "32/32 直接成主力"}, ensure_ascii=False)
+CHOICE_CARDS = CardDB(
+    [
+        {"id": "BG36_356", "name": "泰瑞尔", "type": "MINION"},
+        {"id": "BG36_312", "name": "摧心招募者", "type": "MINION"},
+    ]
+)
+
+
+def choice_runner(answers=(), main_action=False):
+    from factory import choice_event, choice_state
+
+    out = []
+    runner = make_runner(list(answers), out)
+    runner._name = CHOICE_CARDS.name
+    runner._display = AdviceDisplay(CHOICE_CARDS.name, out.append)
+    st = choice_state(main_action=main_action)
+    runner.on_update(st, [choice_event(st)])
+    return runner, out, st
+
+
+def test_choice_before_main_action_is_sent_to_the_ai_at_once():
+    runner, out, _ = choice_runner([PICK])
+    runner.tick()
+    assert out == [
+        "  🤖 AI 分析中…",
+        "  🤖 AI（0.0 秒）：选 左数第 3 个 泰瑞尔 —— 32/32 直接成主力",
+    ]
+
+
+def choice_result(state, pick=6933, error=None, choice_id=12):
+    from lscs.advisor.models import ChoiceAdvice
+
+    request = AIRequest(9, state, None, 100.0, "choice", choice_id=choice_id)
+    advice = None if error else ChoiceAdvice(choice_id=choice_id, pick=pick, reason="稳")
+    return AIResult(request, None, error, 1.25, choice=advice)
+
+
+def test_choice_errors_are_shown_as_text():
+    runner, out, st = choice_runner()
+    runner._show_result(choice_result(st, error="AI 超时"))
+    runner._show_result(choice_result(st, error="AI 建议无效，已忽略"))
+    assert out == ["  🤖 AI 超时", "  🤖 AI 建议无效，已忽略"]
+
+
+def test_choice_result_after_the_pick_or_for_another_group_is_dropped():
+    from factory import resolved_event
+
+    runner, out, st = choice_runner()
+    runner._show_result(choice_result(st, choice_id=11))  # 上一组的
+    done = make_state(turn=9, seq=2)
+    runner.on_update(done, [resolved_event(12, picked=6931)])
+    runner._show_result(choice_result(st))  # 已经选完
+    runner._show_result(choice_result(st, error="AI 超时"))
+    assert out == []
+    runner._state = st
+    runner._show_result(choice_result(st))
+    assert out == ["  🤖 AI（1.2 秒）：选 左数第 3 个 泰瑞尔 —— 稳"]
+
+
+@NEEDS_USER_LOG
+def test_user_game_asks_once_per_choice_before_each_pick():
+    """用户录像：19 次"选一个"各调用一次，结果都在玩家选择之前显示。"""
+    from lscs.replay import read_log_lines
+    from lscs.state.models import EventType
+
+    provider = FakeProvider([])
+    scheduler = LLMScheduler(
+        provider,
+        LLMConfig(api_key="sk-x-123456789", deep_analysis=False, max_calls_per_game=200),
+        CARDS,
+        guide="",
+        clock=lambda: 100.0,
+        run_async=lambda job: job(),
+    )
+    seen = []
+
+    class Display(AdviceDisplay):
+        def ai_pending(self, lane="fast"):
+            seen.append(("pending", lane))
+
+    runner = AdviceRunner(RULES, CARDS.name, Display(CARDS.name, lambda _: None), scheduler)
+
+    def on_update(state, events):
+        seen.extend(("event", e.type) for e in events if e.type == EventType.CHOICE_RESOLVED)
+        runner.on_update(state, events)
+        runner.tick()
+
+    pipeline = Pipeline(StateTracker(TEST_POOL), on_update)
+    for line in read_log_lines(USER_LOG):
+        pipeline.push(line)
+    pipeline.flush()
+    choice_calls = [c for c in provider.calls if c.user.startswith("选择：")]
+    assert len(choice_calls) == 19 * 2  # FakeProvider 没有回答：空内容各重试一次
+    order = [kind for kind, lane in seen if kind == "event" or lane == "choice"]
+    assert order == ["pending", "event"] * 19  # 每组都是先发出请求、后选完

@@ -7,7 +7,8 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict
 
 ActionType = Literal["buy", "sell", "upgrade", "hero_power", "refresh", "freeze"]
-Lane = Literal["fast", "deep", "hero"]  # AI 建议的三路：快速建议、深度分析、选英雄
+# AI 建议的四路：快速建议、深度分析、选英雄、选项（游戏弹出的"选一个"）
+Lane = Literal["fast", "deep", "hero", "choice"]
 # 深度分析的操作为什么不能用了：refreshed 商店刷新了；invalid 操作不合法；
 # changed 步骤已经做完、局面变化太大或已经进入战斗
 Expired = Literal["refreshed", "invalid", "changed"]
@@ -62,5 +63,15 @@ class HeroAdvice(_Frozen):
     pick: int | None  # 推荐的实体编号；规则拿不准时为 None
     reason: str
     comments: tuple[HeroComment, ...] = ()
+    elapsed: float | None = None  # AI 调用耗时（秒）
+    confidence: float | None = None  # AI 的把握，只记录不显示
+
+
+class ChoiceAdvice(_Frozen):
+    """AI 在游戏弹出的"选一个"里推荐的选项（没有规则版本）。"""
+
+    choice_id: int  # 基于哪一组（Choice.id）
+    pick: int  # 推荐的实体编号
+    reason: str
     elapsed: float | None = None  # AI 调用耗时（秒）
     confidence: float | None = None  # AI 的把握，只记录不显示

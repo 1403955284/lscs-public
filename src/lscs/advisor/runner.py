@@ -33,6 +33,7 @@ TRIGGERS = frozenset(
         EventType.HERO_POWER_CHANGED,  # 选项到了（技能能不能用）、用过了技能
     }
 )
+CHOICE_EVENTS = frozenset({EventType.CHOICE_OFFERED, EventType.CHOICE_RESOLVED})
 
 
 def _still_pending(action: Action, old: GameState, new: GameState) -> bool:
@@ -95,6 +96,9 @@ class AdviceRunner:
             # 只在出现一组新的备选英雄时提示（开局、重随）；之后的更新只交给调度器
             self._advise_hero(state)
         if state.phase == Phase.RECRUIT and state.me is not None:
+            if types & CHOICE_EVENTS:
+                # 回合开始的技能升级、饰品在 MAIN_ACTION 之前就弹出：不管招募就绪没有都处理
+                self._advise_choice(state, types, events)
             # 回合开始时先发铸币（商店还是空的）、再摆商店，还可能先选饰品花掉铸币；
             # 这些都在 STEP 变成 MAIN_ACTION（招募开始）之前，不提示，也不通知调度器。
             # 重连时 STEP 直接以初始值出现、没有招募开始事件，所以看 main_action 而不是事件。
@@ -134,6 +138,14 @@ class AdviceRunner:
         if self._scheduler is not None:
             self._scheduler.observe(state, events, ctx)
 
+    def _advise_choice(self, state: GameState, types: set[EventType], events: list[Event]) -> None:
+        """游戏弹出了一组新的选项：先交给显示端列出来（面板），AI 的推荐稍后由调度器给出；
+        选完了：调度器作废还没回来的请求。没有规则版本（拿不准就不乱猜）。"""
+        if EventType.CHOICE_OFFERED in types and state.choice is not None:
+            self._display.show_choice(state, None)
+        if self._scheduler is not None:
+            self._scheduler.observe_choice(state, events)
+
     def _advise_hero(self, state: GameState) -> None:
         select = state.hero_select
         if select is None:
@@ -166,7 +178,10 @@ class AdviceRunner:
                 if isinstance(event, AIStarted):
                     self._display.ai_pending(event.lane)
                 elif isinstance(event, AINotice):
-                    self._display.ai_text(event.text)
+                    if event.lane is None:
+                        self._display.ai_text(event.text)
+                    else:
+                        self._display.ai_text(event.text, event.lane)
                 elif isinstance(event, AIResult):
                     self._show_result(event)
         except Exception:
@@ -178,6 +193,9 @@ class AdviceRunner:
         lane = result.lane
         if lane == "hero":
             self._show_hero_result(result)
+            return
+        if lane == "choice":
+            self._show_choice_result(result)
             return
         if result.error is not None:
             self._display.ai_text(_error_text(result.error, lane), lane)
@@ -251,6 +269,21 @@ class AdviceRunner:
             and rules.pick == advice.pick
         )
         self._display.show_hero(current, advice, agrees)
+
+    def _show_choice_result(self, result: AIResult) -> None:
+        """选项的 AI 结果（或错误）：那组已经选完、换了一组都丢弃，只记日志。"""
+        current = self._state
+        choice = current.choice if current is not None else None
+        if current is None or choice is None or choice.id != result.request.choice_id:
+            log.info("选项的 AI 结果回来时已经选完，丢弃")
+            return
+        if result.error is not None:
+            self._display.ai_text(_error_text(result.error, "choice"), "choice")
+            return
+        if result.choice is None:
+            return
+        advice = result.choice.model_copy(update={"elapsed": result.elapsed})
+        self._display.show_choice(current, advice)
 
 
 def _error_text(error: str, lane: Lane) -> str:

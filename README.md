@@ -10,6 +10,7 @@
 uv run lscs fix-log-config      # 只需一次；看到"已写入"后完全重启炉石
 Copy-Item config.example.toml config.toml; notepad config.toml   # 只需一次；填 DeepSeek Key
 uv run lscs overlay-check       # 只需一次；先打开炉石，检查悬浮面板
+uv run lscs highlight-test      # 只需一次；在炉石上画出金色框的所有位置，截图发给开发者校准
 uv run lscs watch               # 每次打游戏前运行，PowerShell 不要关；Ctrl+C 退出
 ```
 
@@ -25,6 +26,7 @@ uv run lscs watch               # 每次打游戏前运行，PowerShell 不要�
 | `uv run lscs replay <文件> --ai` | 回放时真的调用大模型（花费 token，用来检查 AI 建议） |
 | `uv run lscs replay <文件> --overlay --speed 20` | 回放时打开悬浮面板预览（不开炉石、在 Mac 上也能看） |
 | `uv run lscs overlay-check` | 逐项检查悬浮面板能否贴靠炉石、穿透鼠标（在 Windows 上先打开炉石再运行） |
+| `uv run lscs highlight-test` | 在炉石画面上画出画面高亮的所有位置（每排的槽位和四个按钮），截图核对位置；`--seconds 60` 显示更久，`--rows shop,buttons` 只画几排；不是 Windows 时开一个预览窗口 |
 
 `watch` 总是显示中文卡名；`replay` 加 `--names` 才显示。第一次使用会从 HearthstoneJSON 下载约 10MB 的卡牌数据。
 
@@ -32,11 +34,16 @@ uv run lscs watch               # 每次打游戏前运行，PowerShell 不要�
 
 详见 [使用说明.md](使用说明.md) 的"填写 DeepSeek Key"和"常用设置"。实现要点：
 
-- AI 分两路调用，每局合计最多 `max_calls_per_game` 次（默认 80）：
+- AI 分四路调用，每局合计最多 `max_calls_per_game` 次（默认 100；凯瑞尔这种每回合都弹选项的英雄一局大约 60 次）：
   - 快速建议（不开思考，2~3 秒）：每个招募回合开始时一次，每次刷新后（商店稳定 1 秒）再一次；
-  - 深度分析（`deep_thinking` 开思考，约 20 秒）：只在招募回合开始时和快速建议同时发出，`deep_analysis = false` 关闭。
-  `watch` 启动时从头读当前的 Power.log，但只为读完后的当前回合调用（每路最多一次）。每次调用的提示词和回答记录在
-  `recordings/llm-日期.jsonl`（`lane` 是 `fast` 或 `deep`），不包含 Key，也不进仓库。
+  - 深度分析（`deep_thinking` 开思考，约 20 秒）：只在招募回合开始时和快速建议同时发出，`deep_analysis = false` 关闭；
+  - 选英雄（参数同快速建议）：出现一组备选英雄后等 0.5 秒调用一次，`hero_advice = false` 关闭；
+  - 选项（参数同快速建议）：游戏弹出"选一个"（`GameState.DebugPrintEntityChoices`：三连发现、黑暗之赐、饰品、
+    技能升级）时立即调用一次，选完、换组、进战斗就作废，`choice_advice = false` 关闭。回合开始的技能升级和饰品
+    在 `MAIN_ACTION` 之前弹出，所以这一路不等招募开始。
+  `watch` 启动时从头读当前的 Power.log，但只为读完后的当前回合（和还没选完的那组选项）调用（每路最多一次）。
+  每次调用的提示词和回答记录在 `recordings/llm-日期.jsonl`（`lane` 是 `fast`、`deep`、`hero` 或 `choice`），
+  不包含 Key，也不进仓库。
 - 局面消息开头附本局卡池（本局种族和中立随从、酒馆法术），末尾附上次的判断（方向、要找的牌、分析）；不附规则建议。
 - `thinking`（快速建议）请保持 `"disabled"`，思考交给深度分析。
 - 攻略要点在 `strategy/current/guide.md`，会原样发给 AI。
@@ -44,7 +51,12 @@ uv run lscs watch               # 每次打游戏前运行，PowerShell 不要�
   会等它一起生成招募开始的局面。规则只安排 0 费、不需要目标的技能；其余的交给 AI，提示词里写明费用、状态和可选目标。
 - 悬浮面板用 tkinter 实现，Windows 上通过 Win32 贴在炉石窗口上，并设置鼠标穿透、不抢焦点、不显示在任务栏；
   失败时退回成屏幕右上角的普通置顶窗口，无法启动时只用终端。`uv run lscs replay <录像> --overlay --speed 20`
-  可以在任何平台预览面板。
+  可以在任何平台预览面板。面板最上面是"下一步"（面板上显示的方案的第一步，或弹出选项时 AI 选的那个）。
+- 画面高亮（`[highlight]`）：Windows 上贴靠炉石时，再开一个和面板同一个 Tk 的置顶窗口盖住炉石客户区，
+  背景用 `-transparentcolor` 色键（完全透明），再加上穿透、不抢焦点的扩展样式（不调 `SetLayeredWindowAttributes`，
+  否则会盖掉色键），只给"下一步"画三层描边的金色框和步骤编号；面板隐藏时清空，出错只关高亮。位置由
+  `overlay/layout.py` 的布局模型按客户区里居中的 16:9 内容区按比例算出，默认值是估计的，用 `highlight-test`
+  的截图校准后改默认值和 `config.example.toml`。
 
 ## 添加录像（在 Mac 上）
 

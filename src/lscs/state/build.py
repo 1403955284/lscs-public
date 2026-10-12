@@ -11,6 +11,10 @@
   被动技能从不出现在选项里；选项在招募开始（STEP 变成 MAIN_ACTION）之后才到
 - 选英雄阶段（TURN=0）的备选英雄是我方手牌区里 CARDTYPE=HERO 的实体；选中后离开手牌区。
   其他玩家选好的英雄在 SETASIDE 区、由 Bob 控制，不会混进来
+- "选一个"（发现、饰品、黑暗之赐、技能升级）的选项在 Choices 包之前就创建好了（SETASIDE 区、
+  我控制），标签和随从一样；选完后至少有一个选项离开 SETASIDE（进手牌、场上或坟场），
+  没有 SendChoices（比如重连）时据此判断已经选完。黑暗之赐的赐福是附着在选项上的附魔，
+  它的创建者是赐福法术（法术的说明比附魔完整）
 """
 
 from __future__ import annotations
@@ -23,6 +27,9 @@ from hearthstone.enums import CardType, GameTag, PlayState, Race, State, Step, Z
 from lscs.state.entities import EntityStore
 from lscs.state.models import (
     NO_TARGET,
+    Choice,
+    ChoiceKind,
+    ChoiceOption,
     GameState,
     HandCard,
     HeroOption,
@@ -55,6 +62,8 @@ KEYWORD_TAGS = {
 
 # 饰品还没选时，我方场上是两个占位实体（"小型饰品"/"大型饰品"），选完后才变成真正的饰品
 TRINKET_PLACEHOLDERS = frozenset({"BG30_Trinket_1st", "BG30_Trinket_2nd"})
+DARK_GIFT_PREFIX = "BG36_MidGameEffect"  # 黑暗之赐的发起者；赐福法术是 BG36_MidGameEffect_000tN
+TRIPLE_PREFIX = "TB_BaconShop_Triples"  # 三连奖励
 GLOBAL_DBF_TAG = re.compile(r"BACON_GLOBAL_\w+_DBID")
 
 LastBoards = Mapping[int, tuple[tuple[Minion, ...], int]]  # player_id -> (阵容, 酒馆回合)
@@ -283,6 +292,86 @@ def hero_select(store: EntityStore) -> HeroSelect | None:
     return HeroSelect(offered=offered, reroll=bool(reroll))
 
 
+def _choice_kind(store: EntityStore, source: int | None) -> ChoiceKind:
+    card = store.card_id(source) or ""
+    if store.tag(source, GameTag.CARDTYPE) == CardType.HERO_POWER:
+        return ChoiceKind.HERO_POWER
+    if card in TRINKET_PLACEHOLDERS:
+        return ChoiceKind.TRINKET
+    if card.startswith(DARK_GIFT_PREFIX):
+        return ChoiceKind.DARK_GIFT
+    if card.startswith(TRIPLE_PREFIX):
+        return ChoiceKind.TRIPLE
+    return ChoiceKind.DISCOVER
+
+
+def _gifts(store: EntityStore, entity_id: int) -> tuple[str, ...]:
+    """黑暗之赐选项上附着的赐福：附魔的创建者是赐福法术时记法术，否则记附魔自己。
+    一个赐福可能附上好几个附魔（"+10 生命值"和"亡语"各一个），去重、保持顺序。"""
+    gifts: list[str] = []
+    for enchantment in store.of_type(CardType.ENCHANTMENT):
+        if store.tag(enchantment, GameTag.ATTACHED) != entity_id:
+            continue
+        creator = store.card_id(store.tag(enchantment, GameTag.CREATOR)) or ""
+        gift = creator if creator.startswith(DARK_GIFT_PREFIX + "_") else store.card_id(enchantment)
+        if gift and gift not in gifts:
+            gifts.append(gift)
+    return tuple(gifts)
+
+
+def _choice_option(
+    store: EntityStore, entity_id: int, index: int, kind: ChoiceKind
+) -> ChoiceOption:
+    is_minion = store.tag(entity_id, GameTag.CARDTYPE) == CardType.MINION
+    return ChoiceOption(
+        entity_id=entity_id,
+        card_id=store.card_id(entity_id) or "",
+        card_type=_card_type_name(store, entity_id),
+        index=index,
+        atk=(store.tag(entity_id, GameTag.ATK, 0) or 0) if is_minion else None,
+        health=_current_health(store, entity_id) if is_minion else None,
+        tier=_tier(store, entity_id),
+        races=races_of(store, entity_id),
+        keywords=_keywords(store, entity_id),
+        golden=_golden(store, entity_id),
+        cost=store.tag(entity_id, GameTag.COST),
+        gifts=_gifts(store, entity_id) if kind == ChoiceKind.DARK_GIFT else (),
+    )
+
+
+def choice(store: EntityStore) -> Choice | None:
+    """游戏正弹着的"选一个"：招募阶段、本回合弹出的、GENERAL、只选 1 个、还没选、至少 2 个选项、
+    选项都是我的而且都还在 SETASIDE 区。不满足时为 None（选英雄走 hero_select）。
+    回合结束时游戏会替你选掉没选的那组；就算日志里看不出来，也不会在下一回合又冒出来。"""
+    open_choice = store.choice
+    if (
+        open_choice is None
+        or open_choice.choice_type != "GENERAL"
+        or open_choice.max != 1
+        or open_choice.sent
+        or len(open_choice.entities) < 2
+        or open_choice.turn != raw_turn(store)
+        or phase_of(store) != Phase.RECRUIT
+    ):
+        return None
+    me = me_player_id(store)
+    for entity_id in open_choice.entities:
+        if store.tag(entity_id, GameTag.CONTROLLER) != me:
+            return None
+        if store.tag(entity_id, GameTag.ZONE) != Zone.SETASIDE:
+            return None  # 有一个选项离开了 SETASIDE：已经选完
+    kind = _choice_kind(store, open_choice.source)
+    return Choice(
+        id=open_choice.id,
+        kind=kind,
+        source_card_id=store.card_id(open_choice.source) or "",
+        options=tuple(
+            _choice_option(store, entity_id, index, kind)
+            for index, entity_id in enumerate(open_choice.entities)
+        ),
+    )
+
+
 def player_view(store: EntityStore) -> PlayerView | None:
     player_id = me_player_id(store)
     entity = store.player_entity(player_id)
@@ -402,4 +491,5 @@ def build_state(
         final_place=final_place,
         global_dbfs=global_dbfs(store),
         hero_select=hero_select(store) if phase == Phase.HERO_SELECT else None,
+        choice=choice(store) if phase == Phase.RECRUIT else None,
     )

@@ -339,11 +339,37 @@ def test_replay_with_hero_advice_off(monkeypatch, tmp_path, capsys):
     _ai_cli_setup(monkeypatch, tmp_path, [answer] * 2, extra=extra)
     assert main(["replay", str(MINI_LOG), "--ai"]) == 0
     out = capsys.readouterr().out
-    assert "选英雄建议：关闭" in out
+    assert "选英雄建议：关闭" in out and "选项建议" not in out
     assert "  📋 规则：护甲信息不全，等 AI 建议" in out  # 规则建议照常
     assert "本局 AI 调用 2 次" in out
     record = next((tmp_path / "recordings").glob("llm-*.jsonl")).read_text(encoding="utf-8")
     assert [json.loads(line)["lane"] for line in record.splitlines()] == ["fast", "fast"]
+
+
+def test_replay_with_choice_advice_off(monkeypatch, tmp_path, capsys):
+    from helpers import MINI_LOG
+
+    _ai_cli_setup(monkeypatch, tmp_path, [], extra="choice_advice = false\n")
+    assert main(["replay", str(MINI_LOG), "--ai"]) == 0
+    assert "选项建议：关闭" in capsys.readouterr().out
+
+
+def test_replay_with_ai_asks_the_choice_lane(monkeypatch, tmp_path, capsys):
+    import json
+
+    from helpers import FIXTURES
+
+    pick = json.dumps({"pick": 61, "reason": "先加攻击"}, ensure_ascii=False)
+    hero = json.dumps({"actions": []})
+    _ai_cli_setup(monkeypatch, tmp_path, [pick] + [hero] * 8, extra="deep_analysis = false\n")
+    assert main(["replay", str(FIXTURES / "power" / "choice.log"), "--ai"]) == 0
+    out = capsys.readouterr().out
+    offered = out.index("[T 1] 选择 BG21_HERO_000p（3 选 1）")
+    answer = out.index("：选 左数第 2 个 BG21_HERO_000_Buddyt —— 先加攻击")
+    assert offered < answer < out.index("[T 1] 招募开始")  # 在 MAIN_ACTION 之前就给出
+    record = next((tmp_path / "recordings").glob("llm-*.jsonl")).read_text(encoding="utf-8")
+    lanes = [json.loads(line)["lane"] for line in record.splitlines()]
+    assert lanes[0] == "choice" and lanes.count("choice") == 5  # 5 组选项各一次
 
 
 def test_replay_sends_heroes_md_to_the_hero_lane(monkeypatch, tmp_path, capsys):
@@ -618,7 +644,7 @@ def test_watch_falls_back_to_terminal_when_overlay_cannot_start(
 ):
     import lscs.overlay.app
 
-    def no_tk(_cfg):
+    def no_tk(_cfg, highlight=None):
         raise ImportError("No module named '_tkinter'")
 
     monkeypatch.setattr(lscs.overlay.app, "create_tk_window", no_tk)
@@ -633,7 +659,7 @@ def test_watch_falls_back_to_terminal_when_overlay_cannot_start(
 def test_watch_no_overlay_flag_keeps_terminal_only(monkeypatch, tmp_path, mini_lines, capsys):
     import lscs.overlay.app
 
-    def must_not_open(_cfg):
+    def must_not_open(_cfg, highlight=None):
         raise AssertionError("不该打开面板")
 
     monkeypatch.setattr(lscs.overlay.app, "create_tk_window", must_not_open)
@@ -648,7 +674,7 @@ def test_watch_no_overlay_flag_keeps_terminal_only(monkeypatch, tmp_path, mini_l
 def test_watch_overlay_disabled_in_config(monkeypatch, tmp_path, mini_lines, capsys):
     import lscs.overlay.app
 
-    monkeypatch.setattr(lscs.overlay.app, "create_tk_window", lambda _cfg: 1 / 0)
+    monkeypatch.setattr(lscs.overlay.app, "create_tk_window", lambda _cfg, highlight=None: 1 / 0)
     argv, calls = _watch_setup(monkeypatch, tmp_path, mini_lines, "[overlay]\nenabled = false\n")
     assert main(argv) == 0
     out = capsys.readouterr().out
@@ -685,9 +711,16 @@ def test_watch_with_overlay_feeds_panel_and_stops_on_ctrl_c(
                 assert time.monotonic() < deadline
                 time.sleep(0.01)
 
-    monkeypatch.setattr(lscs.overlay.app, "create_tk_window", lambda _cfg: FakeWindow())
-    argv, calls = _watch_setup(monkeypatch, tmp_path, mini_lines)
+    highlights = []
+
+    def create(_cfg, highlight=None):
+        highlights.append(highlight)
+        return FakeWindow()
+
+    monkeypatch.setattr(lscs.overlay.app, "create_tk_window", create)
+    argv, calls = _watch_setup(monkeypatch, tmp_path, mini_lines, "[highlight]\nshop_y = 0.3\n")
     assert main(argv) == 0
+    assert highlights[0].shop_y == 0.3  # config.toml 的 [highlight] 交给面板窗口
     out = capsys.readouterr().out
     assert "悬浮面板已打开（测试）" in out
     assert "📋 规则：① 买 刷新畸体 1/4（商店里身材最好，有嘲讽）" in out  # 终端照常
@@ -723,7 +756,9 @@ def test_replay_with_overlay_previews_and_closes_when_done(monkeypatch, tmp_path
                 assert time.monotonic() < deadline
                 time.sleep(0.005)
 
-    monkeypatch.setattr(lscs.overlay.app, "create_tk_window", lambda _cfg: FakeWindow())
+    monkeypatch.setattr(
+        lscs.overlay.app, "create_tk_window", lambda _cfg, highlight=None: FakeWindow()
+    )
     assert main(["replay", str(MINI_LOG), "--overlay", "--speed", "1000"]) == 0
     out = capsys.readouterr().out
     assert "[T 1] 招募开始" in out  # --overlay 隐含 --advice，并且显示中文卡名
@@ -799,3 +834,59 @@ def test_overlay_check_with_broken_config(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(lscs.cli, "DEFAULT_CONFIG", config)
     assert main(["overlay-check"]) == 1
     assert "overlay.opacity" in capsys.readouterr().out
+
+
+def test_highlight_test_command(monkeypatch, tmp_path, capsys):
+    import lscs.cli
+    import lscs.overlay.calibrate
+
+    config = tmp_path / "config.toml"
+    config.write_text("[highlight]\nshop_y = 0.3\n", encoding="utf-8")
+    monkeypatch.setattr(lscs.cli, "DEFAULT_CONFIG", config)
+    calls = []
+
+    def fake_run(cfg, seconds, rows):
+        calls.append((cfg.shop_y, seconds, list(rows)))
+        return True
+
+    monkeypatch.setattr(lscs.overlay.calibrate, "run_highlight_test", fake_run)
+    assert main(["highlight-test"]) == 0
+    assert main(["highlight-test", "--seconds", "3", "--rows", "shop, buttons"]) == 0
+    assert calls == [
+        (0.3, 10.0, ["shop", "board", "choice", "choice4", "hero", "buttons"]),
+        (0.3, 3.0, ["shop", "buttons"]),
+    ]
+    monkeypatch.setattr(lscs.overlay.calibrate, "run_highlight_test", lambda *_: False)
+    assert main(["highlight-test"]) == 1
+
+
+def test_highlight_test_rejects_bad_arguments_and_config(monkeypatch, tmp_path, capsys):
+    import lscs.cli
+
+    with pytest.raises(SystemExit):
+        main(["highlight-test", "--rows", "shop,hand"])
+    assert "不认识：hand" in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        main(["highlight-test", "--seconds", "0"])
+    config = tmp_path / "config.toml"
+    config.write_text("[highlight]\nshop_y = 9\n", encoding="utf-8")
+    monkeypatch.setattr(lscs.cli, "DEFAULT_CONFIG", config)
+    assert main(["highlight-test"]) == 1
+    assert "highlight.shop_y" in capsys.readouterr().out
+
+
+def test_highlight_test_on_this_platform_previews(monkeypatch, tmp_path, capsys):
+    """Mac 上走预览分支（窗口换成假的）；没有 config.toml 时用默认值。"""
+    import lscs.cli
+    import lscs.overlay.calibrate
+    from lscs.overlay import win32
+
+    monkeypatch.setattr(win32, "IS_WINDOWS", False)
+    monkeypatch.setattr(lscs.cli, "DEFAULT_CONFIG", tmp_path / "config.toml")
+    shown = []
+    monkeypatch.setattr(
+        lscs.overlay.calibrate, "show_tk", lambda frames, *rest: shown.append(len(frames))
+    )
+    assert main(["highlight-test", "--seconds", "1"]) == 0
+    assert shown == [29]
+    assert "不是 Windows：在一个 1280×720 的预览窗口里画出所有位置" in capsys.readouterr().out

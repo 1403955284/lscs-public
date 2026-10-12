@@ -1,5 +1,6 @@
 """生成发给大模型的系统提示和局面消息（M2 设计文档第 7.1 节、更聪明的 AI 建议设计文档第 3 节）。
-选英雄用单独的系统提示和局面消息（选英雄建议设计文档第 5 节），招募阶段的提示不受影响。"""
+选英雄（选英雄建议设计文档第 5 节）和游戏弹出的"选一个"（选项建议设计文档第 5 节）各用单独的
+系统提示和局面消息，招募阶段的提示不受影响。"""
 
 from __future__ import annotations
 
@@ -9,11 +10,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from lscs.advisor.context import MINION, TurnContext, hero_power_blocker, hero_power_used
-from lscs.advisor.names import armor_zh, keyword_zh, tribe_zh
+from lscs.advisor.names import armor_zh, choice_title, keyword_zh, tribe_zh
 from lscs.cards.db import CardDB, CardInfo
 from lscs.llm.parse import MAX_ACTIONS
 from lscs.state.models import (
     NO_TARGET,
+    ChoiceKind,
+    ChoiceOption,
     GameState,
     HandCard,
     HeroPower,
@@ -104,6 +107,25 @@ pick 必须是备选英雄的实体编号；heroes 给其他每个英雄一句�
 {heroes_note}"""  # noqa: E501
 NO_HEROES_NOTE = "（本月还没有可靠的英雄强度资料，请按护甲和技能判断。）"
 
+# 选项建议设计文档第 5.1 节的原文。选项在一局里会弹出很多次，系统提示本身不变，也能命中缓存
+CHOICE_EXAMPLE = {"pick": 6933, "reason": "为什么选它，25 字以内", "confidence": 0.7}
+CHOICE_SYSTEM_TEMPLATE = """你是《炉石传说》酒馆战棋的高分教练，正在帮一位 6000 分以下的新手在游戏弹出的几个选项里选一个（三连奖励的发现、黑暗之赐、饰品、英雄技能的升级选项，或者随从效果的发现）。玩家几秒钟内就要点，请用简体中文，直接给结论。
+
+【怎么判断】
+- 先看本局方向和场面：和当前方向（种族/流派）、场上核心配合的选项优先；还没有方向时选单独最强、最稳、新手最容易用好的。
+- 三连奖励 / 发现随从：优先方向核心卡、能成长的牌、有经济价值的牌，其次才看身材；能和手里、场上凑成对子或三连的也值得。
+- 黑暗之赐：每个选项的属性已经算上了赐福。比较"随从本身 + 赐福"对现在阵容的价值；圣盾、复生、风怒这类关键词放在主力随从身上最值。
+- 饰品：看它在接下来几个回合能带来多少收益；和方向配合、现在就能用上的优先；要花铸币的饰品要考虑这回合剩多少铸币、会不会耽误升本。
+- 英雄技能的升级选项：选和自己的阵容、打法最契合的；几个选项差不多时选收益最稳定的。
+- 不知道的事不要编：没有给出的数据不要假装知道。
+
+只输出一个 json 对象，格式：
+{example}
+pick 必须是选项的实体编号；reason 会显示在游戏画面上，25 字以内。
+
+【攻略要点】
+{guide}"""  # noqa: E501
+
 MAX_TAVERN_TIER = 6  # 酒馆最高 6 本；7 本的牌不会出现在商店里，不让 AI 叫新手去找
 POOL_TITLE = "【本局卡池（本局种族的随从和中立随从，按酒馆等级）】"
 SPELLS_TITLE = "【酒馆法术】"
@@ -139,6 +161,12 @@ def build_hero_system_prompt(guide: str, heroes_note: str | None) -> str:
         example=json.dumps(HERO_EXAMPLE, ensure_ascii=False),
         guide=guide,
         heroes_note=heroes_note or NO_HEROES_NOTE,
+    )
+
+
+def build_choice_system_prompt(guide: str) -> str:
+    return CHOICE_SYSTEM_TEMPLATE.format(
+        example=json.dumps(CHOICE_EXAMPLE, ensure_ascii=False), guide=guide
     )
 
 
@@ -201,7 +229,7 @@ class _Writer:
         info = self.cards.get(card_id) if card_id else None
         return info.text if info is not None else ""
 
-    def minion_parts(self, card: Minion | ShopItem | HandCard) -> list[str]:
+    def minion_parts(self, card: Minion | ShopItem | HandCard | ChoiceOption) -> list[str]:
         golden = "(金)" if card.golden and "(金)" not in self.name(card.card_id) else ""
         parts = [f"{self.name(card.card_id)}{golden} {card.atk}/{card.health}"]
         if card.tier:
@@ -317,6 +345,26 @@ def _mechanics_line(state: GameState, cards: CardDB) -> str | None:
     return "本局机制：" + "；".join(f"{m.name}（{m.text}）" for m in mechanics if m is not None)
 
 
+def _turn_line(state: GameState, w: _Writer) -> str:
+    me = state.me
+    assert me is not None
+    return (
+        f"第 {state.turn} 回合（招募）| 英雄：{w.name(me.hero_card_id)} "
+        f"| 血量 {me.health}+{me.armor} | 铸币 {me.gold} | 酒馆 {me.tavern_tier} 本"
+    )
+
+
+def _tribes_line(state: GameState) -> str:
+    tribes = "、".join(tribe_zh(t) for t in sorted(state.tribes)) or "未知"
+    if state.tribes_confidence == TribesConfidence.INFERRING:
+        tribes += "（推断中）"
+    return f"本局种族：{tribes}"
+
+
+def _trinkets_line(trinkets: Sequence[str], w: _Writer) -> str:
+    return "饰品：" + "；".join(f"{w.name(t)}（{w.text(t)}）" for t in trinkets)
+
+
 def build_user_message(
     state: GameState, ctx: TurnContext, cards: CardDB, memory: AIMemory | None = None
 ) -> str:
@@ -325,8 +373,7 @@ def build_user_message(
     assert me is not None
     w = _Writer(cards)
     lines = [
-        f"第 {state.turn} 回合（招募）| 英雄：{w.name(me.hero_card_id)} "
-        f"| 血量 {me.health}+{me.armor} | 铸币 {me.gold} | 酒馆 {me.tavern_tier} 本",
+        _turn_line(state, w),
         " | ".join(
             [
                 f"升本 {me.upgrade_cost} 金" if me.upgrade_cost is not None else "已是最高等级",
@@ -339,12 +386,9 @@ def build_user_message(
     ]
     if me.hero_power is not None:
         lines.append(_hero_power_line(me.hero_power, state, w))
-    tribes = "、".join(tribe_zh(t) for t in sorted(state.tribes)) or "未知"
-    if state.tribes_confidence == TribesConfidence.INFERRING:
-        tribes += "（推断中）"
-    lines.append(f"本局种族：{tribes}")
+    lines.append(_tribes_line(state))
     if me.trinkets:
-        lines.append("饰品：" + "；".join(f"{w.name(t)}（{w.text(t)}）" for t in me.trinkets))
+        lines.append(_trinkets_line(me.trinkets, w))
     mechanics = _mechanics_line(state, cards)
     if mechanics is not None:
         lines.append(mechanics)
@@ -406,4 +450,65 @@ def build_hero_message(state: GameState, cards: CardDB, rerolled: bool = False) 
         + _hero_power_part(h.hero_power_dbf, cards)
         for h in select.offered
     ]
+    return "\n".join(lines)
+
+
+def _choice_heading(state: GameState, w: _Writer) -> str:
+    choice = state.choice
+    assert choice is not None
+    count = f"{len(choice.options)} 选 1"
+    title = choice_title(choice, w.name)
+    if choice.kind == ChoiceKind.HERO_POWER:
+        return f"选择：{title}的升级选项（{count}）"
+    if choice.kind == ChoiceKind.DISCOVER:
+        return f"选择：发现（{count}，来源：{title}）"
+    return f"选择：{title}（{count}）"
+
+
+def _gift_part(gifts: Sequence[str], w: _Writer) -> str:
+    parts = [f"{w.name(g)}（{w.text(g)}）" if w.text(g) else w.name(g) for g in gifts]
+    return "黑暗之赐：" + "；".join(parts)
+
+
+def _choice_option_line(option: ChoiceOption, w: _Writer) -> str:
+    """选项一行；其中"左 N"和面板、画面高亮用的是同一个序号。"""
+    head = f"  [#{option.entity_id}] 左 {option.index + 1} "
+    text = w.text(option.card_id)
+    if option.card_type == "MINION" and option.atk is not None:
+        parts = w.minion_parts(option)
+        if text:
+            parts.append(text)
+        if option.gifts:
+            parts.append(_gift_part(option.gifts, w))
+        return head + " | ".join(parts)
+    name = w.name(option.card_id)
+    if option.card_type == "BATTLEGROUND_TRINKET" and option.cost is not None:
+        name += f"（{option.cost} 金）"
+    return head + (f"{name}：{text}" if text else name)
+
+
+def build_choice_message(state: GameState, cards: CardDB, memory: AIMemory | None = None) -> str:
+    """游戏弹出的"选一个"：标题、回合、本局种族和机制、场面、手牌和选项。不放本局卡池
+    （选项就那么几张，发卡池只会更慢）；有记忆时末尾加一行之前的判断（只读，不会被改写）。"""
+    choice, me = state.choice, state.me
+    assert choice is not None and me is not None
+    w = _Writer(cards)
+    lines = [_choice_heading(state, w), _turn_line(state, w), _tribes_line(state)]
+    mechanics = _mechanics_line(state, cards)
+    if mechanics is not None:
+        lines.append(mechanics)
+    if choice.kind == ChoiceKind.HERO_POWER:
+        power = choice.source_card_id
+        text = w.text(power)
+        lines.append(f"英雄技能：{w.name(power)}：{text}" if text else f"英雄技能：{w.name(power)}")
+    if me.trinkets:
+        lines.append(_trinkets_line(me.trinkets, w))
+    lines += w.section(f"场面（已用 {len(me.board)}/7）：", me.board)
+    lines += w.section("手牌：", me.hand)
+    lines.append("选项：")
+    lines += [_choice_option_line(option, w) for option in choice.options]
+    if choice.kind == ChoiceKind.TRINKET:
+        lines.append(f"铸币 {me.gold}；饰品的铸币价会从这回合的铸币里扣")
+    if memory is not None:
+        lines.append(_memory_line(memory, state.turn))
     return "\n".join(lines)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import tomllib
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
@@ -27,7 +27,8 @@ class LLMConfig(BaseModel):
     # 快速建议：招募开始和每次刷新后各调用一次，不开思考，2~3 秒出结果
     thinking: Literal["disabled", "low", "high"] = "disabled"
     timeout_seconds: float = Field(default=20, gt=0)
-    max_calls_per_game: int = Field(default=80, ge=0)  # 快速、深度和选英雄三路共用
+    # 快速、深度、选英雄和选项四路共用；每回合都有选项的英雄（凯瑞尔）一局大约 60 次
+    max_calls_per_game: int = Field(default=100, ge=0)
     max_output_tokens: int = Field(default=1500, gt=0)  # 800 不够写 analysis
     # 深度分析：只在招募开始时和快速建议同时发出，开思考，约 20 秒
     deep_analysis: bool = True
@@ -37,6 +38,9 @@ class LLMConfig(BaseModel):
     # 选英雄：看到备选英雄时让快速模型推荐一个（每局 1 次，重随时再 1 次）；
     # 思考模式、输出上限、超时沿用快速建议的
     hero_advice: bool = True
+    # 选项：游戏弹出"选一个"（三连发现、黑暗之赐、饰品、技能升级）时让快速模型选一个，立即调用；
+    # 参数同上
+    choice_advice: bool = True
 
     @field_validator("api_key")
     @classmethod
@@ -61,11 +65,53 @@ class OverlayConfig(BaseModel):
         return value
 
 
+Ratio = Annotated[float, Field(ge=0, le=2)]  # 内容区宽度或高度的比例
+Radius = Annotated[float, Field(ge=0, le=0.5)]
+ButtonPlace = tuple[Ratio, Ratio, Radius]  # [x, y, radius]
+
+
+class HighlightConfig(BaseModel):
+    """游戏画面上的高亮（选项建议设计文档第 8、10 节）。位置默认按 16:9 估计，用 highlight-test
+    对照截图校准；x 是内容区宽度的比例，y 和尺寸是内容区高度的比例。默认值和
+    overlay.layout.HighlightLayout 的一样。"""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    enabled: bool = True
+    color: str = Field(default="#ffd34d", pattern=r"^#[0-9a-fA-F]{6}$")
+    aspect: float = Field(default=16 / 9, gt=0.5, le=4)
+    shop_y: Ratio = 0.31
+    shop_pitch: Ratio = 0.143
+    shop_width: Ratio = 0.125
+    shop_height: Ratio = 0.175
+    board_y: Ratio = 0.585
+    board_pitch: Ratio = 0.143
+    board_width: Ratio = 0.125
+    board_height: Ratio = 0.175
+    choice_y: Ratio = 0.50
+    choice_pitch: Ratio = 0.42
+    choice_width: Ratio = 0.33
+    choice_height: Ratio = 0.50
+    choice4_y: Ratio = 0.50
+    choice4_pitch: Ratio = 0.34
+    choice4_width: Ratio = 0.28
+    choice4_height: Ratio = 0.44
+    hero_y: Ratio = 0.47
+    hero_pitch: Ratio = 0.36
+    hero_width: Ratio = 0.27
+    hero_height: Ratio = 0.46
+    upgrade: ButtonPlace = (0.19, 0.30, 0.05)
+    refresh: ButtonPlace = (0.19, 0.43, 0.045)
+    freeze: ButtonPlace = (0.81, 0.43, 0.045)
+    hero_power: ButtonPlace = (0.585, 0.82, 0.06)
+
+
 class AppConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     llm: LLMConfig = LLMConfig()
     overlay: OverlayConfig = OverlayConfig()
+    highlight: HighlightConfig = HighlightConfig()
 
 
 def load_config(path: Path) -> AppConfig:

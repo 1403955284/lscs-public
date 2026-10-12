@@ -146,3 +146,34 @@ def test_heroes_offered(updates):
     assert not any(h.locked for h in select.offered)
     chosen, _ = at(updates, EventType.HERO_CHOSEN, 0)
     assert chosen.hero_select is None
+
+
+def test_choices(updates):
+    """40 次"选一个"：三连发现 6 次、随从战吼等的发现 34 次。id=17（艾萨拉的孵化场）
+    到进战斗都没有 SendChoices：随着离开招募阶段作废，不知道选了哪个。"""
+    offers = [e for _, events in updates for e in events if e.type == EventType.CHOICE_OFFERED]
+    kinds = [e.data["kind"] for e in offers]
+    assert (len(offers), kinds.count("triple"), kinds.count("discover")) == (40, 6, 34)
+    resolves = [
+        e.data for _, events in updates for e in events if e.type == EventType.CHOICE_RESOLVED
+    ]
+    assert len(resolves) == 40
+    assert [r["id"] for r in resolves if r["picked"] is None] == [17]
+    assert updates[-1][0].choice is None  # 对局结束
+
+
+def test_two_discovers_in_a_row(updates):
+    # 海礁探险者连发两组（id 3、4）：各一次出现，中间一次选完
+    sequence = [
+        (e.type, e.data["id"])
+        for _, events in updates
+        for e in events
+        if e.type in (EventType.CHOICE_OFFERED, EventType.CHOICE_RESOLVED)
+        and e.data["id"] in (3, 4)
+    ]
+    assert sequence == [
+        (EventType.CHOICE_OFFERED, 3),
+        (EventType.CHOICE_RESOLVED, 3),
+        (EventType.CHOICE_OFFERED, 4),
+        (EventType.CHOICE_RESOLVED, 4),
+    ]

@@ -2,6 +2,11 @@ from hearthstone.enums import GameTag, Zone
 
 from lscs.parsing.feed import (
     CardRevealed,
+    ChoiceChosen,
+    ChoiceEntity,
+    ChoiceOffered,
+    ChoiceSent,
+    ChoiceSource,
     GameMeta,
     GameStarted,
     OptionListed,
@@ -172,3 +177,60 @@ def test_options_become_flat_changes():
     ]
     # 选项之后的 tag 照常输出
     assert feed.feed(P + "TAG_CHANGE Entity=10 tag=ATK value=4") == [TagSet(10, GameTag.ATK, 4)]
+
+
+CHOICES = "D 10:00:02.0000000 GameState.DebugPrintEntityChoices() - "
+SEND = "D 10:00:03.0000000 GameState.SendChoices() - "
+
+
+def choice_entity(entity_id, card_id, zone="SETASIDE"):
+    return f"[entityName=X id={entity_id} zone={zone} zonePos=0 cardId={card_id} player=1]"
+
+
+def test_choices_arriving_line_by_line_are_emitted_once_each():
+    feed = PowerFeed()
+    feed_all(feed, HEADER)
+    header = CHOICES + "id=2 Player=Me#1234 TaskList=8 ChoiceType=GENERAL CountMin=1 CountMax=1"
+    assert feed.feed(header) == [ChoiceOffered(2, "GENERAL", 1)]
+    assert feed.feed(CHOICES + "  Source=" + choice_entity(15, "HP", "PLAY")) == [ChoiceSource(15)]
+    # 实体编号不按顺序：保持 Entities[] 的顺序（就是画面上从左到右的顺序）
+    assert feed.feed(CHOICES + "  Entities[0]=" + choice_entity(62, "C")) == [ChoiceEntity(62)]
+    assert feed.feed(CHOICES + "  Entities[1]=" + choice_entity(60, "A")) == [ChoiceEntity(60)]
+    assert feed.feed(CHOICES + "  Entities[2]=" + choice_entity(61, "B")) == [ChoiceEntity(61)]
+    # 下一个包到来时不会重复输出这一组
+    assert feed.feed(P + "TAG_CHANGE Entity=10 tag=ATK value=4") == [TagSet(10, GameTag.ATK, 4)]
+
+
+def test_send_choices_become_sent_and_chosen():
+    feed = PowerFeed()
+    feed_all(feed, HEADER)
+    lines = [
+        SEND + "id=2 ChoiceType=GENERAL",
+        SEND + "  m_chosenEntities[0]=" + choice_entity(61, "B"),
+        "D 10:00:03.3 GameState.DebugPrintEntitiesChosen() - id=2 Player=Me#1234 EntitiesCount=1",
+        "D 10:00:03.3 GameState.DebugPrintEntitiesChosen() -   Entities[0]="
+        + choice_entity(61, "B"),
+    ]
+    assert feed_all(feed, lines) == [ChoiceSent(2, "GENERAL"), ChoiceChosen(61)]
+
+
+def test_mulligan_choices_are_emitted_and_game_entity_source_is_none():
+    feed = PowerFeed()
+    feed_all(feed, HEADER)
+    lines = [
+        CHOICES + "id=1 Player=Me#1234 TaskList=7 ChoiceType=MULLIGAN CountMin=1 CountMax=1",
+        CHOICES + "  Source=GameEntity",
+        CHOICES + "  Entities[0]=" + choice_entity(10, "BG21_029", "HAND"),
+    ]
+    assert feed_all(feed, lines) == [
+        ChoiceOffered(1, "MULLIGAN", 1),
+        ChoiceSource(None),
+        ChoiceEntity(10),
+    ]
+
+
+def test_count_max_is_kept():
+    feed = PowerFeed()
+    feed_all(feed, HEADER)
+    line = CHOICES + "id=5 Player=Me#1234 TaskList=9 ChoiceType=GENERAL CountMin=0 CountMax=2"
+    assert feed.feed(line) == [ChoiceOffered(5, "GENERAL", 2)]

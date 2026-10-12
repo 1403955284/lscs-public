@@ -92,7 +92,7 @@ class StateTracker:
             pool_config=self._pool_config,
             uncertain=self._uncertain,
         )
-        before, after = _diff_events(self._state, new, self._heroes_offered)
+        before, after = _diff_events(self._state, new, self._heroes_offered, self._picked())
         if any(e.type == EventType.HEROES_OFFERED for e in before):
             self._heroes_offered = True
         pending = self._pending if new.phase != Phase.WAITING else []  # 非酒馆战棋对局不发事件
@@ -100,6 +100,13 @@ class StateTracker:
         self._pending = []
         self._state = new
         return new, events
+
+    def _picked(self) -> int | None:
+        """上一个快照里那组"选一个"选中的实体（SendChoices 记下的；编号对得上才算）。"""
+        old, current = self._state.choice, self._store.choice
+        if old is None or current is None or current.id != old.id or not current.chosen:
+            return None
+        return current.chosen[0]
 
     def _before_tag(self, change: TagSet) -> None:
         # 第一次攻击之前截取对手阵容，这时还没有随从死亡
@@ -180,9 +187,10 @@ class StateTracker:
 
 
 def _diff_events(
-    old: GameState, new: GameState, heroes_offered: bool = False
+    old: GameState, new: GameState, heroes_offered: bool = False, picked: int | None = None
 ) -> tuple[list[Event], list[Event]]:
-    """heroes_offered：本局已经发过备选英雄事件，这次再发就是重随（changed=1）。"""
+    """heroes_offered：本局已经发过备选英雄事件，这次再发就是重随（changed=1）。
+    picked：old 里那组"选一个"选中的实体（不知道时为 None）。"""
     before: list[Event] = []
     after: list[Event] = []
     if old.phase == Phase.WAITING and new.phase != Phase.WAITING:
@@ -214,4 +222,14 @@ def _diff_events(
         after.append(
             Event(type=EventType.GAME_ENDED, turn=new.turn, data={"place": new.final_place})
         )
+    # 选择事件放在最后：买卖带来的事件先处理（建议先算），再处理选项
+    old_choice, new_choice = old.choice, new.choice
+    if old_choice is not None and (new_choice is None or new_choice.id != old_choice.id):
+        card = next((o.card_id for o in old_choice.options if o.entity_id == picked), None)
+        data = {"id": old_choice.id, "picked": picked if card else None, "card": card}
+        after.append(Event(type=EventType.CHOICE_RESOLVED, turn=new.turn or old.turn, data=data))
+    if new_choice is not None and (old_choice is None or old_choice.id != new_choice.id):
+        count = len(new_choice.options)
+        data = {"id": new_choice.id, "kind": new_choice.kind.value, "count": count}
+        after.append(Event(type=EventType.CHOICE_OFFERED, turn=new.turn, data=data))
     return before, after

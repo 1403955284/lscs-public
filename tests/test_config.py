@@ -28,7 +28,7 @@ def test_missing_file_gives_defaults(tmp_path):
     assert (llm.thinking, llm.timeout_seconds, llm.max_calls_per_game, llm.max_output_tokens) == (
         "disabled",
         20,
-        80,
+        100,
         1500,
     )
     deep = (
@@ -39,15 +39,23 @@ def test_missing_file_gives_defaults(tmp_path):
     )
     assert deep == (True, "low", 16000, 75)
     assert llm.hero_advice is True
+    assert llm.choice_advice is True
 
 
 def test_hero_advice_can_be_switched_off(tmp_path):
     assert load_config(write(tmp_path, "[llm]\nhero_advice = false\n")).llm.hero_advice is False
 
 
+def test_choice_advice_can_be_switched_off(tmp_path):
+    cfg = load_config(write(tmp_path, "[llm]\nchoice_advice = false\n"))
+    assert cfg.llm.choice_advice is False
+
+
 def test_example_file_matches_defaults():
     assert load_config(EXAMPLE) == AppConfig()
-    assert "\nhero_advice = true " in EXAMPLE.read_text(encoding="utf-8")
+    text = EXAMPLE.read_text(encoding="utf-8")
+    assert "\nhero_advice = true " in text
+    assert "\nchoice_advice = true " in text
 
 
 def test_values_are_read(tmp_path):
@@ -165,3 +173,35 @@ def test_overlay_values_are_read(tmp_path):
 def test_overlay_invalid_values_are_rejected(tmp_path, line, field):
     with pytest.raises(ConfigError, match=field):
         load_config(write(tmp_path, f"[overlay]\n{line}\n"))
+
+
+def test_highlight_defaults_and_values():
+    from lscs.config import HighlightConfig
+
+    cfg = AppConfig().highlight
+    assert cfg == HighlightConfig()
+    assert (cfg.enabled, cfg.color, cfg.aspect) == (True, "#ffd34d", 16 / 9)
+    assert cfg.upgrade == (0.19, 0.30, 0.05)
+
+
+@pytest.mark.parametrize(
+    ("line", "field"),
+    [
+        ("shop_y = 2.5", "highlight.shop_y"),
+        ("board_pitch = -0.1", "highlight.board_pitch"),
+        ("upgrade = [0.2, 0.3, 0.6]", "highlight.upgrade"),
+        ("upgrade = [0.2, 0.3]", "highlight.upgrade"),
+        ('color = "gold"', "highlight.color"),
+        ("aspect = 0", "highlight.aspect"),
+        ("shop_size = 3", "highlight.shop_size"),
+    ],
+)
+def test_highlight_invalid_values_are_rejected(tmp_path, line, field):
+    with pytest.raises(ConfigError, match=field):
+        load_config(write(tmp_path, f"[highlight]\n{line}\n"))
+
+
+def test_highlight_values_are_read(tmp_path):
+    text = "[highlight]\nenabled = false\nshop_y = 0.3\nhero_power = [0.6, 0.8, 0.05]\n"
+    cfg = load_config(write(tmp_path, text)).highlight
+    assert (cfg.enabled, cfg.shop_y, cfg.hero_power) == (False, 0.3, (0.6, 0.8, 0.05))

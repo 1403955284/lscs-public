@@ -1,6 +1,8 @@
 """悬浮面板窗口（tkinter）：画出 OverlayView，贴到炉石窗口上，按前台窗口显示或隐藏。
+Windows 上贴靠炉石时，再开一个画面高亮窗口（overlay.highlight）盖在炉石客户区上，
+给"下一步"画框；它和面板同一个 Tk、同一个主循环，面板在它上面，面板隐藏时它清空。
 
-只在主线程使用。定时器回调里的任何异常都只记日志，定时器照常继续。
+只在主线程使用。定时器回调里的任何异常都只记日志，定时器照常继续；高亮出错只影响高亮。
 """
 
 from __future__ import annotations
@@ -10,16 +12,18 @@ import sys
 import tkinter as tk
 import tkinter.font as tkfont
 from collections.abc import Callable
+from typing import Protocol
 
-from lscs.config import OverlayConfig
+from lscs.config import HighlightConfig, OverlayConfig
 from lscs.overlay import geometry, win32
 from lscs.overlay.geometry import Layout, Rect
-from lscs.overlay.model import OverlayModel, OverlayView, condense
+from lscs.overlay.model import NextStep, OverlayModel, OverlayView, condense
 
 log = logging.getLogger(__name__)
 
 RENDER_MS = 150  # 读取数据模型的间隔
 CONDENSE_LEVELS = 3  # 0 全部；1 去掉"方向"；2 再去掉"要找"、附注和点评，"目标"只留一行
+NEXT_SCALE = 1.25  # "下一步"第一行的字比正文大这么多
 PLACE_MS = 500  # 重新定位、判断显示/隐藏的间隔
 BG = "#1e1e24"
 TITLE = "#d4d4dc"
@@ -33,8 +37,28 @@ SIDES = {"right": "右侧", "left": "左侧", "top": "顶部"}
 OFFSCREEN = "1x1+-32000+-32000"  # 第一次显示时放在屏幕外，免得在左上角闪一下
 DOCK_FAILURE_LIMIT = 5  # 贴靠炉石连续失败几次后改用普通置顶窗口
 FALLBACK_HINT = "面板已移到屏幕右上角；不需要面板可以用 --no-overlay 关闭"
+HIGHLIGHT_ON = "游戏里会用金色框标出下一步要点的牌或按钮。"
+HIGHLIGHT_OFF_PLAIN = "画面高亮已关闭：面板无法贴靠炉石"
+HIGHLIGHT_ONLY_WINDOWS = "画面高亮只在 Windows 上显示。"
 
 Output = Callable[[str], None]
+HighlightFactory = Callable[[tk.Misc, HighlightConfig], "HighlightLike"]
+
+
+class HighlightLike(Protocol):
+    @property
+    def hwnd(self) -> int | None: ...  # Windows 上的窗口句柄（预览时为 None）
+
+    def show(self, step: NextStep | None, client: Rect | None) -> bool | None:
+        """返回 True 表示 Tk 重建了高亮的顶层窗口（新的句柄）：面板要重新放到它上面。"""
+
+    def destroy(self) -> None: ...
+
+
+def _tk_highlight(root: tk.Misc, cfg: HighlightConfig) -> HighlightLike:
+    from lscs.overlay.highlight import HighlightWindow
+
+    return HighlightWindow(root, cfg)
 
 
 def _print(line: str) -> None:
@@ -53,9 +77,19 @@ def _font_family(root: tk.Tk) -> str:
 
 
 class OverlayWindow:
-    def __init__(self, cfg: OverlayConfig, out: Output = _print) -> None:
+    def __init__(
+        self,
+        cfg: OverlayConfig,
+        out: Output = _print,
+        highlight: HighlightConfig | None = None,
+        make_highlight: HighlightFactory = _tk_highlight,
+    ) -> None:
+        """highlight：config.toml 的 [highlight]；None 或关闭时不画画面高亮。"""
         self._cfg = cfg
         self._out = out
+        self._highlight_cfg = highlight if highlight is not None and highlight.enabled else None
+        self._make_highlight = make_highlight
+        self._highlight: HighlightLike | None = None
         previous = None
         if win32.IS_WINDOWS:
             try:
@@ -108,6 +142,8 @@ class OverlayWindow:
         if not win32.IS_WINDOWS:
             root.attributes("-alpha", cfg.opacity)
             self.status = "悬浮面板已打开（不是 Windows，固定在屏幕右上角，不穿透鼠标）。"
+            if self._highlight_cfg is not None:
+                self.status += HIGHLIGHT_ONLY_WINDOWS
             return
         self._locator = win32.HearthstoneLocator()
         try:
@@ -116,6 +152,7 @@ class OverlayWindow:
             self.status = (
                 f"悬浮面板已打开：炉石在前台时显示在游戏窗口{side}，切到别的窗口时自动隐藏。"
             )
+            self.status += self._open_highlight()
         except Exception as exc:
             log.warning("设置面板窗口样式失败", exc_info=True)
             self._use_plain_window()
@@ -123,13 +160,51 @@ class OverlayWindow:
                 f"无法让悬浮面板贴靠炉石窗口、穿透鼠标（{_reason(exc)}），{FALLBACK_HINT}。"
                 "可以运行 uv run lscs overlay-check 查看详情。"
             )
+            if self._highlight_cfg is not None:
+                self.status += HIGHLIGHT_OFF_PLAIN + "。"
         self._give_focus_back(previous)
 
+    def _open_highlight(self) -> str:
+        """创建画面高亮窗口，返回加在状态行后面的说明。失败只关掉高亮，面板照常。"""
+        if self._highlight_cfg is None:
+            return ""
+        try:
+            self._highlight = self._make_highlight(self._root, self._highlight_cfg)
+            self._root.lift()  # 面板永远在高亮之上
+        except Exception as exc:
+            log.warning("画面高亮无法开启", exc_info=True)
+            self._highlight = None
+            return f"画面高亮无法开启（{_reason(exc)}），只显示面板。"
+        return HIGHLIGHT_ON
+
+    def _close_highlight(self) -> None:
+        highlight, self._highlight = self._highlight, None
+        if highlight is None:
+            return
+        try:
+            highlight.destroy()
+        except Exception:
+            log.debug("关闭画面高亮时出错", exc_info=True)
+
+    def _update_highlight(self, client: Rect | None) -> None:
+        """client 为 None：面板隐藏了，高亮也清空。画错不影响面板，同一种错误只记一次。"""
+        if self._highlight is None:
+            return
+        step = self._view.next_step if self._view is not None else None
+        try:
+            if self._highlight.show(step, client):
+                self._root.lift()  # 高亮换了新的顶层窗口：面板重新放到它上面
+        except Exception:
+            self._report("画面高亮出错")
+
     def _give_focus_back(self, previous: int | None) -> None:
-        """面板第一次显示时可能抢走 PowerShell 的焦点（之后按 Ctrl+C 没反应），还给它。"""
+        """面板（或画面高亮）第一次显示时可能抢走 PowerShell 的焦点（之后按 Ctrl+C 没反应），
+        还给它。"""
         try:
             panel = win32.root_window(self._root.winfo_id())
-            if previous and panel and previous != panel and win32.foreground_window() == panel:
+            highlight = self._highlight.hwnd if self._highlight is not None else None
+            ours = {hwnd for hwnd in (panel, highlight) if hwnd}
+            if previous and ours and previous not in ours and win32.foreground_window() in ours:
                 win32.set_foreground(previous)
         except Exception:
             log.debug("把焦点还给原来的窗口时出错", exc_info=True)
@@ -149,6 +224,7 @@ class OverlayWindow:
 
     def _release(self) -> None:
         """销毁窗口并拆掉引用环，让 Tk 对象在主线程里就被释放。"""
+        self._close_highlight()
         try:
             self._root.destroy()
         except tk.TclError:
@@ -221,6 +297,9 @@ class OverlayWindow:
         self._native = False
         self._root.attributes("-alpha", self._cfg.opacity)
         self._visible = True
+        if self._highlight is not None:  # 普通置顶窗口没法保证穿透：高亮不画了
+            self._close_highlight()
+            self._out(HIGHLIGHT_OFF_PLAIN)
 
     def _target(self) -> tuple[Rect, bool] | None:
         """(参照区域, 是否贴靠炉石)；None 表示隐藏。"""
@@ -248,7 +327,9 @@ class OverlayWindow:
         hearthstone = self._locator.get()
         minimized = hearthstone is not None and win32.is_minimized(hearthstone)
         foreground = win32.foreground_window()
-        if not win32.should_show(hearthstone, foreground, self._hwnd, minimized):
+        # 高亮窗口偶尔在前台（比如刚创建时）也算：不然面板会隐藏一个周期
+        highlight = self._highlight.hwnd if self._highlight is not None else None
+        if not win32.should_show(hearthstone, foreground, self._hwnd, minimized, highlight):
             return None
         client = win32.client_rect(hearthstone)
         return (client, True) if client is not None else None
@@ -256,6 +337,7 @@ class OverlayWindow:
     def _place(self) -> None:
         target = self._target()
         if target is None:
+            self._update_highlight(None)  # 先清空高亮：它从不抛出异常
             self._set_visible(False)
             return
         area, docked = target
@@ -273,6 +355,7 @@ class OverlayWindow:
             self._geometry = (width, height, x, y)
             self._root.geometry(f"{width}x{height}+{x}+{y}")
         self._set_visible(True)
+        self._update_highlight(area if docked else None)
 
     def _set_visible(self, visible: bool) -> None:
         """只有贴靠炉石时才会隐藏。隐藏用透明度 0 而不是 withdraw()：窗口一直在，
@@ -309,8 +392,8 @@ class OverlayWindow:
         )
 
     def _draw(self) -> None:
-        """画出当前内容；超过最大高度时逐级精简（先去掉"方向"，再去掉"要找"和附注、
-        "目标"只留一行），最后仍然超高就截掉底部。"""
+        """画出当前内容；超过最大高度时逐级精简（先去掉"方向"，再去掉"要找"、附注和选项名、
+        "目标"和选项的理由只留一行），最后仍然超高就截掉底部。"""
         view, layout = self._view, self._layout
         if view is None or layout is None:
             return
@@ -347,7 +430,25 @@ class OverlayWindow:
         title = self._label(wrapped(view.title, inner, bold), TITLE, bold)
         title.grid(row=row, column=0, columnspan=2, sticky="w")
         row += 1
-        sections = (("规则", view.rules, RULES_TAG), (view.ai_title, view.ai, AI_TAG))
+        step = view.next_step
+        if step is not None and not view.compact:
+            # "下一步"横跨两列：第一行大字，下面小圆点和理由各一行；等待之类的状态整块灰色
+            color = MUTED if step.tone == "muted" else TEXT
+            big = self._font(round(layout.font_px * NEXT_SCALE), bold=True)
+            label = self._label(wrapped(step.text, inner, big), color, big)
+            label.grid(row=row, column=0, columnspan=2, sticky="w", pady=(gap // 2, 0))
+            row += 1
+            for text, max_lines in ((step.slots, 0), (step.reason, 1 if level >= 2 else 0)):
+                if not text:
+                    continue
+                label = self._label(wrapped(text, inner, text_font, max_lines), color, text_font)
+                label.grid(row=row, column=0, columnspan=2, sticky="w")
+                row += 1
+        sections = (
+            ("选择", view.choice, RULES_TAG),
+            ("规则", view.rules, RULES_TAG),
+            (view.ai_title, view.ai, AI_TAG),
+        )
         for tag, lines, color in sections if not view.compact else ():
             if not lines:
                 continue

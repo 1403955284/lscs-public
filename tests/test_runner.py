@@ -156,3 +156,25 @@ def test_hero_rules_error_does_not_stop(monkeypatch):
     assert out.count("  📋 选英雄规则建议出错") == 1  # 重随时不再重复提示
     assert "  📋 本回合规则建议出错" not in out
     assert any(phase == "HERO_SELECT" for phase, _ in spy.phases)  # AI 照常调用
+
+
+class RecordingDisplay:
+    def __init__(self):
+        self.calls = []
+
+    def __getattr__(self, method):
+        return lambda *args: self.calls.append((method, args))
+
+
+def test_choice_offered_before_main_action_lists_the_options():
+    from factory import choice_event, choice_state, resolved_event
+
+    display = RecordingDisplay()
+    runner = AdviceRunner(RULES, lambda c: c, display)
+    # 回合开始时的技能升级选项：还没到 MAIN_ACTION，招募建议不出，选项照样交给显示端
+    state = choice_state(main_action=False, turn=6)
+    runner.on_update(state, [choice_event(state)])
+    assert display.calls == [("show_choice", (state, None))]
+    done = make_state(turn=6, seq=2, main_action=False)
+    runner.on_update(done, [resolved_event(12, turn=6, picked=6933)])
+    assert len(display.calls) == 1  # 选完不再提示

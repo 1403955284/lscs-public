@@ -1,5 +1,6 @@
 """按实体 ID 保存 tag，并维护按区域、按类型的索引，方便快速查询。
-另外保存最近一组选项（现在能执行哪些操作），按操作的主实体查询。"""
+另外保存最近一组选项（现在能执行哪些操作），按操作的主实体查询；
+以及最近一组"选一个"（发现、饰品、选英雄……）和玩家的选择。"""
 
 from __future__ import annotations
 
@@ -10,6 +11,11 @@ from hearthstone.enums import GameTag
 
 from lscs.parsing.feed import (
     CardRevealed,
+    ChoiceChosen,
+    ChoiceEntity,
+    ChoiceOffered,
+    ChoiceSent,
+    ChoiceSource,
     GameMeta,
     GameStarted,
     OptionListed,
@@ -39,6 +45,20 @@ class ListedOption:
         return tuple(dict.fromkeys(found))
 
 
+@dataclass
+class OpenChoice:
+    """最近一组"选一个"。选完（sent）之后保留到下一组出现，选了哪个记在 chosen。"""
+
+    id: int
+    choice_type: str  # "GENERAL" / "MULLIGAN"
+    max: int  # 最多选几个
+    source: int | None = None  # 发起者；选英雄（GameEntity）时为 None
+    entities: list[int] = field(default_factory=list)  # 选项，按 Entities[] 的顺序
+    sent: bool = False  # 玩家已经选了（SendChoices）
+    chosen: list[int] = field(default_factory=list)
+    turn: int = 0  # 弹出时游戏的 TURN：一组选项只属于这个回合（回合结束时游戏会替你选）
+
+
 class EntityStore:
     def __init__(self) -> None:
         self.reset()
@@ -63,6 +83,9 @@ class EntityStore:
         self._option: ListedOption | None = None  # 正在读的选项，后面的目标行属于它
         self._option_entity: int | None = None
         self._first_group = False
+        # 最近一组"选一个"；新的一组替换没选完的旧组（MULLIGAN 也记，由 build 决定理不理）
+        self.choice: OpenChoice | None = None
+        self._sending: OpenChoice | None = None  # 正在读的 SendChoices 对应的那组（编号对得上时）
 
     def apply(self, change: PowerChange) -> None:
         match change:
@@ -113,6 +136,25 @@ class EntityStore:
                     # 跟在抉择的某一项后面的目标属于那一项（和 hslog 的嵌套方式一样）
                     bucket = option.choice_targets[-1] if option.choice_targets else option.targets
                     bucket.append(entity_id)
+
+            case ChoiceOffered(id=choice_id, choice_type=choice_type, max=most):
+                turn = self.tag(self.game_entity_id, GameTag.TURN, 0) or 0
+                self.choice = OpenChoice(choice_id, choice_type, most, turn=turn)
+                self._sending = None
+            case ChoiceSource(entity_id=entity_id):
+                if self.choice is not None:
+                    self.choice.source = entity_id
+            case ChoiceEntity(entity_id=entity_id):
+                if self.choice is not None:
+                    self.choice.entities.append(entity_id)
+            case ChoiceSent(id=choice_id):
+                matched = self.choice is not None and self.choice.id == choice_id
+                self._sending = self.choice if matched else None
+                if self._sending is not None:
+                    self._sending.sent = True
+            case ChoiceChosen(entity_id=entity_id):
+                if self._sending is not None:
+                    self._sending.chosen.append(entity_id)
 
     def tag(self, entity_id: int | None, tag: int, default: int | None = None) -> int | None:
         if entity_id is None:

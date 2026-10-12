@@ -948,3 +948,180 @@ def test_record_has_the_hero_lane(tmp_path):
     assert rows[0]["system_sha1"] != rows[1]["system_sha1"]  # 选英雄有自己的系统提示
     assert rows[0]["user"].startswith("选英雄")
     assert SECRET not in text
+
+
+# ---- 选项（第四路 choice） ----
+
+PICK = json.dumps(
+    {"pick": 6933, "reason": "32/32 直接成主力", "confidence": 0.8}, ensure_ascii=False
+)
+
+
+def offer_choice(sched, st=None):
+    from factory import choice_event, choice_state
+
+    st = st or choice_state()
+    sched.observe_choice(st, [choice_event(st)])
+    return st
+
+
+def resolve_choice(sched, choice_id=12, seq=5, picked=6933, turn=9):
+    from factory import resolved_event
+
+    done = make_state(turn=turn, seq=seq)
+    sched.observe_choice(done, [resolved_event(choice_id, turn=turn, picked=picked)])
+    return done
+
+
+def test_choice_offered_calls_immediately_with_the_fast_settings(tmp_path):
+    recorder = Recorder(tmp_path)
+    sched, provider = scheduler([PICK], recorder=recorder, timeout_seconds=15)
+    offer_choice(sched)
+    events = sched.tick()  # 不等：三连奖励几秒钟内就会选掉
+    assert kinds(events) == ["AIStarted", "AIResult"]
+    assert events[0].lane == "choice"
+    result = events[1]
+    assert (result.error, result.plan, result.request.choice_id) == (None, None, 12)
+    assert (result.choice.pick, result.choice.reason, result.choice.choice_id) == (
+        6933,
+        "32/32 直接成主力",
+        12,
+    )
+    system, user, timeout, thinking, max_tokens = provider.calls[0]
+    assert system.startswith(
+        "你是《炉石传说》酒馆战棋的高分教练，正在帮一位 6000 分以下的新手在游戏弹出"
+    )
+    assert system.endswith("【攻略要点】\n要点")
+    assert user.startswith("选择：黑暗之赐（3 选 1）\n第 9 回合（招募）")
+    assert (timeout, thinking, max_tokens) == (15, "disabled", 1500)
+    record = json.loads(next(tmp_path.glob("llm-*.jsonl")).read_text(encoding="utf-8"))
+    assert (record["lane"], record["outcome"], record["turn"]) == ("choice", "合法", 9)
+    from lscs.llm.scheduler import _sha1
+
+    assert record["system_sha1"] == _sha1(system) != sched._system_hash
+
+
+def test_choice_advice_can_be_switched_off():
+    sched, provider = scheduler([PICK], choice_advice=False)
+    offer_choice(sched)
+    assert sched.tick() == [] and provider.calls == [] and sched.calls == 0
+
+
+def test_result_after_the_choice_was_made_is_dropped():
+    deferred = Deferred()
+    sched, _ = scheduler([PICK], run_async=deferred)
+    offer_choice(sched)
+    assert kinds(sched.tick()) == ["AIStarted"]
+    resolve_choice(sched)  # 玩家三秒就选完了
+    deferred.jobs[0]()
+    assert sched.tick() == []
+
+
+def test_new_group_replaces_the_old_request():
+    from factory import choice_option, choice_state, make_choice
+
+    deferred = Deferred()
+    other = json.dumps({"pick": 81, "reason": "新的一组"}, ensure_ascii=False)
+    sched, provider = scheduler([PICK, other], run_async=deferred)
+    offer_choice(sched)
+    sched.tick()
+    second = make_choice(
+        [choice_option(80, "BGS_061", 0, 3, 1), choice_option(81, "BG21_029", 1, 1, 1)],
+        choice_id=13,
+        kind="discover",
+        source="BG23_016",
+    )
+    offer_choice(sched, choice_state(second, seq=2))
+    assert kinds(sched.tick()) == ["AIStarted"]
+    for job in deferred.jobs:
+        job()
+    results = [e for e in sched.tick() if isinstance(e, AIResult)]
+    assert [(r.request.choice_id, r.choice.pick) for r in results] == [(13, 81)]
+    assert "[#80] 左 1 海盗无赖" in provider.calls[1].user
+
+
+def test_combat_or_a_new_game_drops_the_choice_request():
+    deferred = Deferred()
+    sched, _ = scheduler([PICK, PICK], run_async=deferred)
+    offer_choice(sched)
+    sched.tick()
+    combat = make_state(phase=Phase.COMBAT, turn=9, seq=3)
+    sched.observe(combat, [Event(type=EventType.COMBAT_STARTED, turn=9)], None)
+    deferred.jobs[0]()
+    assert sched.tick() == []
+    offer_choice(sched)  # 还没发出就进了新的一局
+    sched.reset_game()
+    assert sched.tick() == [] and len(deferred.jobs) == 1
+
+
+def test_choice_calls_share_the_budget():
+    sched, provider = scheduler([GOOD, PICK], max_calls_per_game=1)
+    observe(sched, state(), EventType.RECRUIT_STARTED)
+    sched.tick()
+    offer_choice(sched)
+    assert sched.tick() == [AINotice("本局 AI 预算已用完，之后只显示规则建议")]
+    assert len(provider.calls) == 1
+
+
+def test_choice_request_times_out_on_its_own():
+    clock = Clock()
+    deferred = Deferred()
+    sched, _ = scheduler([GOOD, PICK], clock=clock, run_async=deferred, timeout_seconds=10)
+    observe(sched, state(), EventType.RECRUIT_STARTED)
+    sched.tick()
+    clock.now += 5
+    offer_choice(sched)
+    sched.tick()
+    clock.now += 7.5  # 快速请求已经等了 12.5 秒，选项请求只等了 7.5 秒
+    events = sched.tick()
+    assert [(e.lane, e.error) for e in events] == [("fast", "AI 超时")]
+    clock.now += 5
+    assert [(e.lane, e.error) for e in sched.tick()] == [("choice", "AI 超时")]
+
+
+def test_catch_up_calls_only_for_a_choice_still_open():
+    from factory import choice_state
+
+    sched, provider = scheduler([PICK])
+    offer_choice(sched)
+    resolve_choice(sched)
+    observe(sched, state(turn=10, seq=6), EventType.RECRUIT_STARTED)  # 后面还有招募
+    sched.observe(make_state(phase=Phase.COMBAT, turn=10, seq=7), [], None)
+    assert sched.tick() == [] and provider.calls == []  # 读完时没有还在选的：一次都不调用
+    offer_choice(sched, choice_state(seq=8, turn=11))
+    resolve_choice(sched, seq=9, turn=11)
+    offer_choice(sched, choice_state(seq=10, turn=12))  # 读完时还在选
+    assert kinds(sched.tick()) == ["AIStarted", "AIResult"]
+    assert len(provider.calls) == 1 and "第 12 回合" in provider.calls[0].user
+
+
+def test_choice_results_do_not_change_the_memory():
+    answer = json.dumps(
+        {"actions": [{"type": "buy", "entity_id": 20}], "direction": "海盗", "look_for": ["船长"]},
+        ensure_ascii=False,
+    )
+    sched, provider = scheduler([answer, PICK])
+    observe(sched, state(), EventType.RECRUIT_STARTED)
+    sched.tick()
+    memory = sched.memory
+    offer_choice(sched)
+    sched.tick()
+    assert sched.memory == memory
+    assert provider.calls[1].user.endswith("你之前的判断（第 3 回合）：方向 海盗；要找：船长")
+
+
+def test_invalid_choice_answer_and_message_errors(monkeypatch):
+    import lscs.llm.scheduler
+
+    sched, _ = scheduler([json.dumps({"pick": 1})])
+    offer_choice(sched)
+    assert sched.tick()[-1].error == "AI 建议无效，已忽略"
+
+    def boom(*_args):
+        raise RuntimeError("坏了")
+
+    monkeypatch.setattr(lscs.llm.scheduler, "build_choice_message", boom)
+    sched, provider = scheduler([PICK])
+    offer_choice(sched)
+    assert sched.tick() == [AINotice("生成 AI 局面时出错，本次跳过", "choice")]
+    assert (sched.calls, provider.calls) == (0, [])
