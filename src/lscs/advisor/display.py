@@ -144,6 +144,7 @@ class AdviceSink(Protocol):
     def rules_error(self, hero: bool = False) -> None: ...
     def ai_pending(self, lane: Lane = "fast") -> None: ...
     def ai_text(self, text: str, lane: Lane = "fast") -> None: ...
+    def ai_repairing(self, lane: Lane, reason: str) -> None: ...
     def show_ai(self, state: GameState, advice: Advice, agrees: bool) -> None: ...
     def show_hero(self, state: GameState, advice: HeroAdvice, agrees: bool = False) -> None: ...
     def show_choice(self, state: GameState, advice: ChoiceAdvice | None) -> None: ...
@@ -184,6 +185,13 @@ class AdviceDisplay:
     def ai_text(self, text: str, lane: Lane = "fast") -> None:
         """AI 的错误、提示、过期等一行消息。"""
         self._out(f"  {ICONS[lane]}{text}")
+
+    def ai_repairing(self, lane: Lane, reason: str) -> None:
+        """AI 的回答不合法，正在让它改正（AI 自我改正设计文档第 3.7 节）。reason 是校验器的原因。"""
+        if lane == "deep":
+            self._out(f"  🧠 深度分析的操作不合法（{reason}），正在让它改正…")
+        else:
+            self._out(f"  {ICONS[lane]}AI 建议不合法（{reason}），正在让它改正…")
 
     def show_ai(self, state: GameState, advice: Advice, agrees: bool) -> None:
         plan, deep = advice.plan, advice.lane == "deep"
@@ -260,6 +268,9 @@ class DisplayGroup:
 
     def ai_text(self, text: str, lane: Lane = "fast") -> None:
         self._each("ai_text", text, lane)
+
+    def ai_repairing(self, lane: Lane, reason: str) -> None:
+        self._each("ai_repairing", lane, reason)
 
     def show_ai(self, state: GameState, advice: Advice, agrees: bool) -> None:
         self._each("show_ai", state, advice, agrees)

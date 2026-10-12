@@ -148,4 +148,26 @@ def test_fake_provider_replays_script():
     assert fake.complete_json("s", "u", 3, thinking="low", max_tokens=9).text == ""  # 脚本用完
     assert [c[2] for c in fake.calls] == [3, 3, 3]
     assert [(c.thinking, c.max_tokens) for c in fake.calls] == [(None, None)] * 2 + [("low", 9)]
-    assert fake.calls[0] == ("s", "u", 3, None, None)
+    assert fake.calls[0] == ("s", "u", 3, None, None, ())
+
+
+def test_turns_follow_the_system_and_user_messages():
+    client = StubClient(result=response("{}"))
+    provider = OpenAICompatProvider(LLMConfig(api_key="k"), client=client)
+    turns = (("assistant", '{"actions": []}'), ("user", "你刚才的方案不合法：第 1 步：铸币不够。"))
+    provider.complete_json("系统", "局面", timeout=20, turns=turns)
+    assert client.kwargs["messages"] == [
+        {"role": "system", "content": "系统"},
+        {"role": "user", "content": "局面"},
+        {"role": "assistant", "content": '{"actions": []}'},
+        {"role": "user", "content": "你刚才的方案不合法：第 1 步：铸币不够。"},
+    ]
+    provider.complete_json("系统", "局面", timeout=20)  # 不传时只有两条，和以前一样
+    assert [m["role"] for m in client.kwargs["messages"]] == ["system", "user"]
+
+
+def test_fake_provider_records_the_turns():
+    fake = FakeProvider(["{}", "{}"])
+    fake.complete_json("s", "u", 3)
+    fake.complete_json("s", "u", 3, turns=[("assistant", "坏"), ("user", "改正")])
+    assert [c.turns for c in fake.calls] == [(), (("assistant", "坏"), ("user", "改正"))]

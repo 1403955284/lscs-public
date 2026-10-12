@@ -3,9 +3,10 @@
 
 四路调用，各自有当前请求、在途请求和超时；每局预算和认证失败计数四路共用：
 - 快速（fast）：按 thinking / max_output_tokens / timeout_seconds 调用，2~3 秒出结果。
-  招募开始时立即调用；刷新（商店实体编号与上次完全不重合）后，商店稳定 debounce 秒再调用，
-  期间的买卖会更新待发的局面；刷新前发出、还没返回的快速请求作废（方案里的牌已经不在商店了）；
-  返回空内容时重试一次。
+  招募开始时立即调用（重连、中途启动时没有招募开始事件：第一次看到这个回合也算，AI 自我改正
+  设计文档第 5.2 节）；刷新（商店实体编号与上次完全不重合）后，商店稳定 debounce 秒再调用，
+  期间的买卖会更新待发的局面；刷新前发出、还没返回的快速请求作废（方案里的牌已经不在商店了），
+  进战斗、对局结束时也作废（操作做不了了）；返回空内容时重试一次。
 - 深度（deep，deep_analysis 打开时）：按 deep_thinking / deep_max_output_tokens /
   deep_timeout_seconds 调用，约 20 秒。只在招募开始时和快速请求同时发出；不重试；
   刷新后不作废——操作过期，但分析仍然有用，结果照常交付并标明 expired="refreshed"。
@@ -27,9 +28,14 @@
 - 每路同一时间只认最新的请求，旧请求的结果不显示；新回合、新对局时两路的旧请求都作废
   （例外：上一回合晚到的深度分析不显示，但它的方向和要找的牌会记下来）；
 - 请求超过该路的超时 + 2 秒还没返回：提示"AI 超时"并作废；
-- 每局最多 max_calls_per_game 次（四路合计，含空内容重试）；
+- 作废了在途的请求、又因为预算用完或 AI 已关闭发不出新请求时，发一条分路的提示收尾，
+  免得"分析中…"一直挂着（同上，第 5.1 节）；
+- 每局最多 max_calls_per_game 次（四路合计，含空内容重试和改正）；
 - Key 连续 3 次认证失败后关闭 AI；
-- 记住本局最近一次合法结果的方向、要找的牌和分析（同一回合深度优先），附在之后的局面消息末尾。
+- 记住本局最近一次合法结果的方向、要找的牌和分析（同一回合深度优先），附在之后的局面消息末尾；
+- 回答解析不了或方案不合法时，把原因发回去让 AI 改正一次（AI 自我改正设计文档第 3 节，
+  repair_invalid 打开时）：多轮对话，前缀和原请求相同；只在请求还是当前的、离截止时间还有
+  REPAIR_MIN_SECONDS 秒、预算还有时才改正，占一次调用。深度这一路改正时不开思考。
 """
 
 from __future__ import annotations
@@ -47,7 +53,14 @@ from lscs.advisor.models import ChoiceAdvice, Expired, HeroAdvice, Lane, Plan
 from lscs.advisor.validate import normalize_actions, validate_plan
 from lscs.cards.db import CardDB
 from lscs.config import LLMConfig
-from lscs.llm.notices import AUTH_DISABLED, AUTH_FAILURE_LIMIT, BUDGET_EXHAUSTED, TIMEOUT
+from lscs.llm.notices import (
+    AI_OFF_THIS_TIME,
+    AUTH_DISABLED,
+    AUTH_FAILURE_LIMIT,
+    BUDGET_EXHAUSTED,
+    NO_BUDGET_THIS_TIME,
+    TIMEOUT,
+)
 from lscs.llm.parse import (
     EmptyResponse,
     ParseError,
@@ -63,8 +76,9 @@ from lscs.llm.prompt import (
     build_hero_system_prompt,
     build_system_prompt,
     build_user_message,
+    repair_text,
 )
-from lscs.llm.provider import LLMError, LLMProvider, LLMResult, Thinking
+from lscs.llm.provider import LLMError, LLMProvider, LLMResult, Thinking, Turn
 from lscs.llm.record import Recorder
 from lscs.state.models import Event, EventType, GameState, Phase
 
@@ -74,7 +88,13 @@ log = logging.getLogger(__name__)
 DEADLINE_GRACE = 2.0
 # 选英雄：看到一组备选英雄后等这么久再调用（开局洗牌时可能先读到半组英雄）
 HERO_DEBOUNCE = 0.5
+# 改正要发出时，离这一路的截止时间至少还要有这么多秒
+REPAIR_MIN_SECONDS = 3.0
+# 深度分析改正时用快速建议的输出上限，但至少这么多：深度分析的 json（分析写得长）不能被截断
+DEEP_REPAIR_MIN_TOKENS = 4000
 INVALID = "AI 建议无效，已忽略"
+INVALID_AFTER_REPAIR = "AI 改正后仍不合法，已忽略"
+EMPTY = "AI 返回了空内容"
 
 
 @dataclass(frozen=True)
@@ -97,9 +117,28 @@ class _Pending:
 
 
 @dataclass(frozen=True)
+class _Call:
+    """后台线程里的一次调用：参数，以及调用记录要写的内容。"""
+
+    sent: str  # 这次新增的 user 内容：原调用是局面消息，改正调用是改正要求
+    thinking: Thinking
+    max_tokens: int
+    repair: bool = False  # 改正调用（以及改正的回答为空时的重试）
+
+
+@dataclass(frozen=True)
 class AIStarted:
     request_id: int
     lane: Lane = "fast"
+
+
+@dataclass(frozen=True)
+class AIRepairing:
+    """AI 的回答不合法，正在让它改正（终端和面板提示，免得像卡住了）。"""
+
+    request_id: int
+    lane: Lane
+    reason: str  # 校验器或解析器的原因
 
 
 @dataclass(frozen=True)
@@ -119,13 +158,14 @@ class AIResult:
     expired: Expired | None = None
     hero: HeroAdvice | None = None  # 选英雄的结果（plan 为 None）
     choice: ChoiceAdvice | None = None  # 选项的结果（plan 为 None）
+    repaired: bool = False  # 这个请求让 AI 改正过一次
 
     @property
     def lane(self) -> Lane:
         return self.request.lane
 
 
-SchedulerEvent = AIStarted | AINotice | AIResult
+SchedulerEvent = AIStarted | AIRepairing | AINotice | AIResult
 
 
 @dataclass
@@ -134,7 +174,7 @@ class _LaneState:
     但每路只认自己最新的请求。
 
     线程：所有状态字段只在主线程（observe / tick / reset_game）里写。后台线程只读设置
-    （thinking 等，创建后不变），以及在重试前通过 is_current() 读 current_id、stale_up_to；
+    （thinking 等，创建后不变），以及在重试、改正前通过 is_current() 读 current_id、stale_up_to；
     所以这两个字段的写入和这次读取都持有调度器的锁。refreshed_up_to、pending、in_flight
     只在主线程读写，不加锁。"""
 
@@ -147,10 +187,15 @@ class _LaneState:
     stale_up_to: int = 0  # 编号不大于它的请求作废
     refreshed_up_to: int = 0  # 编号不大于它的请求发出后商店刷新过（只对深度有意义）
     pending: _Pending | None = None
+    # 最近发出、还没向用户交代的请求（显示了"分析中…"）。作废后也保留，直到有新请求发出，
+    # 或者发不出新请求时由 _settle 收尾（设计文档第 5.1 节）
     in_flight: AIRequest | None = None
 
     def is_current(self, request: AIRequest) -> bool:
-        return self.stale_up_to < request.request_id == self.current_id
+        return self.is_current_id(request.request_id)
+
+    def is_current_id(self, request_id: int) -> bool:
+        return self.stale_up_to < request_id == self.current_id
 
 
 def _sha1(text: str) -> str:
@@ -248,9 +293,11 @@ class LLMScheduler:
         """每次状态更新都调用；只记下要发的请求，不在这里发出。"""
         self._observe_hero(state, events)
         if state.phase != Phase.RECRUIT:
-            for lane in self._recruit_lanes:
-                lane.pending = None
-            self._drop(self._choice)  # 进战斗、对局结束：还没选的那组不会再选了
+            # 进战斗、对局结束：快速建议的操作做不了了，在途的请求作废（不再为它改正，结果只记
+            # 日志）；深度分析的思路在战斗里照样交付；还没选的那组选项不会再选了
+            self._deep.pending = None
+            self._drop(self._fast)
+            self._drop(self._choice)
             return
         shop = frozenset(s.entity_id for s in state.shop)
         refreshed = (
@@ -259,7 +306,12 @@ class LLMScheduler:
             and not (shop & self._last_shop)
             and state.turn == self._last_turn
         )
-        started = any(e.type == EventType.RECRUIT_STARTED for e in events)
+        # 重连、中途启动时没有招募开始事件（STEP 直接以 MAIN_ACTION 出现）：这一路第一次看到
+        # 这个回合也当作招募开始（设计文档第 5.2 节）
+        started = (
+            any(e.type == EventType.RECRUIT_STARTED for e in events)
+            or state.turn != self._last_turn
+        )
         if started:
             with self._lock:
                 for lane in self._recruit_lanes:
@@ -341,8 +393,8 @@ class LLMScheduler:
                 continue
             waited = self._clock() - request.started
             if not lane.is_current(request):
-                lane.in_flight = None
-            elif waited > lane.timeout + DEADLINE_GRACE:
+                continue  # 已作废：结果回来时只记日志，不算超时
+            if waited > lane.timeout + DEADLINE_GRACE:
                 log.info("AI 请求 #%s 等了 %.1f 秒还没返回，放弃", request.request_id, waited)
                 with self._lock:
                     lane.stale_up_to = request.request_id
@@ -356,7 +408,11 @@ class LLMScheduler:
                 event = self._events.get_nowait()
             except queue.Empty:
                 return
-            if isinstance(event, AIResult):
+            if isinstance(event, AIRepairing):
+                if not self._lane_named(event.lane).is_current_id(event.request_id):
+                    log.info("丢弃已被取代的请求 #%s 的改正提示", event.request_id)
+                    continue
+            elif isinstance(event, AIResult):
                 lane = self._lane(event.request)
                 if not lane.is_current(event.request):
                     log.info("丢弃已被取代的 AI 结果 #%s", event.request.request_id)
@@ -373,7 +429,10 @@ class LLMScheduler:
             out.append(event)
 
     def _lane(self, request: AIRequest) -> _LaneState:
-        return next(lane for lane in self._lanes if lane.name == request.lane)
+        return self._lane_named(request.lane)
+
+    def _lane_named(self, name: Lane) -> _LaneState:
+        return next(lane for lane in self._lanes if lane.name == name)
 
     def _remember_late(self, result: AIResult) -> None:
         """本局上一回合的深度分析在新回合开始后才返回：不显示，但它的判断仍然记下来。"""
@@ -410,7 +469,10 @@ class LLMScheduler:
         for lane, _ in due:
             lane.pending = None
         if self.disabled_reason is not None:
+            for lane, _ in due:
+                self._settle(lane, AI_OFF_THIS_TIME)
             return
+        budget_notified = self._budget_notified
         # 快速和深度同时发出时局面相同，只生成一次
         messages: dict[tuple[str, int], str | None] = {}
         for lane, pending in due:
@@ -419,8 +481,20 @@ class LLMScheduler:
             if key not in messages:
                 messages[key] = self._message(lane, pending)
             user = messages[key]
-            if user is not None:
-                self._start(lane, pending, user)
+            if user is None or self._start(lane, pending, user):
+                continue
+            # 预算用完：这次刚发了"预算已用完"（不分路）时不再追加一行，只收尾
+            self._settle(lane, NO_BUDGET_THIS_TIME if budget_notified else None)
+
+    def _settle(self, lane: _LaneState, text: str | None) -> None:
+        """这一路发不出新请求。还挂着一个已作废、没向用户交代过的请求时（刷新作废了在途的
+        请求），发一条分路的提示收尾，否则"分析中…"永远不结束（设计文档第 5.1 节）。"""
+        request = lane.in_flight
+        if request is None or lane.is_current(request):
+            return
+        lane.in_flight = None
+        if text is not None:
+            self._events.put(AINotice(text, lane.name))
 
     def _message(self, lane: _LaneState, pending: _Pending) -> str | None:
         # 先生成局面消息：出错时不占预算，也不作废在途的请求
@@ -437,13 +511,14 @@ class LLMScheduler:
             self._events.put(AINotice("生成 AI 局面时出错，本次跳过", notice_lane))
             return None
 
-    def _start(self, lane: _LaneState, pending: _Pending, user: str) -> None:
+    def _start(self, lane: _LaneState, pending: _Pending, user: str) -> bool:
+        """发出请求；预算用完、没有发出时返回 False。"""
         with self._lock:
             if self.calls >= self._cfg.max_calls_per_game:
                 if not self._budget_notified:
                     self._budget_notified = True
                     self._events.put(AINotice(BUDGET_EXHAUSTED))
-                return
+                return False
             self.calls += 1
             self._last_id += 1
             select, choice = pending.state.hero_select, pending.state.choice
@@ -462,12 +537,13 @@ class LLMScheduler:
         lane.in_flight = request
         self._events.put(AIStarted(request.request_id, lane.name))
         self._run_async(lambda: self._work(lane, request, user))
+        return True
 
     def _record(
         self,
         lane: _LaneState,
         request: AIRequest,
-        user: str,
+        call: _Call,
         result: LLMResult | None,
         outcome: str,
     ) -> None:
@@ -480,15 +556,17 @@ class LLMScheduler:
                 "turn": request.state.turn,
                 "state_seq": request.state.seq,
                 "model": self._cfg.model,
-                "thinking": lane.thinking,
+                "thinking": call.thinking,
                 "system_sha1": self._system_of(lane)[1],
-                "user": user,
+                # 改正调用只记改正要求：模型的回答在上一条记录的 response 里，局面消息在更早的那条
+                "user": call.sent,
                 "response": result.text if result else None,
                 "elapsed": round(result.elapsed, 3) if result else None,
                 "input_tokens": result.input_tokens if result else 0,
                 "cached_tokens": result.cached_tokens if result else 0,
                 "output_tokens": result.output_tokens if result else 0,
                 "outcome": outcome,
+                "repair": call.repair,
             }
         )
 
@@ -509,9 +587,12 @@ class LLMScheduler:
         expired=None,
         hero=None,
         choice=None,
+        repaired: bool = False,
     ) -> None:
         elapsed = self._clock() - request.started
-        self._events.put(AIResult(request, plan, error, elapsed, llm, expired, hero, choice))
+        self._events.put(
+            AIResult(request, plan, error, elapsed, llm, expired, hero, choice, repaired)
+        )
 
     def _parse(
         self, lane: _LaneState, request: AIRequest, text: str
@@ -526,71 +607,119 @@ class LLMScheduler:
         offered = [h.entity_id for h in select.offered] if select is not None else []
         return parse_hero_pick(text, offered, request.signature)
 
+    def _problem(self, request: AIRequest, parsed: Plan | HeroAdvice | ChoiceAdvice) -> str | None:
+        """招募两路的方案跑校验器；选英雄、选项没有动作序列（解析时已经核对过编号）。"""
+        if not isinstance(parsed, Plan):
+            return None
+        assert request.ctx is not None
+        return validate_plan(parsed.actions, request.ctx)
+
+    def _deliver(
+        self,
+        request: AIRequest,
+        parsed: Plan | HeroAdvice | ChoiceAdvice,
+        result: LLMResult,
+        repaired: bool,
+    ) -> None:
+        if isinstance(parsed, HeroAdvice):
+            self._finish(request, llm=result, hero=parsed, repaired=repaired)
+        elif isinstance(parsed, ChoiceAdvice):
+            self._finish(request, llm=result, choice=parsed, repaired=repaired)
+        else:
+            assert request.ctx is not None
+            actions = normalize_actions(parsed.actions, request.ctx)
+            plan = parsed.model_copy(update={"actions": actions})
+            self._finish(request, plan=plan, llm=result, repaired=repaired)
+
+    def _thoughts(self, lane: _LaneState, plan: Plan | None) -> Plan | None:
+        """深度分析的操作不能用时，它的分析和要找的牌仍然有用：去掉动作的方案；没有时为 None。"""
+        if lane is not self._deep or plan is None or not (plan.analysis or plan.look_for):
+            return None
+        return plan.model_copy(update={"actions": ()})
+
+    def _take_call(
+        self, lane: _LaneState, request: AIRequest, deadline: float, margin: float
+    ) -> bool:
+        """再调用一次（空内容重试、改正）的共同条件：请求还是当前的（刷新、换组、新回合之后不再
+        为旧局面花钱）、离截止时间还有 margin 秒、预算还有。满足时占一次调用并返回 True。"""
+        with self._lock:
+            ok = (
+                lane.is_current(request)
+                and self._clock() <= deadline - margin
+                and self.calls < self._cfg.max_calls_per_game
+            )
+            if ok:
+                self.calls += 1
+        return ok
+
     def _work(self, lane: _LaneState, request: AIRequest, user: str) -> None:
         deadline = request.started + lane.timeout
         system = self._system_of(lane)[0]
+        call = _Call(user, lane.thinking, lane.max_tokens)
+        turns: tuple[Turn, ...] = ()
         retried = False
+        first_plan: Plan | None = None  # 深度：第一次解析出的方案（改正失败时用它的思路）
         try:
             while True:
                 timeout = max(deadline - self._clock(), 1.0)
                 result = self._provider.complete_json(
-                    system, user, timeout, thinking=lane.thinking, max_tokens=lane.max_tokens
+                    system,
+                    user,
+                    timeout,
+                    thinking=call.thinking,
+                    max_tokens=call.max_tokens,
+                    turns=turns,
                 )
                 with self._lock:
                     self.input_tokens += result.input_tokens
                     self.output_tokens += result.output_tokens
                     self._auth_failures = 0
+                parsed: Plan | HeroAdvice | ChoiceAdvice | None = None
                 try:
                     parsed = self._parse(lane, request, result.text)
                 except EmptyResponse:
-                    self._record(lane, request, user, result, "空内容")
-                    with self._lock:
-                        can_retry = (
-                            lane.retry_empty
-                            and not retried
-                            and lane.is_current(request)
-                            and self._clock() < deadline - 1
-                            and self.calls < self._cfg.max_calls_per_game
-                        )
-                        if can_retry:
-                            self.calls += 1
-                    if can_retry:
+                    # 空内容没有可改的东西：同样的消息（改正时是同样的改正对话）再发一次
+                    self._record(lane, request, call, result, "空内容")
+                    if (
+                        lane.retry_empty
+                        and not retried
+                        and self._take_call(lane, request, deadline, 1.0)
+                    ):
                         retried = True
                         continue
-                    self._finish(request, error="AI 返回了空内容", llm=result)
+                    self._give_up(lane, request, result, EMPTY, call.repair, first_plan)
                     return
                 except ParseError as exc:
-                    self._record(lane, request, user, result, f"无效：{exc}")
-                    self._finish(request, error=INVALID, llm=result)
+                    problem = str(exc)
+                else:
+                    problem = self._problem(request, parsed)
+                    if first_plan is None and isinstance(parsed, Plan):
+                        first_plan = parsed
+                if problem is None:
+                    assert parsed is not None
+                    self._record(lane, request, call, result, "合法")
+                    self._deliver(request, parsed, result, call.repair)
                     return
-                if isinstance(parsed, HeroAdvice):  # 选英雄没有动作序列，不用校验
-                    self._record(lane, request, user, result, "合法")
-                    self._finish(request, llm=result, hero=parsed)
-                    return
-                if isinstance(parsed, ChoiceAdvice):  # 选项也没有
-                    self._record(lane, request, user, result, "合法")
-                    self._finish(request, llm=result, choice=parsed)
-                    return
-                plan = parsed
-                assert request.ctx is not None
-                problem = validate_plan(plan.actions, request.ctx)
-                if problem is not None:
-                    self._record(lane, request, user, result, f"无效：{problem}")
-                    if lane.name == "deep" and (plan.analysis or plan.look_for):
-                        # 深度分析的操作不合法，但分析和要找的牌仍然有用
-                        thoughts = plan.model_copy(update={"actions": ()})
-                        self._finish(request, plan=thoughts, llm=result, expired="invalid")
-                    else:
-                        self._finish(request, error=INVALID, llm=result)
-                    return
-                self._record(lane, request, user, result, "合法")
-                plan = plan.model_copy(
-                    update={"actions": normalize_actions(plan.actions, request.ctx)}
-                )
-                self._finish(request, plan=plan, llm=result)
+                self._record(lane, request, call, result, f"无效：{problem}")
+                if (
+                    self._cfg.repair_invalid
+                    and not call.repair
+                    and self._take_call(lane, request, deadline, REPAIR_MIN_SECONDS)
+                ):
+                    # 校验器仍然是唯一的标准：不从不合法的方案里挑合法的前几步
+                    sent = repair_text(lane.name, problem)
+                    turns = (("assistant", result.text), ("user", sent))
+                    call = _Call(sent, lane.thinking, lane.max_tokens, repair=True)
+                    if lane is self._deep:  # 思考在第一次回答里做完了，改正只修动作
+                        tokens = max(self._cfg.max_output_tokens, DEEP_REPAIR_MIN_TOKENS)
+                        call = replace(call, thinking="disabled", max_tokens=tokens)
+                    self._events.put(AIRepairing(request.request_id, lane.name, problem))
+                    continue
+                error = INVALID_AFTER_REPAIR if call.repair else INVALID
+                self._give_up(lane, request, result, error, call.repair, first_plan)
                 return
         except LLMError as exc:
-            self._record(lane, request, user, None, f"失败：{exc}")
+            self._record(lane, request, call, None, f"失败：{exc}")
             if exc.kind == "auth":
                 with self._lock:
                     self._auth_failures += 1
@@ -601,8 +730,29 @@ class LLMScheduler:
                         self.disabled_reason = AUTH_DISABLED
                 if trip:
                     self._events.put(AINotice(AUTH_DISABLED))
-            self._finish(request, error=str(exc))
+            thoughts = self._thoughts(lane, first_plan) if call.repair else None
+            if thoughts is not None:  # 改正调用失败：深度分析第一次回答的思路照样交付
+                self._finish(request, plan=thoughts, expired="invalid", repaired=True)
+            else:
+                self._finish(request, error=str(exc), repaired=call.repair)
         except Exception:
             log.warning("AI 调用出错", exc_info=True)
-            self._record(lane, request, user, None, "失败：程序出错")
-            self._finish(request, error="AI 调用出错")
+            self._record(lane, request, call, None, "失败：程序出错")
+            self._finish(request, error="AI 调用出错", repaired=call.repair)
+
+    def _give_up(
+        self,
+        lane: _LaneState,
+        request: AIRequest,
+        result: LLMResult,
+        error: str,
+        repaired: bool,
+        first_plan: Plan | None,
+    ) -> None:
+        """没有可用的回答（不合法或空内容，不再改正、重试）。深度分析只看思路：思路取第一次
+        解析出的方案（有思考的那次），没有分析和要找时才按错误结束。"""
+        thoughts = self._thoughts(lane, first_plan)
+        if thoughts is not None:
+            self._finish(request, plan=thoughts, llm=result, expired="invalid", repaired=repaired)
+        else:
+            self._finish(request, error=error, llm=result, repaired=repaired)

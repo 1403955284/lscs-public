@@ -171,12 +171,14 @@ class AdviceRunner:
         """主循环每次轮询调用：取回 AI 的结果并显示。"""
         if self._scheduler is None:
             return
-        from lscs.llm.scheduler import AINotice, AIResult, AIStarted
+        from lscs.llm.scheduler import AINotice, AIRepairing, AIResult, AIStarted
 
         try:
             for event in self._scheduler.tick():
                 if isinstance(event, AIStarted):
                     self._display.ai_pending(event.lane)
+                elif isinstance(event, AIRepairing):
+                    self._display.ai_repairing(event.lane, event.reason)
                 elif isinstance(event, AINotice):
                     if event.lane is None:
                         self._display.ai_text(event.text)
@@ -197,20 +199,21 @@ class AdviceRunner:
         if lane == "choice":
             self._show_choice_result(result)
             return
-        if result.error is not None:
-            self._display.ai_text(_error_text(result.error, lane), lane)
-            return
+        # 错误（超时、调用失败）和方案一样先看还在不在那个局面：回合已经过去了就只记日志
         request, current = result.request, self._state
         if current is None or current.me is None or current.turn != request.state.turn:
             log.info("AI 结果回来时已不在同一个回合，丢弃")
             return
-        plan, stale, expired = result.plan, None, result.expired
         if current.phase != Phase.RECRUIT:
             # 深度分析可能在本回合的战斗中才回来：操作做不了了，但思路下回合还用得上
             if lane == "fast" or current.phase != Phase.COMBAT:
                 log.info("AI 结果回来时已不在招募阶段，丢弃")
                 return
-            expired = "changed"
+        if result.error is not None:
+            self._display.ai_text(_error_text(result.error, lane), lane)
+            return
+        plan, stale = result.plan, None
+        expired = result.expired if current.phase == Phase.RECRUIT else "changed"
         if expired is None and current.seq != request.state.seq:
             # 深度分析的操作用不上时（做完了或局面变化太大）照样显示，只看思路
             plan = remaining_plan(plan, request.state, current)
@@ -247,18 +250,20 @@ class AdviceRunner:
         self._display.show_ai(current, advice, agrees)
 
     def _show_hero_result(self, result: AIResult) -> None:
-        """选英雄的 AI 结果：已经选完（或已经过了选英雄阶段）、重随过（备选变了）都丢弃，
-        只记日志——新的请求已经发出，面板上的"分析中…"是它的。"""
-        if result.error is not None:
-            self._display.ai_text(result.error, "hero")
-            return
+        """选英雄的 AI 结果（或错误）：已经选完（或已经过了选英雄阶段）、重随过（备选变了）都
+        丢弃，只记日志——新的请求已经发出，面板上的"分析中…"是它的。"""
         current, hero = self._state, result.hero
         select = current.hero_select if current is not None else None
         if current is None or current.phase != Phase.HERO_SELECT or select is None:
             log.info("选英雄的 AI 结果回来时已经选完英雄，丢弃")
             return
-        if hero is None or select.signature() != result.request.signature:
+        if select.signature() != result.request.signature:
             log.info("选英雄的 AI 结果回来时备选英雄已经变了，丢弃")
+            return
+        if result.error is not None:
+            self._display.ai_text(result.error, "hero")
+            return
+        if hero is None:
             return
         advice = hero.model_copy(update={"elapsed": result.elapsed})
         rules = self.last_hero

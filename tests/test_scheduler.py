@@ -6,9 +6,17 @@ from helpers import FIXTURES
 from lscs.advisor.context import build_context
 from lscs.cards.db import CardDB
 from lscs.config import LLMConfig
+from lscs.llm.prompt import repair_text
 from lscs.llm.provider import FakeProvider, LLMError
 from lscs.llm.record import Recorder
-from lscs.llm.scheduler import HERO_DEBOUNCE, AINotice, AIResult, LLMScheduler
+from lscs.llm.scheduler import (
+    HERO_DEBOUNCE,
+    REPAIR_MIN_SECONDS,
+    AINotice,
+    AIRepairing,
+    AIResult,
+    LLMScheduler,
+)
 from lscs.state.models import Event, EventType, Phase
 
 CARDS = CardDB.from_json_file(FIXTURES / "cards_mini.json")
@@ -34,19 +42,41 @@ class Deferred:
         self.jobs.append(job)
 
 
+class SteppingProvider(FakeProvider):
+    """每次调用让时钟前进 step 秒，模拟调用耗时。"""
+
+    def __init__(self, responses, clock, step):
+        super().__init__(responses, elapsed=step)
+        self._clock, self._step = clock, step
+
+    def complete_json(self, *args, **kwargs):
+        self._clock.now += self._step
+        return super().complete_json(*args, **kwargs)
+
+
 def scheduler(
-    responses, *, clock=None, run_async=None, recorder=None, deep=False, hero_debounce=0.0, **cfg
+    responses,
+    *,
+    clock=None,
+    run_async=None,
+    recorder=None,
+    deep=False,
+    hero_debounce=0.0,
+    step=0.0,
+    **cfg,
 ):
     """deep=False：只有快速一路（大部分测试只关心快速建议的时机）。
-    hero_debounce=0：选英雄这一路不等（等待只在专门的测试里看）。"""
-    provider = FakeProvider(responses)
+    hero_debounce=0：选英雄这一路不等（等待只在专门的测试里看）。
+    step：每次调用让时钟前进几秒。"""
+    clock = clock or Clock()
+    provider = SteppingProvider(responses, clock, step) if step else FakeProvider(responses)
     sched = LLMScheduler(
         provider,
         LLMConfig(api_key=SECRET, deep_analysis=deep, **cfg),
         CARDS,
         guide="要点",
         recorder=recorder,
-        clock=clock or Clock(),
+        clock=clock,
         run_async=run_async or (lambda job: job()),
         hero_debounce=hero_debounce,
     )
@@ -80,7 +110,7 @@ def test_recruit_start_calls_immediately():
     result = events[1]
     assert result.error is None and result.plan.actions[0].entity_id == 20
     assert len(provider.calls) == 1
-    system, user, timeout, thinking, max_tokens = provider.calls[0]
+    system, user, timeout, thinking, max_tokens = provider.calls[0][:5]
     assert "要点" in system and "[#20] 海盗无赖" in user and timeout == 20
     assert (thinking, max_tokens) == ("disabled", 1500)
     assert (sched.calls, sched.input_tokens, sched.output_tokens) == (1, 100, 20)
@@ -88,7 +118,7 @@ def test_recruit_start_calls_immediately():
 
 def test_refresh_waits_for_quiet_shop():
     clock = Clock()
-    sched, provider = scheduler([GOOD, GOOD], clock=clock)
+    sched, provider = scheduler([GOOD, answer(30)], clock=clock)
     observe(sched, state(), EventType.RECRUIT_STARTED)
     sched.tick()
     observe(sched, state(shop_ids=(30, 31), seq=2), EventType.SHOP_CHANGED)  # 刷新
@@ -102,7 +132,7 @@ def test_refresh_waits_for_quiet_shop():
 
 def test_rapid_refreshes_call_only_for_the_last_one():
     clock = Clock()
-    sched, provider = scheduler([GOOD, GOOD, GOOD], clock=clock)
+    sched, provider = scheduler([GOOD, answer(40), GOOD], clock=clock)
     observe(sched, state(), EventType.RECRUIT_STARTED)
     sched.tick()
     observe(sched, state(shop_ids=(30, 31), seq=2), EventType.SHOP_CHANGED)
@@ -155,7 +185,7 @@ def test_reset_game_drops_result_from_previous_game():
 
 def test_refresh_after_buying_out_the_shop():
     clock = Clock()
-    sched, provider = scheduler([GOOD, GOOD], clock=clock)
+    sched, provider = scheduler([GOOD, json.dumps({"actions": []})], clock=clock)
     observe(sched, state(), EventType.RECRUIT_STARTED)
     sched.tick()
     observe(sched, state(shop_ids=(), seq=2, gold=1), EventType.SHOP_CHANGED)  # 买空了商店
@@ -192,8 +222,9 @@ def test_empty_answer_is_retried_once():
 
 
 def test_invalid_answers_are_dropped():
+    # 改正关闭时（打开时见下面"AI 自我改正"的测试）
     for answer in ["不是json", json.dumps({"actions": [{"type": "buy", "entity_id": 99}]})]:
-        sched, _ = scheduler([answer])
+        sched, _ = scheduler([answer], repair_invalid=False)
         observe(sched, state(), EventType.RECRUIT_STARTED)
         assert sched.tick()[-1].error == "AI 建议无效，已忽略"
 
@@ -241,7 +272,7 @@ def test_not_recruit_clears_pending_refresh():
 def test_record_never_contains_the_key(tmp_path):
     recorder = Recorder(tmp_path)
     auth = LLMError("auth", "API Key 无效")
-    sched, _ = scheduler([GOOD, "坏", auth], recorder=recorder)
+    sched, _ = scheduler([GOOD, "坏", GOOD, auth], recorder=recorder)
     for turn in (1, 2, 3):
         observe(
             sched,
@@ -252,8 +283,13 @@ def test_record_never_contains_the_key(tmp_path):
     files = list(tmp_path.glob("llm-*.jsonl"))
     text = files[0].read_text(encoding="utf-8")
     assert SECRET not in text
-    outcomes = [json.loads(line)["outcome"] for line in text.splitlines()]
-    assert outcomes == ["合法", "无效：不是合法的 JSON", "失败：API Key 无效"]
+    rows = [json.loads(line) for line in text.splitlines()]
+    assert [(r["outcome"], r["repair"]) for r in rows] == [
+        ("合法", False),
+        ("无效：不是合法的 JSON", False),
+        ("合法", True),  # 改正调用
+        ("失败：API Key 无效", False),
+    ]
 
 
 def test_observe_only_queues_so_a_batch_calls_once_for_the_latest_turn():
@@ -310,7 +346,7 @@ def test_message_failure_costs_nothing(monkeypatch):
 def test_refresh_drops_the_answer_still_in_flight():
     clock = Clock()
     deferred = Deferred()
-    sched, _ = scheduler([GOOD, GOOD], clock=clock, run_async=deferred)
+    sched, _ = scheduler([GOOD, answer(30)], clock=clock, run_async=deferred)
     observe(sched, state(), EventType.RECRUIT_STARTED)
     assert kinds(sched.tick()) == ["AIStarted"]
     observe(sched, state(shop_ids=(30, 31), seq=2), EventType.SHOP_CHANGED)  # 刷新
@@ -394,7 +430,7 @@ def test_deep_analysis_off_sends_only_fast():
 
 def test_refresh_only_calls_fast():
     clock = Clock()
-    sched, provider = scheduler([GOOD, GOOD, GOOD], clock=clock, deep=True)
+    sched, provider = scheduler([GOOD, GOOD, answer(30)], clock=clock, deep=True)
     observe(sched, state(), EventType.RECRUIT_STARTED)
     sched.tick()
     observe(sched, state(shop_ids=(30, 31), seq=2), EventType.SHOP_CHANGED)  # 刷新
@@ -499,13 +535,15 @@ def test_deep_empty_answer_is_not_retried():
 
 
 def test_deep_invalid_actions_keep_the_analysis():
+    # 改正关闭时；打开时见 test_deep_repair_failure_keeps_the_first_answers_thoughts
     bad = answer(99, analysis="畸变核心都在 5 本，提前升本。", look_for=["神明"])
-    sched, _ = scheduler([GOOD, bad], deep=True)
+    sched, _ = scheduler([GOOD, bad], deep=True, repair_invalid=False)
     observe(sched, state(), EventType.RECRUIT_STARTED)
     deep = [e for e in sched.tick() if isinstance(e, AIResult)][1]
     assert (deep.error, deep.expired) == (None, "invalid")
     assert deep.plan.actions == () and deep.plan.analysis == "畸变核心都在 5 本，提前升本。"
-    sched2, _ = scheduler([GOOD, answer(99)], deep=True)  # 没有分析的无效回答照旧丢弃
+    # 没有分析的无效回答照旧丢弃
+    sched2, _ = scheduler([GOOD, answer(99)], deep=True, repair_invalid=False)
     observe(sched2, state(), EventType.RECRUIT_STARTED)
     assert [e for e in sched2.tick() if isinstance(e, AIResult)][1].error == "AI 建议无效，已忽略"
 
@@ -547,7 +585,9 @@ def test_memory_takes_a_newer_fast_result_and_skips_invalid_or_empty_ones():
     fast3 = answer(20, direction="海盗", analysis="第 3 回合")
     fast4 = answer(20, direction="野兽", look_for=["狼王"])
     bad_deep4 = answer(99, direction="元素", analysis="不合法的深度分析")
-    sched, provider = scheduler([fast3, "", fast4, bad_deep4, GOOD, GOOD], deep=True)
+    sched, provider = scheduler(
+        [fast3, "", fast4, bad_deep4, GOOD, GOOD], deep=True, repair_invalid=False
+    )
     observe(sched, state(), EventType.RECRUIT_STARTED)
     sched.tick()
     observe(sched, state(turn=4, seq=2), EventType.RECRUIT_STARTED)
@@ -762,7 +802,7 @@ def test_heroes_offered_calls_with_the_fast_settings():
     assert (result.hero.source, result.hero.pick) == ("llm", 89)
     assert result.hero.signature == result.request.signature == st.hero_select.signature()
     assert result.request.ctx is None and result.request.state is st
-    system, user, timeout, thinking, max_tokens = provider.calls[0]
+    system, user, timeout, thinking, max_tokens = provider.calls[0][:5]
     assert system.startswith(
         "你是《炉石传说》酒馆战棋的高分教练，正在帮一位 6000 分以下的新手在开局"
     )
@@ -877,7 +917,8 @@ def test_reroll_drops_the_old_request_and_asks_again():
 
 
 def test_hero_answers_are_checked_and_empty_ones_retried():
-    sched, provider = scheduler(["", json.dumps({"pick": 93, "reason": "不在备选里"})])
+    wrong = json.dumps({"pick": 93, "reason": "不在备选里"})
+    sched, provider = scheduler(["", wrong], repair_invalid=False)
     offer(sched, hero_select_state())
     result = sched.tick()[-1]
     assert (result.lane, result.error, result.hero) == ("hero", "AI 建议无效，已忽略", None)
@@ -987,7 +1028,7 @@ def test_choice_offered_calls_immediately_with_the_fast_settings(tmp_path):
         "32/32 直接成主力",
         12,
     )
-    system, user, timeout, thinking, max_tokens = provider.calls[0]
+    system, user, timeout, thinking, max_tokens = provider.calls[0][:5]
     assert system.startswith(
         "你是《炉石传说》酒馆战棋的高分教练，正在帮一位 6000 分以下的新手在游戏弹出"
     )
@@ -1113,7 +1154,7 @@ def test_choice_results_do_not_change_the_memory():
 def test_invalid_choice_answer_and_message_errors(monkeypatch):
     import lscs.llm.scheduler
 
-    sched, _ = scheduler([json.dumps({"pick": 1})])
+    sched, _ = scheduler([json.dumps({"pick": 1})], repair_invalid=False)
     offer_choice(sched)
     assert sched.tick()[-1].error == "AI 建议无效，已忽略"
 
@@ -1125,3 +1166,413 @@ def test_invalid_choice_answer_and_message_errors(monkeypatch):
     offer_choice(sched)
     assert sched.tick() == [AINotice("生成 AI 局面时出错，本次跳过", "choice")]
     assert (sched.calls, provider.calls) == (0, [])
+
+
+# ---- AI 自我改正（AI 自我改正设计文档第 3 节） ----
+
+POOR = json.dumps({"actions": [{"type": "upgrade", "reason": "升本"}]})  # 铸币 5，升本要 7
+POOR_REASON = "第 1 步：铸币不够"
+
+
+def records(tmp_path):
+    text = next(tmp_path.glob("llm-*.jsonl")).read_text(encoding="utf-8")
+    return [json.loads(line) for line in text.splitlines()]
+
+
+def test_invalid_plan_is_sent_back_once_and_the_repaired_one_is_used(tmp_path):
+    clock = Clock()
+    sched, provider = scheduler([POOR, GOOD], clock=clock, step=1.5, recorder=Recorder(tmp_path))
+    observe(sched, state(), EventType.RECRUIT_STARTED)
+    events = sched.tick()
+    assert kinds(events) == ["AIStarted", "AIRepairing", "AIResult"]
+    assert events[1] == AIRepairing(1, "fast", POOR_REASON)
+    first, second = provider.calls
+    assert (second.system, second.user) == (first.system, first.user)  # 前缀不变，命中缓存
+    assert first.turns == ()
+    assert second.turns == (("assistant", POOR), ("user", repair_text("fast", POOR_REASON)))
+    assert "铸币不够" in second.turns[1][1]
+    assert (second.thinking, second.max_tokens) == ("disabled", 1500)
+    result = events[2]
+    assert result.error is None and result.repaired is True
+    assert result.plan.actions[0].entity_id == 20
+    assert result.elapsed == 3.0  # 从请求开始算，包含两次调用
+    assert sched.calls == 2
+    rows = records(tmp_path)
+    assert [(r["request_id"], r["outcome"], r["repair"]) for r in rows] == [
+        (1, "无效：第 1 步：铸币不够", False),
+        (1, "合法", True),
+    ]
+    assert rows[0]["user"] == first.user  # 原调用记局面消息
+    assert rows[1]["user"] == repair_text("fast", POOR_REASON)  # 改正调用只记改正要求
+    assert rows[1]["response"] == GOOD
+
+
+def test_still_invalid_after_the_repair_is_dropped():
+    sched, provider = scheduler([POOR, POOR, GOOD])
+    observe(sched, state(), EventType.RECRUIT_STARTED)
+    events = sched.tick()
+    assert kinds(events) == ["AIStarted", "AIRepairing", "AIResult"]
+    result = events[-1]
+    assert (result.error, result.plan, result.repaired) == (
+        "AI 改正后仍不合法，已忽略",
+        None,
+        True,
+    )
+    assert len(provider.calls) == 2 and sched.calls == 2  # 只改正一次
+
+
+def test_answers_that_do_not_parse_are_repaired_too():
+    sched, provider = scheduler(["不是json", GOOD])
+    observe(sched, state(), EventType.RECRUIT_STARTED)
+    events = sched.tick()
+    assert events[1] == AIRepairing(1, "fast", "不是合法的 JSON")
+    assert provider.calls[1].turns[0] == ("assistant", "不是json")  # 不是 JSON 也原样发回去
+    assert events[2].plan is not None and events[2].repaired
+
+
+def test_hero_pick_outside_the_offer_is_repaired():
+    wrong = json.dumps({"pick": 93, "reason": "不在备选里"}, ensure_ascii=False)
+    sched, provider = scheduler([wrong, HERO])
+    offer(sched, hero_select_state())
+    events = sched.tick()
+    assert events[1] == AIRepairing(1, "hero", "推荐的英雄不在备选里")
+    assert provider.calls[1].turns == (
+        ("assistant", wrong),
+        ("user", repair_text("hero", "推荐的英雄不在备选里")),
+    )
+    assert provider.calls[1].system == provider.calls[0].system
+    assert (events[2].error, events[2].hero.pick, events[2].repaired) == (None, 89, True)
+
+
+def test_choice_pick_outside_the_options_is_repaired():
+    wrong = json.dumps({"pick": 1})
+    sched, provider = scheduler([wrong, PICK])
+    offer_choice(sched)
+    events = sched.tick()
+    assert events[1] == AIRepairing(1, "choice", "推荐的选项不在选项里")
+    assert provider.calls[1].turns[1] == ("user", repair_text("choice", "推荐的选项不在选项里"))
+    assert (events[2].error, events[2].choice.pick) == (None, 6933)
+
+
+def test_deep_repair_runs_without_thinking(tmp_path):
+    bad = answer(99, analysis="第一次的分析")
+    fixed = answer(21, analysis="第一次的分析")
+    sched, provider = scheduler([GOOD, bad, fixed], deep=True, recorder=Recorder(tmp_path))
+    observe(sched, state(), EventType.RECRUIT_STARTED)
+    events = sched.tick()
+    assert lanes(events) == [
+        ("AIStarted", "fast"),
+        ("AIResult", "fast"),
+        ("AIStarted", "deep"),
+        ("AIRepairing", "deep"),
+        ("AIResult", "deep"),
+    ]
+    deep, repair = provider.calls[1:]
+    assert (deep.thinking, deep.max_tokens, deep.turns) == ("low", 16000, ())
+    # 只改动作，不再思考；输出上限至少 4000，长的深度分析 json 不会被截断
+    assert (repair.thinking, repair.max_tokens) == ("disabled", 4000)
+    assert repair.timeout == 75  # 超时仍按深度这一路算
+    result = events[-1]
+    assert (result.error, result.expired, result.repaired) == (None, None, True)
+    assert result.plan.actions[0].entity_id == 21
+    rows = records(tmp_path)
+    assert [(r["lane"], r["thinking"], r["repair"]) for r in rows] == [
+        ("fast", "disabled", False),
+        ("deep", "low", False),
+        ("deep", "disabled", True),
+    ]
+
+
+def test_deep_repair_failure_keeps_the_first_answers_thoughts():
+    first = answer(99, analysis="第一次的分析", look_for=["神明"])
+    second = answer(98, analysis="改正时的分析")
+    sched, _ = scheduler([GOOD, first, second], deep=True)
+    observe(sched, state(), EventType.RECRUIT_STARTED)
+    result = sched.tick()[-1]
+    assert (result.lane, result.error, result.expired) == ("deep", None, "invalid")
+    assert result.plan.actions == () and result.plan.analysis == "第一次的分析"
+    assert result.plan.look_for == ("神明",)
+
+
+def test_deep_repair_failure_without_thoughts_is_an_error():
+    sched, _ = scheduler([GOOD, answer(99), answer(98)], deep=True)
+    observe(sched, state(), EventType.RECRUIT_STARTED)
+    result = sched.tick()[-1]
+    assert (result.lane, result.error, result.plan) == ("deep", "AI 改正后仍不合法，已忽略", None)
+
+
+def test_empty_then_invalid_then_repaired_takes_three_calls():
+    sched, provider = scheduler(["", POOR, GOOD])
+    observe(sched, state(), EventType.RECRUIT_STARTED)
+    events = sched.tick()
+    assert kinds(events) == ["AIStarted", "AIRepairing", "AIResult"]
+    assert events[-1].plan is not None
+    assert len(provider.calls) == 3 and sched.calls == 3
+    assert [c.turns == () for c in provider.calls] == [True, True, False]
+
+
+def test_empty_repair_answer_is_retried_with_the_same_turns(tmp_path):
+    sched, provider = scheduler([POOR, "", GOOD], recorder=Recorder(tmp_path))
+    observe(sched, state(), EventType.RECRUIT_STARTED)
+    events = sched.tick()
+    assert kinds(events) == ["AIStarted", "AIRepairing", "AIResult"]
+    assert events[-1].plan is not None
+    assert len(provider.calls) == 3 and sched.calls == 3
+    assert provider.calls[2].turns == provider.calls[1].turns != ()
+    assert [(r["outcome"], r["repair"]) for r in records(tmp_path)] == [
+        ("无效：第 1 步：铸币不够", False),
+        ("空内容", True),
+        ("合法", True),
+    ]
+
+
+def test_never_more_than_three_calls_for_one_request():
+    sched, provider = scheduler(["", POOR, "", GOOD])
+    observe(sched, state(), EventType.RECRUIT_STARTED)
+    assert sched.tick()[-1].error == "AI 返回了空内容"
+    assert len(provider.calls) == 3 and sched.calls == 3
+
+
+def test_deep_empty_repair_answer_ends_with_the_first_thoughts():
+    first = answer(99, analysis="第一次的分析")
+    sched, provider = scheduler([GOOD, first, "", GOOD], deep=True)
+    observe(sched, state(), EventType.RECRUIT_STARTED)
+    result = sched.tick()[-1]
+    assert len(provider.calls) == 3  # 快速 1 次，深度 2 次：深度不重试空内容
+    assert (result.lane, result.expired, result.plan.analysis) == (
+        "deep",
+        "invalid",
+        "第一次的分析",
+    )
+
+
+def test_deep_repair_call_failure_keeps_the_first_thoughts():
+    first = answer(99, analysis="第一次的分析")
+    sched, _ = scheduler([GOOD, first, LLMError("timeout", "AI 超时")], deep=True)
+    observe(sched, state(), EventType.RECRUIT_STARTED)
+    result = sched.tick()[-1]
+    assert (result.lane, result.error, result.expired) == ("deep", None, "invalid")
+    assert result.plan.analysis == "第一次的分析"
+
+
+def test_repair_call_failure_is_reported_like_any_call():
+    sched, _ = scheduler([POOR, LLMError("other", "DeepSeek 余额不足")])
+    observe(sched, state(), EventType.RECRUIT_STARTED)
+    assert sched.tick()[-1].error == "DeepSeek 余额不足"
+
+
+def test_no_repair_when_switched_off():
+    sched, provider = scheduler([POOR, GOOD], repair_invalid=False)
+    observe(sched, state(), EventType.RECRUIT_STARTED)
+    events = sched.tick()
+    assert kinds(events) == ["AIStarted", "AIResult"]
+    assert (events[-1].error, events[-1].repaired) == ("AI 建议无效，已忽略", False)
+    assert len(provider.calls) == 1 and sched.calls == 1
+
+
+def test_no_repair_for_a_request_already_superseded():
+    deferred = Deferred()
+    sched, provider = scheduler([POOR, GOOD], run_async=deferred)
+    observe(sched, state(), EventType.RECRUIT_STARTED)
+    assert kinds(sched.tick()) == ["AIStarted"]
+    observe(sched, state(shop_ids=(30, 31), seq=2), EventType.SHOP_CHANGED)  # 回答回来前刷新了
+    deferred.jobs[0]()
+    assert len(provider.calls) == 1 and sched.calls == 1  # 不为旧局面再花钱
+    assert sched.tick() == []
+
+
+def test_no_repair_when_too_little_time_is_left():
+    sched, provider = scheduler([POOR, GOOD], step=18.0, timeout_seconds=20)
+    observe(sched, state(), EventType.RECRUIT_STARTED)
+    events = sched.tick()
+    assert kinds(events) == ["AIStarted", "AIResult"]
+    assert events[-1].error == "AI 建议无效，已忽略"
+    assert len(provider.calls) == 1
+    assert REPAIR_MIN_SECONDS == 3
+    sched, provider = scheduler([POOR, GOOD], step=17.0, timeout_seconds=20)  # 正好剩 3 秒
+    observe(sched, state(), EventType.RECRUIT_STARTED)
+    assert sched.tick()[-1].plan is not None and len(provider.calls) == 2
+
+
+def test_no_repair_without_budget():
+    sched, provider = scheduler([POOR, GOOD], max_calls_per_game=1)
+    observe(sched, state(), EventType.RECRUIT_STARTED)
+    events = sched.tick()
+    assert kinds(events) == ["AIStarted", "AIResult"]
+    assert events[-1].error == "AI 建议无效，已忽略"
+    assert len(provider.calls) == 1 and sched.calls == 1
+
+
+def test_repairing_notice_for_a_superseded_request_is_dropped():
+    deferred = Deferred()
+    sched, _ = scheduler([POOR, GOOD], run_async=deferred)
+    observe(sched, state(), EventType.RECRUIT_STARTED)
+    sched.tick()
+    deferred.jobs[0]()  # 改正在后台做完了，但主线程还没取回
+    observe(sched, state(turn=4, seq=2), EventType.RECRUIT_STARTED)  # 新回合
+    assert kinds(sched.tick()) == ["AIStarted"]  # 只有新回合的请求，旧的改正提示和结果都丢弃
+
+
+# ---- 作废了在途请求、又发不出新请求时向用户交代（设计文档第 5.1 节） ----
+
+NO_BUDGET = "这次不再分析：本局 AI 预算已用完"
+
+
+def test_refresh_without_budget_ends_the_superseded_request():
+    clock, deferred = Clock(), Deferred()
+    sched, _ = scheduler(
+        [GOOD, GOOD], clock=clock, run_async=deferred, deep=True, max_calls_per_game=1
+    )
+    observe(sched, state(), EventType.RECRUIT_STARTED)
+    events = sched.tick()  # 快速发出（在途），深度发不出：第一次提示预算用完
+    assert kinds(events) == ["AIStarted", "AINotice"]
+    observe(sched, state(shop_ids=(30, 31), seq=2), EventType.SHOP_CHANGED)  # 刷新
+    deferred.jobs[0]()  # 刷新前那次请求回来了：作废
+    assert sched.tick() == []
+    clock.now += 1.0
+    assert sched.tick() == [AINotice(NO_BUDGET, "fast")]  # 恰好一条
+    assert sched._fast.in_flight is None
+    observe(sched, state(shop_ids=(40, 41), seq=3), EventType.SHOP_CHANGED)  # 再刷新
+    clock.now += 1.0
+    assert sched.tick() == []  # 已经交代过了，不再每次刷新都刷屏
+
+
+def test_first_budget_notice_is_enough_when_the_refresh_hits_the_limit():
+    clock, deferred = Clock(), Deferred()
+    sched, _ = scheduler([GOOD], clock=clock, run_async=deferred, max_calls_per_game=1)
+    observe(sched, state(), EventType.RECRUIT_STARTED)
+    sched.tick()
+    observe(sched, state(shop_ids=(30, 31), seq=2), EventType.SHOP_CHANGED)
+    clock.now += 1.0
+    # 这次发出的就是"预算已用完"（不分路），同一次不再追加分路的提示
+    assert sched.tick() == [AINotice("本局 AI 预算已用完，之后只显示规则建议")]
+    assert sched._fast.in_flight is None
+    clock.now += 30
+    assert sched.tick() == []
+
+
+def test_refresh_after_ai_was_switched_off_ends_the_superseded_request():
+    clock, deferred = Clock(), Deferred()
+    auth = LLMError("auth", "API Key 无效")
+    sched, _ = scheduler([auth, auth, auth], clock=clock, run_async=deferred)
+    for turn in (1, 2):
+        observe(sched, state(turn=turn, seq=turn), EventType.RECRUIT_STARTED)
+        sched.tick()
+        deferred.jobs[-1]()
+        sched.tick()
+    observe(sched, state(turn=3, seq=3), EventType.RECRUIT_STARTED)
+    sched.tick()
+    observe(sched, state(shop_ids=(30, 31), turn=3, seq=4), EventType.SHOP_CHANGED)  # 刷新
+    deferred.jobs[-1]()  # 第三次认证失败：关闭 AI；这次请求已经作废
+    clock.now += 1.0
+    assert sched.tick() == [
+        AINotice("API Key 连续 3 次无效，已关闭 AI"),
+        AINotice("这次不再分析：AI 已关闭", "fast"),
+    ]
+    assert sched._fast.in_flight is None
+
+
+def test_finished_request_then_refresh_without_budget_says_nothing_more():
+    clock = Clock()
+    sched, _ = scheduler([GOOD], clock=clock, max_calls_per_game=1)
+    observe(sched, state(), EventType.RECRUIT_STARTED)
+    assert kinds(sched.tick()) == ["AIStarted", "AIResult"]  # 正常完成
+    observe(sched, state(shop_ids=(30, 31), seq=2), EventType.SHOP_CHANGED)
+    clock.now += 1.0
+    assert sched.tick() == [AINotice("本局 AI 预算已用完，之后只显示规则建议")]
+    observe(sched, state(shop_ids=(40, 41), seq=3), EventType.SHOP_CHANGED)
+    clock.now += 1.0
+    assert sched.tick() == []
+
+
+# ---- 没有招募开始事件也当作新回合（设计文档第 5.2 节） ----
+
+
+def test_first_recruit_update_of_a_turn_calls_without_recruit_started():
+    sched, provider = scheduler([GOOD, GOOD, GOOD], deep=True)
+    sched.reset_game()  # 重连：新的一局，直接是招募阶段的局面
+    observe(sched, state(), EventType.GOLD_CHANGED, EventType.SHOP_CHANGED)
+    assert lanes(sched.tick()) == [
+        ("AIStarted", "fast"),
+        ("AIResult", "fast"),
+        ("AIStarted", "deep"),
+        ("AIResult", "deep"),
+    ]
+    observe(sched, state(seq=2))  # 同一回合的其他更新：不再发
+    assert sched.tick() == [] and len(provider.calls) == 2
+
+
+def test_first_update_with_a_context_calls_even_after_recruit_started_without_one():
+    # 招募开始那一刻 ctx 还生成不了（运行器不调用 observe），下一次更新才有
+    sched, provider = scheduler([GOOD, GOOD])
+    observe(sched, state(turn=2, seq=1), EventType.RECRUIT_STARTED)
+    sched.tick()
+    observe(sched, state(turn=3, seq=2), EventType.BOARD_CHANGED)
+    assert kinds(sched.tick()) == ["AIStarted", "AIResult"]
+    assert situation(provider.calls[-1].user).startswith("第 3 回合")
+
+
+def test_new_turn_without_recruit_started_drops_the_old_requests():
+    deferred = Deferred()
+    sched, _ = scheduler([GOOD, GOOD], run_async=deferred)
+    observe(sched, state(), EventType.RECRUIT_STARTED)
+    sched.tick()
+    observe(sched, state(turn=4, seq=2), EventType.SHOP_CHANGED)
+    assert kinds(sched.tick()) == ["AIStarted"]
+    deferred.jobs[0]()  # 第 3 回合的回答
+    assert sched.tick() == []
+
+
+def test_plan_ending_with_a_refresh_is_still_valid():
+    # 设计文档第 5.4 节：刷新之后不能再有动作，但刷新放在最后照样合法
+    last = json.dumps({"actions": [{"type": "buy", "entity_id": 20}, {"type": "refresh"}]})
+    sched, provider = scheduler([last])
+    observe(sched, state(), EventType.RECRUIT_STARTED)
+    result = sched.tick()[-1]
+    assert result.error is None and [a.type for a in result.plan.actions] == ["buy", "refresh"]
+    assert len(provider.calls) == 1
+
+
+def test_combat_drops_the_fast_request_in_flight_before_any_repair():
+    # 进战斗时快速建议已经没用了：不为它改正，结果和改正提示都丢弃（深度分析不受影响）
+    deferred = Deferred()
+    sched, provider = scheduler([POOR, GOOD], run_async=deferred)
+    observe(sched, state(), EventType.RECRUIT_STARTED)
+    assert kinds(sched.tick()) == ["AIStarted"]
+    combat = make_state(phase=Phase.COMBAT, turn=3, seq=2)
+    sched.observe(combat, [Event(type=EventType.COMBAT_STARTED, turn=3)], None)
+    deferred.jobs[0]()
+    assert len(provider.calls) == 1 and sched.calls == 1
+    assert sched.tick() == []
+
+
+def test_deep_repair_keeps_a_larger_fast_output_limit():
+    sched, provider = scheduler([GOOD, answer(99), answer(21)], deep=True, max_output_tokens=6000)
+    observe(sched, state(), EventType.RECRUIT_STARTED)
+    sched.tick()
+    assert [(c.thinking, c.max_tokens) for c in provider.calls] == [
+        ("disabled", 6000),
+        ("low", 16000),
+        ("disabled", 6000),
+    ]
+
+
+def test_new_choice_group_without_budget_ends_the_superseded_request():
+    from factory import choice_option, choice_state, make_choice
+
+    deferred = Deferred()
+    sched, _ = scheduler([PICK], run_async=deferred, max_calls_per_game=1)
+    offer_choice(sched)  # 第一组：发出，还没回来
+    assert kinds(sched.tick()) == ["AIStarted"]
+    observe(sched, state(turn=9, seq=3), EventType.RECRUIT_STARTED)  # 快速建议发不出
+    assert sched.tick() == [AINotice("本局 AI 预算已用完，之后只显示规则建议")]
+    second = make_choice(
+        [choice_option(80, "BGS_061", 0, 3, 1), choice_option(81, "BG21_029", 1, 1, 1)],
+        choice_id=13,
+        kind="discover",
+        source="BG23_016",
+    )
+    offer_choice(sched, choice_state(second, seq=4))  # 第二组：第一组的请求作废，又发不出
+    assert sched.tick() == [AINotice(NO_BUDGET, "choice")]
+    deferred.jobs[0]()
+    assert sched.tick() == []

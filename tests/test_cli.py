@@ -281,12 +281,13 @@ def test_replay_with_ai_calls_model_and_hides_key(monkeypatch, tmp_path, capsys)
     from helpers import MINI_LOG
 
     answer = json.dumps({"actions": [{"type": "buy", "entity_id": 31, "reason": "海盗"}]})
-    key = _ai_cli_setup(monkeypatch, tmp_path, [MINI_HERO] + [answer] * 4)
+    key = _ai_cli_setup(monkeypatch, tmp_path, [MINI_HERO] + [answer] * 6)
     assert main(["replay", str(MINI_LOG), "--ai"]) == 0
     out = capsys.readouterr().out
     assert "AI：deepseek-flash（Key sk-c…abcd，思考模式 disabled）" in out
     assert "深度分析：开启（思考 low，每回合开始时约 20 秒出结果）" in out
     assert "建议改回 disabled" not in out and "选英雄建议" not in out  # 开启时不多打印一行
+    assert "自动改正" not in out
     # 选英雄：规则马上出，AI 在"选择英雄"之前出；耗时取决于机器，不断言
     hero = out.index("  🤖 AI（")
     assert out.index("  📋 规则：护甲信息不全，等 AI 建议") < hero < out.index("选择英雄")
@@ -294,14 +295,25 @@ def test_replay_with_ai_calls_model_and_hides_key(monkeypatch, tmp_path, capsys)
     # 每个招募回合快速、深度各一次
     assert out.count("：① 买 海盗无赖 3/1（海盗）") == 2
     assert "  🧠 深度分析中…（约 20 秒）" in out and "  🧠 深度分析（" in out
-    assert "  🤖 AI 建议无效，已忽略" in out  # 第 2 回合 #31 已经在场上，同样的回答不合法
-    assert "  🧠 深度分析失败：AI 建议无效，已忽略" in out
-    assert "本局 AI 调用 5 次" in out
+    # 第 2 回合 #31 已经在场上，同样的回答不合法；改正一次还是同样的回答
+    assert "  🤖 AI 建议不合法（第 1 步：商店里没有 #31），正在让它改正…" in out
+    assert "  🧠 深度分析的操作不合法（第 1 步：商店里没有 #31），正在让它改正…" in out
+    assert "  🤖 AI 改正后仍不合法，已忽略" in out
+    assert "  🧠 深度分析失败：AI 改正后仍不合法，已忽略" in out
+    assert "本局 AI 调用 7 次" in out
     assert key not in out
     record = next((tmp_path / "recordings").glob("llm-*.jsonl")).read_text(encoding="utf-8")
-    assert key not in record and record.count("\n") == 5
-    lanes = [json.loads(line)["lane"] for line in record.splitlines()]
-    assert lanes == ["hero", "fast", "deep", "fast", "deep"]
+    assert key not in record and record.count("\n") == 7
+    rows = [json.loads(line) for line in record.splitlines()]
+    assert [(r["lane"], r["repair"]) for r in rows] == [
+        ("hero", False),
+        ("fast", False),
+        ("deep", False),
+        ("fast", False),
+        ("fast", True),
+        ("deep", False),
+        ("deep", True),
+    ]
 
 
 def test_deep_thinking_high_waits_longer(monkeypatch, tmp_path, capsys):
@@ -321,12 +333,13 @@ def test_replay_with_deep_analysis_off(monkeypatch, tmp_path, capsys):
 
     answer = json.dumps({"actions": [{"type": "buy", "entity_id": 31, "reason": "海盗"}]})
     _ai_cli_setup(
-        monkeypatch, tmp_path, [MINI_HERO] + [answer] * 2, extra="deep_analysis = false\n"
+        monkeypatch, tmp_path, [MINI_HERO] + [answer] * 3, extra="deep_analysis = false\n"
     )
     assert main(["replay", str(MINI_LOG), "--ai"]) == 0
     out = capsys.readouterr().out
     assert "深度分析：关闭" in out and "🧠" not in out
-    assert "本局 AI 调用 3 次" in out  # 选英雄 1 次 + 两个招募回合各 1 次
+    # 选英雄 1 次 + 两个招募回合各 1 次 + 第 2 回合的回答不合法，改正 1 次
+    assert "本局 AI 调用 4 次" in out
 
 
 def test_replay_with_hero_advice_off(monkeypatch, tmp_path, capsys):
@@ -336,14 +349,14 @@ def test_replay_with_hero_advice_off(monkeypatch, tmp_path, capsys):
 
     answer = json.dumps({"actions": [{"type": "buy", "entity_id": 31, "reason": "海盗"}]})
     extra = "deep_analysis = false\nhero_advice = false\n"
-    _ai_cli_setup(monkeypatch, tmp_path, [answer] * 2, extra=extra)
+    _ai_cli_setup(monkeypatch, tmp_path, [answer] * 3, extra=extra)
     assert main(["replay", str(MINI_LOG), "--ai"]) == 0
     out = capsys.readouterr().out
     assert "选英雄建议：关闭" in out and "选项建议" not in out
     assert "  📋 规则：护甲信息不全，等 AI 建议" in out  # 规则建议照常
-    assert "本局 AI 调用 2 次" in out
+    assert "本局 AI 调用 3 次" in out  # 第 2 回合的回答不合法，改正 1 次
     record = next((tmp_path / "recordings").glob("llm-*.jsonl")).read_text(encoding="utf-8")
-    assert [json.loads(line)["lane"] for line in record.splitlines()] == ["fast", "fast"]
+    assert [json.loads(line)["lane"] for line in record.splitlines()] == ["fast"] * 3
 
 
 def test_replay_with_choice_advice_off(monkeypatch, tmp_path, capsys):
@@ -352,6 +365,22 @@ def test_replay_with_choice_advice_off(monkeypatch, tmp_path, capsys):
     _ai_cli_setup(monkeypatch, tmp_path, [], extra="choice_advice = false\n")
     assert main(["replay", str(MINI_LOG), "--ai"]) == 0
     assert "选项建议：关闭" in capsys.readouterr().out
+
+
+def test_replay_with_repair_off(monkeypatch, tmp_path, capsys):
+    import json
+
+    from helpers import MINI_LOG
+
+    answer = json.dumps({"actions": [{"type": "buy", "entity_id": 31, "reason": "海盗"}]})
+    extra = "deep_analysis = false\nrepair_invalid = false\n"
+    _ai_cli_setup(monkeypatch, tmp_path, [MINI_HERO] + [answer] * 2, extra=extra)
+    assert main(["replay", str(MINI_LOG), "--ai"]) == 0
+    out = capsys.readouterr().out
+    assert "不合法方案自动改正：关闭" in out
+    assert "  🤖 AI 建议无效，已忽略" in out
+    assert out.count("改正") == 1  # 只有启动时那一行
+    assert "本局 AI 调用 3 次" in out
 
 
 def test_replay_with_ai_asks_the_choice_lane(monkeypatch, tmp_path, capsys):
@@ -368,8 +397,10 @@ def test_replay_with_ai_asks_the_choice_lane(monkeypatch, tmp_path, capsys):
     answer = out.index("：选 左数第 2 个 BG21_HERO_000_Buddyt —— 先加攻击")
     assert offered < answer < out.index("[T 1] 招募开始")  # 在 MAIN_ACTION 之前就给出
     record = next((tmp_path / "recordings").glob("llm-*.jsonl")).read_text(encoding="utf-8")
-    lanes = [json.loads(line)["lane"] for line in record.splitlines()]
-    assert lanes[0] == "choice" and lanes.count("choice") == 5  # 5 组选项各一次
+    rows = [json.loads(line) for line in record.splitlines()]
+    assert rows[0]["lane"] == "choice"
+    # 5 组选项各一个请求（后 4 组的回答没有 pick，各改正一次）
+    assert len({r["request_id"] for r in rows if r["lane"] == "choice"}) == 5
 
 
 def test_replay_sends_heroes_md_to_the_hero_lane(monkeypatch, tmp_path, capsys):

@@ -16,6 +16,9 @@ uv run lscs watch               # 每次打游戏前运行，PowerShell 不要�
 
 ## 常用命令
 
+Windows 上双击项目文件夹里的 `启动.bat` 等于 `uv run lscs watch`，双击 `更新.bat` 等于 `git pull`
+（不是 git 下载的目录会提示重新下载 ZIP）。
+
 | 命令 | 作用 |
 |---|---|
 | `uv run lscs fix-log-config` | 检查并修复 log.config |
@@ -44,6 +47,11 @@ uv run lscs watch               # 每次打游戏前运行，PowerShell 不要�
   `watch` 启动时从头读当前的 Power.log，但只为读完后的当前回合（和还没选完的那组选项）调用（每路最多一次）。
   每次调用的提示词和回答记录在 `recordings/llm-日期.jsonl`（`lane` 是 `fast`、`deep`、`hero` 或 `choice`），
   不包含 Key，也不进仓库。
+- AI 的回答解析不了、或方案过不了校验器（钱不够、场面放不下、编号不存在……）时，把校验器的原因发回去改正一次：
+  多轮对话（原系统提示 + 原局面消息 + 模型自己的回答 + 改正要求），前缀和原请求相同，能命中 DeepSeek 的前缀缓存；
+  每个请求最多一次，占一次调用；深度分析改正时不开思考；校验器仍是唯一标准，不从不合法的方案里截取前几步。
+  `repair_invalid = false` 关闭。改正对话里的调用记为 `repair=true`（`user` 只记改正要求；改正的回答为空时的重试
+  也算，所以按 `request_id` 分组统计更准）。
 - 局面消息开头附本局卡池（本局种族和中立随从、酒馆法术），末尾附上次的判断（方向、要找的牌、分析）；不附规则建议。
 - `thinking`（快速建议）请保持 `"disabled"`，思考交给深度分析。
 - 攻略要点在 `strategy/current/guide.md`，会原样发给 AI。

@@ -5,3 +5,6 @@ AUTH_FAILURE_LIMIT = 3
 AUTH_DISABLED = f"API Key 连续 {AUTH_FAILURE_LIMIT} 次无效，已关闭 AI"
 BUDGET_EXHAUSTED = "本局 AI 预算已用完，之后只显示规则建议"
 TIMEOUT = "AI 超时"  # 提供商和调度器超时时 AIResult.error 的文字
+# 刷新、换组、新回合作废了在途的请求，又发不出新请求时，这一路的"分析中…"用这两句收尾
+NO_BUDGET_THIS_TIME = "这次不再分析：本局 AI 预算已用完"
+AI_OFF_THIS_TIME = "这次不再分析：AI 已关闭"

@@ -196,6 +196,8 @@ def _build_scheduler(cards, sync: bool):
         print("选英雄建议：关闭", flush=True)  # 开启时不打印，少一行
     if not llm.choice_advice:
         print("选项建议：关闭", flush=True)
+    if not llm.repair_invalid:
+        print("不合法方案自动改正：关闭", flush=True)
     heroes = load_guide(DEFAULT_HEROES) if DEFAULT_HEROES.exists() else None
     extra = {"debounce": 0.0, "hero_debounce": 0.0, "run_async": lambda job: job()} if sync else {}
     return LLMScheduler(

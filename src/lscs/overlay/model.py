@@ -52,6 +52,7 @@ MAX_REASON = 40  # "目标：……"（没有目标时"分析：……"）整行
 MAX_LOOK_FOR = 24  # "要找：……"整行最多几个字，超出加"…"
 HERO_TITLE = "选英雄 · 护甲越少越强"
 PENDING = "分析中…"
+REPAIRING = "改正中…"  # AI 的回答不合法，正在让它改正（还在等，和"分析中…"一样）
 AI_TITLE = "AI"
 DEEP_TITLE = "AI（深度）"
 DEEP_PENDING = "深度分析中…"
@@ -315,6 +316,21 @@ class OverlayModel:
                     self._ai = (Line(text, "muted"),)
             self._commit()
 
+    def ai_repairing(self, lane: Lane, reason: str) -> None:
+        """AI 的回答不合法、正在改正：快速、选英雄、选项的 AI 区写"改正中…"（原因只在终端里）。
+        深度分析不改任何状态，面板上还是"深度分析中…"。"""
+        if lane == "deep":
+            return
+        repairing = (Line(REPAIRING, "muted"),)
+        with self._lock:
+            if lane == "hero":
+                self._hero_ai = repairing
+            elif lane == "choice":
+                self._choice_ai = repairing
+            else:
+                self._ai = repairing
+            self._commit()
+
     def show_ai(self, state: GameState, advice: Advice, agrees: bool) -> None:
         entry = _PlanEntry(
             advice.plan,
@@ -497,7 +513,7 @@ class OverlayModel:
                 badge=CHOICE_BADGE,
             )
         failed = isinstance(self._choice_ai, tuple) and any(
-            line.text != PENDING for line in self._choice_ai
+            line.text not in (PENDING, REPAIRING) for line in self._choice_ai
         )
         if failed or not self._choice_enabled or self._ai_off is not None or advice is not None:
             return NextStep(SELF_CHOICE, tone="muted")

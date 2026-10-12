@@ -41,6 +41,9 @@ class LLMConfig(BaseModel):
     # 选项：游戏弹出"选一个"（三连发现、黑暗之赐、饰品、技能升级）时让快速模型选一个，立即调用；
     # 参数同上
     choice_advice: bool = True
+    # AI 的方案或回答不合法时，把原因发回去让它改正一次（四路都适用，每个请求最多一次，
+    # 占一次调用）
+    repair_invalid: bool = True
 
     @field_validator("api_key")
     @classmethod

@@ -110,6 +110,7 @@ def test_display_group_forwards_every_method_and_isolates_errors(caplog):
     group.ai_pending("deep")
     group.ai_text("AI 超时")
     group.ai_text("深度分析超时", "deep")
+    group.ai_repairing("fast", "第 2 步：铸币不够")
     group.show_ai(STATE, advice, True)
     group.ai_summary(2, 300, 40)
     expected = [
@@ -120,6 +121,7 @@ def test_display_group_forwards_every_method_and_isolates_errors(caplog):
         ("ai_pending", ("deep",)),
         ("ai_text", ("AI 超时", "fast")),
         ("ai_text", ("深度分析超时", "deep")),
+        ("ai_repairing", ("fast", "第 2 步：铸币不够")),
         ("show_ai", (STATE, advice, True)),
         ("ai_summary", (2, 300, 40)),
     ]
@@ -189,6 +191,21 @@ def test_show_ai_without_steps_does_not_repeat_the_summary():
         STATE, Advice(state_seq=1, turn=3, plan=plan, elapsed=1.0), False
     )
     assert out == ["  🤖 AI（1.0 秒）：无需操作（省钱）", "          要找：船长"]
+
+
+def test_repairing_lines_say_why_and_what_happens_next():
+    out = []
+    display = AdviceDisplay(name, out.append)
+    display.ai_repairing("fast", "第 2 步：铸币不够")
+    display.ai_repairing("deep", "第 3 步：刷新要放在最后，刷新之后不能再有动作")
+    display.ai_repairing("hero", "推荐的英雄不在备选里")
+    display.ai_repairing("choice", "推荐的选项不在选项里")
+    assert out == [
+        "  🤖 AI 建议不合法（第 2 步：铸币不够），正在让它改正…",
+        "  🧠 深度分析的操作不合法（第 3 步：刷新要放在最后，刷新之后不能再有动作），正在让它改正…",
+        "  🤖 AI 建议不合法（推荐的英雄不在备选里），正在让它改正…",
+        "  🤖 AI 建议不合法（推荐的选项不在选项里），正在让它改正…",
+    ]
 
 
 def test_deep_pending_and_text():

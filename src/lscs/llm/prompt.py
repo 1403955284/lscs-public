@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from lscs.advisor.context import MINION, TurnContext, hero_power_blocker, hero_power_used
+from lscs.advisor.models import Lane
 from lscs.advisor.names import armor_zh, choice_title, keyword_zh, tribe_zh
 from lscs.cards.db import CardDB, CardInfo
 from lscs.llm.parse import MAX_ACTIONS
@@ -126,6 +127,15 @@ pick 必须是选项的实体编号；reason 会显示在游戏画面上，25 �
 【攻略要点】
 {guide}"""  # noqa: E501
 
+# AI 的回答不合法时的改正要求（AI 自我改正设计文档第 3.3 节）：作为新的一轮 user 消息，接在原局面
+# 消息和模型自己的回答之后。系统提示不动（前缀缓存）；DeepSeek 的 json 模式要求提示里有"json"
+REPAIR_PLAN = (
+    "你刚才的方案不合法：{problem}。\n"
+    "请按同样的规则改正后，重新输出完整的 json：analysis、summary、direction、look_for 保持不变，"
+    "只改 actions；每一步都重新核对 gold_after 和 minions_after。"
+)
+REPAIR_PICK = "你刚才的回答不合法：{problem}。请按同样的规则改正后，重新输出完整的 json。"
+
 MAX_TAVERN_TIER = 6  # 酒馆最高 6 本；7 本的牌不会出现在商店里，不让 AI 叫新手去找
 POOL_TITLE = "【本局卡池（本局种族的随从和中立随从，按酒馆等级）】"
 SPELLS_TITLE = "【酒馆法术】"
@@ -168,6 +178,13 @@ def build_choice_system_prompt(guide: str) -> str:
     return CHOICE_SYSTEM_TEMPLATE.format(
         example=json.dumps(CHOICE_EXAMPLE, ensure_ascii=False), guide=guide
     )
+
+
+def repair_text(lane: Lane, problem: str) -> str:
+    """problem：校验器或解析器给出的原因，原样发回去。招募的两路用 REPAIR_PLAN，
+    选英雄、选项用 REPAIR_PICK。"""
+    template = REPAIR_PLAN if lane in ("fast", "deep") else REPAIR_PICK
+    return template.format(problem=problem)
 
 
 def _in_tavern(card: CardInfo) -> bool:

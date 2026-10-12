@@ -25,8 +25,9 @@ def validate_plan(actions: Sequence[Action], ctx: TurnContext) -> str | None:
         where = f"第 {step} 步"
         if frozen:
             return f"{where}：冻结之后不能再有动作"
-        if refreshed and action.type != "freeze":
-            return f"{where}：刷新之后只能冻结"
+        if refreshed:
+            # 刷新之后看不到新商店：冻结一个还没看到的商店也没有意义（提示词第 3 条）
+            return f"{where}：刷新要放在最后，刷新之后不能再有动作"
         match action.type:
             case "buy":
                 item = shop.get(action.entity_id)  # type: ignore[arg-type]

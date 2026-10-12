@@ -14,6 +14,7 @@ from lscs.llm.prompt import (
     build_user_message,
     card_pool_block,
     load_guide,
+    repair_text,
 )
 from lscs.pipeline import Pipeline
 from lscs.state.models import EventType, OpponentView
@@ -850,3 +851,20 @@ def test_choice_message_titles_and_memory():
     assert lines[0] == "选择：发现（2 选 1，来源：海礁探险者）"
     assert lines[-1] == "你之前的判断（第 8 回合）：方向 畸变；要找：泰瑞尔"
     assert "英雄技能：" not in "\n".join(lines)  # 只有技能升级选项才写英雄技能
+
+
+def test_repair_text_for_plans_keeps_the_thoughts_and_rechecks_each_step():
+    for lane in ("fast", "deep"):
+        text = repair_text(lane, "第 2 步：铸币不够")
+        assert text == (
+            "你刚才的方案不合法：第 2 步：铸币不够。\n"
+            "请按同样的规则改正后，重新输出完整的 json：analysis、summary、direction、look_for "
+            "保持不变，只改 actions；每一步都重新核对 gold_after 和 minions_after。"
+        )
+
+
+def test_repair_text_for_picks():
+    for lane in ("hero", "choice"):
+        assert repair_text(lane, "推荐的选项不在选项里") == (
+            "你刚才的回答不合法：推荐的选项不在选项里。请按同样的规则改正后，重新输出完整的 json。"
+        )

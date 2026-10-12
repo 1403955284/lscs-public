@@ -1010,3 +1010,68 @@ def test_concurrent_choice_updates_are_safe():
     for t in threads:
         t.join()
     assert errors == []
+
+
+# ---- AI 自我改正（AI 自我改正设计文档第 3.7 节） ----
+
+
+def test_fast_repair_shows_repairing_and_the_rules_step_meanwhile():
+    model = OverlayModel(name)
+    model.on_update(T3, started(3))
+    model.show_rules(T3, rules_advice())
+    model.ai_pending()
+    model.ai_repairing("fast", "第 1 步：铸币不够")
+    view = model.snapshot()
+    assert view.ai == (Line("改正中…", "muted"),)
+    assert view.next_step.text == "▶ 买 左数第 1 个 海盗"  # 还是按规则方案
+    model.show_ai(T3, ai_advice(), False)
+    assert model.snapshot().ai == (Line("① 买 蚀脑怪 3/4"),)
+
+
+def test_deep_repair_keeps_the_deep_pending_line():
+    model = OverlayModel(name)
+    model.on_update(T3, started(3))
+    model.ai_pending()
+    model.ai_pending("deep")
+    model.show_ai(T3, ai_advice(), False)
+    before = model.snapshot()
+    model.ai_repairing("deep", "第 2 步：刷新要放在最后，刷新之后不能再有动作")
+    after = model.snapshot()
+    assert after.ai == before.ai and after.ai[-1] == Line("深度分析中…", "muted")
+    assert after.version == before.version  # 什么都没变
+    model.show_ai(T3, llm_advice(BUY_20, lane="deep", **DEEP), False)
+    assert model.snapshot().ai_title == "AI（深度）"
+
+
+def test_choice_repair_still_waits_for_the_ai():
+    model = OverlayModel(choice_name)
+    state = offered_choice(model)
+    model.ai_pending("choice")
+    model.ai_repairing("choice", "推荐的选项不在选项里")
+    view = model.snapshot()
+    assert view.ai == (Line("改正中…", "muted"),)
+    assert view.next_step == NextStep("▶ 等 AI 选…", tone="muted")  # 不是"自己选一个"
+    model.show_choice(state, choice_advice())
+    assert step(model).text == "▶ 选 左数第 3 个 泰瑞尔"
+
+
+def test_hero_repair_shows_repairing_until_the_pick_arrives():
+    model = OverlayModel(name)
+    st = choosing(model)
+    model.ai_pending("hero")
+    model.ai_repairing("hero", "推荐的英雄不在备选里")
+    assert model.snapshot().ai == (Line("改正中…", "muted"),)
+    model.show_hero(st, hero_advice(st))
+    assert model.snapshot().ai[0] == Line("选 凯瑞尔·罗姆：0 费技能每回合白送属性")
+
+
+def test_choice_lane_notice_without_budget_lets_the_player_choose():
+    from lscs.llm.notices import NO_BUDGET_THIS_TIME
+
+    model = OverlayModel(choice_name)
+    offered_choice(model)
+    model.ai_pending("choice")
+    model.ai_text(NO_BUDGET_THIS_TIME, "choice")  # 调度器的分路提示（设计文档第 5.1 节）
+    view = model.snapshot()
+    assert view.ai == (Line("这次不再分析：本局 AI 预算已用完", "muted"),)
+    assert view.next_step == NextStep("▶ 自己选一个（AI 没有建议）", tone="muted")

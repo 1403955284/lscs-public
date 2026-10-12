@@ -40,6 +40,7 @@ def test_missing_file_gives_defaults(tmp_path):
     assert deep == (True, "low", 16000, 75)
     assert llm.hero_advice is True
     assert llm.choice_advice is True
+    assert llm.repair_invalid is True
 
 
 def test_hero_advice_can_be_switched_off(tmp_path):
@@ -51,11 +52,17 @@ def test_choice_advice_can_be_switched_off(tmp_path):
     assert cfg.llm.choice_advice is False
 
 
+def test_repair_invalid_can_be_switched_off(tmp_path):
+    cfg = load_config(write(tmp_path, "[llm]\nrepair_invalid = false\n"))
+    assert cfg.llm.repair_invalid is False
+
+
 def test_example_file_matches_defaults():
     assert load_config(EXAMPLE) == AppConfig()
     text = EXAMPLE.read_text(encoding="utf-8")
     assert "\nhero_advice = true " in text
     assert "\nchoice_advice = true " in text
+    assert "\nrepair_invalid = true " in text
 
 
 def test_values_are_read(tmp_path):

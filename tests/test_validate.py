@@ -67,12 +67,14 @@ def test_upgrade_rules():
     )
 
 
-def test_refresh_must_be_last_except_freeze():
+def test_refresh_must_be_last():
     assert validate_plan([buy(20), REFRESH], ctx_for(gold=4, shop=SHOP)) is None
-    assert validate_plan([REFRESH, FREEZE], ctx_for(gold=1)) is None
-    assert validate_plan([REFRESH, buy(20)], ctx_for(gold=9, shop=SHOP)) == (
-        "第 2 步：刷新之后只能冻结"
-    )
+    assert validate_plan([FREEZE], ctx_for(gold=1)) is None
+    last = "第 2 步：刷新要放在最后，刷新之后不能再有动作"
+    # 冻结一个还没看到的商店没有意义：刷新之后连冻结也不行（设计文档第 5.4 节）
+    assert validate_plan([REFRESH, FREEZE], ctx_for(gold=1)) == last
+    assert validate_plan([REFRESH, buy(20)], ctx_for(gold=9, shop=SHOP)) == last
+    assert validate_plan([REFRESH, REFRESH], ctx_for(gold=9)) == last
     assert validate_plan([REFRESH], ctx_for(gold=1, refresh_cost=None)) == "第 1 步：现在不能刷新"
 
 
@@ -189,7 +191,7 @@ def test_target_is_ignored_when_not_needed():
 
 def test_hero_power_order_and_count():
     ctx = ctx_for(gold=9, hero_power_state=power())
-    assert validate_plan([REFRESH, HP], ctx) == "第 2 步：刷新之后只能冻结"
+    assert validate_plan([REFRESH, HP], ctx) == "第 2 步：刷新要放在最后，刷新之后不能再有动作"
     assert validate_plan([HP, HP], ctx) == "第 2 步：一个方案只能用一次英雄技能"
     assert validate_plan([HP, FREEZE], ctx) is None
     assert validate_plan([FREEZE, HP], ctx) == "第 2 步：冻结之后不能再有动作"

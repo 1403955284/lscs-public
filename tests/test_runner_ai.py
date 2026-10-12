@@ -140,9 +140,32 @@ def test_fast_and_deep_advice_in_terminal(mini_lines):
         "          分析：血量健康，升本。",
         "          方向：纳迦",
         "  🧠 深度分析中…（约 20 秒）",
-        "  🧠 深度分析：操作不可用，只看思路",
+        "  🧠 深度分析的操作不合法（第 1 步：商店里没有 #999），正在让它改正…",
+        "  🧠 深度分析：操作不可用，只看思路",  # 改正的回答是空的：思路取第一次回答的
         "          分析：纳迦核心在高本。",
         "          要找：熔岩潜伏者",
+        "本局 AI 调用 6 次，输入 0.6 千、输出 0.1 千 token",
+    ]
+
+
+def test_repair_in_terminal(mini_lines):
+    missing = json.dumps({"actions": [{"type": "buy", "entity_id": 999, "reason": "不存在"}]})
+    agree_turn_1 = json.dumps(
+        {"actions": [{"type": "buy", "entity_id": 32, "reason": "嘲讽"}, {"type": "refresh"}]}
+    )
+    out = []
+    runner = make_runner([MINI_HERO, missing, agree_turn_1, missing, missing], out)
+    run(mini_lines, runner)
+    assert out[4:] == [
+        "  📋 规则：① 买 刷新畸体 1/4（商店里身材最好，有嘲讽）",
+        "          ② 刷新（剩 1 金，刷新找更好的牌）",
+        "  🤖 AI 分析中…",
+        "  🤖 AI 建议不合法（第 1 步：商店里没有 #999），正在让它改正…",
+        "  🤖 ✓ AI 同意规则建议（0.0 秒）",
+        "  📋 规则：① 升本 → 2 本（第 2 回合按节奏该升 2 本了）   方向：海盗",
+        "  🤖 AI 分析中…",
+        "  🤖 AI 建议不合法（第 1 步：商店里没有 #999），正在让它改正…",
+        "  🤖 AI 改正后仍不合法，已忽略",
         "本局 AI 调用 5 次，输入 0.5 千、输出 0.1 千 token",
     ]
 
@@ -218,6 +241,38 @@ def test_errors_are_shown_as_text():
     runner, out = runner_with_state(make_state())
     runner._show_result(AIResult(AIRequest(1, make_state(), None, 0.0), None, "AI 超时", 20.0))
     assert out == ["  🤖 AI 超时"]
+
+
+def test_errors_for_a_turn_that_moved_on_are_not_printed():
+    # 设计文档第 5.3 节：用户已经在看战斗（或对局结束、下一回合），这行没有意义
+    request = AIRequest(1, make_state(turn=3), None, 0.0)
+    timeout = AIResult(request, None, "AI 超时", 22.5)
+    for current in (
+        make_state(turn=3, phase=Phase.COMBAT, seq=2),
+        make_state(turn=3, phase=Phase.GAME_OVER, seq=2),
+        make_state(turn=4, seq=2),
+    ):
+        runner, out = runner_with_state(current)
+        runner._show_result(timeout)
+        assert out == [], current.phase
+    runner, out = runner_with_state(make_state(turn=3, seq=2))  # 同一回合的招募阶段
+    runner._show_result(timeout)
+    assert out == ["  🤖 AI 超时"]
+
+
+def test_deep_errors_are_printed_in_the_same_turns_combat_only():
+    deep = AIResult(AIRequest(2, make_state(turn=3), None, 0.0, "deep"), None, "AI 超时", 77.5)
+    runner, out = runner_with_state(make_state(turn=3, phase=Phase.COMBAT, seq=2))
+    runner._show_result(deep)
+    assert out == ["  🧠 深度分析超时"]
+    for current in (
+        make_state(turn=3, phase=Phase.GAME_OVER, seq=3),
+        make_state(turn=4, seq=3),
+        make_state(turn=4, phase=Phase.COMBAT, seq=3),
+    ):
+        runner, out = runner_with_state(current)
+        runner._show_result(deep)
+        assert out == [], current
 
 
 def test_deep_errors_do_not_look_like_fast_ones():
@@ -423,6 +478,17 @@ def test_hero_errors_are_shown_as_text():
     runner._show_result(hero_result(st, error="AI 超时"))
     runner._show_result(hero_result(st, error="AI 建议无效，已忽略"))
     assert out[1:] == ["  🤖 AI 超时", "  🤖 AI 建议无效，已忽略"]
+
+
+def test_hero_errors_after_the_choice_or_a_reroll_are_not_printed():
+    runner, out, st = hero_runner()
+    runner._state = hero_select_state(seq=2, chosen="BG21_HERO_000")  # 已经选了
+    runner._show_result(hero_result(st, error="AI 超时"))
+    runner._state = hero_select_state(((89, "BG21_HERO_000", 10, 1), (95, "X", 12, 2)), seq=3)
+    runner._show_result(hero_result(st, error="AI 超时"))  # 重随了
+    runner._state = make_state(turn=1, seq=4)  # 已经到了招募阶段
+    runner._show_result(hero_result(st, error="AI 超时"))
+    assert len(out) == 1  # 只有规则建议
 
 
 def test_hero_advice_from_the_scheduler_end_to_end():

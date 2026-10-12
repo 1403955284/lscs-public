@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Literal, NamedTuple, Protocol
 
@@ -25,6 +25,8 @@ class LLMResult:
 
 ErrorKind = Literal["auth", "timeout", "other"]
 Thinking = Literal["disabled", "low", "high"]
+# 接在系统提示和局面消息之后的一轮对话（AI 自我改正设计文档第 3.3 节）
+Turn = tuple[Literal["assistant", "user"], str]
 
 
 class LLMError(Exception):
@@ -43,8 +45,10 @@ class LLMProvider(Protocol):
         timeout: float,
         thinking: Thinking | None = None,
         max_tokens: int | None = None,
+        turns: Sequence[Turn] = (),
     ) -> LLMResult:
-        """thinking、max_tokens 不是 None 时覆盖配置（深度分析开思考、输出上限更大）。"""
+        """thinking、max_tokens 不是 None 时覆盖配置（深度分析开思考、输出上限更大）。
+        turns：接在 system、user 之后的对话轮次。改正时是（模型自己的回答, 改正要求）。"""
         ...
 
 
@@ -67,12 +71,15 @@ class OpenAICompatProvider:
         timeout: float,
         thinking: Thinking | None = None,
         max_tokens: int | None = None,
+        turns: Sequence[Turn] = (),
     ) -> dict:
         kwargs: dict = {
             "model": self._cfg.model,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
+                # 多轮对话不传回思考内容（reasoning_content）：DeepSeek 不需要，我们也没有保存
+                *({"role": role, "content": content} for role, content in turns),
             ],
             "response_format": {"type": "json_object"},
             "max_tokens": max_tokens if max_tokens is not None else self._cfg.max_output_tokens,
@@ -94,13 +101,14 @@ class OpenAICompatProvider:
         timeout: float,
         thinking: Thinking | None = None,
         max_tokens: int | None = None,
+        turns: Sequence[Turn] = (),
     ) -> LLMResult:
         import openai
 
         start = self._clock()
         try:
             response = self._client.chat.completions.create(
-                **self.request_kwargs(system, user, timeout, thinking, max_tokens)
+                **self.request_kwargs(system, user, timeout, thinking, max_tokens, turns)
             )
         except openai.AuthenticationError:
             raise LLMError("auth", "API Key 无效") from None
@@ -131,6 +139,7 @@ class FakeCall(NamedTuple):
     timeout: float
     thinking: Thinking | None
     max_tokens: int | None
+    turns: tuple[Turn, ...] = ()
 
 
 class FakeProvider:
@@ -148,8 +157,9 @@ class FakeProvider:
         timeout: float,
         thinking: Thinking | None = None,
         max_tokens: int | None = None,
+        turns: Sequence[Turn] = (),
     ) -> LLMResult:
-        self.calls.append(FakeCall(system, user, timeout, thinking, max_tokens))
+        self.calls.append(FakeCall(system, user, timeout, thinking, max_tokens, tuple(turns)))
         item = self._responses.pop(0) if self._responses else ""
         if isinstance(item, Exception):
             raise item
