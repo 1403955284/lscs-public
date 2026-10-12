@@ -161,3 +161,48 @@ def make_state(
         tribes_confidence=TribesConfidence.CONFIRMED if tribes else TribesConfidence.INFERRING,
         global_dbfs=tuple(global_dbfs),
     )
+
+
+# 用户录像里的四个备选英雄（实体编号、卡牌 ID、护甲、技能 dbfId），按位置排列
+HEROES = (
+    (89, "BG21_HERO_000", 10, 73941),
+    (90, "BG28_HERO_800", 18, 105432),
+    (91, "BG33_HERO_001", 19, 129164),
+    (92, "TB_BaconShop_HERO_91", 17, 64486),
+)
+
+
+def hero_select_state(heroes=HEROES, *, seq=1, chosen=None, global_dbfs=(), uncertain=False):
+    """选英雄阶段的局面。chosen 是已经选好的英雄卡牌 ID：这时手牌区没有英雄，hero_select 为 None。"""
+    from lscs.state.models import HeroOption, HeroSelect
+
+    state = make_state(
+        turn=0,
+        phase=Phase.HERO_SELECT,
+        seq=seq,
+        hero=chosen or "TB_BaconShop_HERO_PH",
+        hero_power=None,
+        upgrade_cost=None,
+        refresh_cost=None,
+        global_dbfs=global_dbfs,
+        main_action=False,
+    )
+    select = None
+    if chosen is None:
+        select = HeroSelect(
+            offered=tuple(
+                HeroOption(
+                    entity_id=e, card_id=c, position=i, armor=a, health=30, hero_power_dbf=dbf
+                )
+                for i, (e, c, a, dbf) in enumerate(heroes, start=1)
+            ),
+            reroll=True,
+        )
+    return state.model_copy(update={"hero_select": select, "uncertain": uncertain})
+
+
+def offered_event(state, changed=0):
+    from lscs.state.models import Event, EventType
+
+    count = len(state.hero_select.offered)
+    return Event(type=EventType.HEROES_OFFERED, turn=0, data={"count": count, "changed": changed})

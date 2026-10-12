@@ -250,6 +250,10 @@ def test_replay_with_broken_rules_file_fails(monkeypatch, tmp_path, capsys):
     assert "规则配置" in capsys.readouterr().out
 
 
+# mini 录像的选英雄阶段只有一个备选英雄（实体 14，米尔豪斯）
+MINI_HERO = '{"pick": 14, "reason": "只有一个可选"}'
+
+
 def _ai_cli_setup(monkeypatch, tmp_path, answers, key="sk-cli-0123456789abcd", extra=""):
     from helpers import FIXTURES
 
@@ -262,6 +266,7 @@ def _ai_cli_setup(monkeypatch, tmp_path, answers, key="sk-cli-0123456789abcd", e
     config.write_text(f'[llm]\napi_key = "{key}"\n{extra}', encoding="utf-8")
     monkeypatch.setattr(lscs.cli, "DEFAULT_CONFIG", config)
     monkeypatch.setattr(lscs.cli, "RECORDINGS_DIR", tmp_path / "recordings")
+    monkeypatch.setattr(lscs.cli, "DEFAULT_HEROES", tmp_path / "no-heroes.md")
     monkeypatch.setattr(
         lscs.cli, "_load_cards", lambda: CardDB.from_json_file(FIXTURES / "cards_mini.json")
     )
@@ -276,23 +281,27 @@ def test_replay_with_ai_calls_model_and_hides_key(monkeypatch, tmp_path, capsys)
     from helpers import MINI_LOG
 
     answer = json.dumps({"actions": [{"type": "buy", "entity_id": 31, "reason": "海盗"}]})
-    key = _ai_cli_setup(monkeypatch, tmp_path, [answer] * 4)
+    key = _ai_cli_setup(monkeypatch, tmp_path, [MINI_HERO] + [answer] * 4)
     assert main(["replay", str(MINI_LOG), "--ai"]) == 0
     out = capsys.readouterr().out
     assert "AI：deepseek-flash（Key sk-c…abcd，思考模式 disabled）" in out
     assert "深度分析：开启（思考 low，每回合开始时约 20 秒出结果）" in out
-    assert "建议改回 disabled" not in out
-    # 每个招募回合快速、深度各一次；耗时取决于机器，不断言
+    assert "建议改回 disabled" not in out and "选英雄建议" not in out  # 开启时不多打印一行
+    # 选英雄：规则马上出，AI 在"选择英雄"之前出；耗时取决于机器，不断言
+    hero = out.index("  🤖 AI（")
+    assert out.index("  📋 规则：护甲信息不全，等 AI 建议") < hero < out.index("选择英雄")
+    assert out[hero:].split("\n", 1)[0].endswith("：选 米尔豪斯·法力风暴 —— 只有一个可选")
+    # 每个招募回合快速、深度各一次
     assert out.count("：① 买 海盗无赖 3/1（海盗）") == 2
     assert "  🧠 深度分析中…（约 20 秒）" in out and "  🧠 深度分析（" in out
     assert "  🤖 AI 建议无效，已忽略" in out  # 第 2 回合 #31 已经在场上，同样的回答不合法
     assert "  🧠 深度分析失败：AI 建议无效，已忽略" in out
-    assert "本局 AI 调用 4 次" in out
+    assert "本局 AI 调用 5 次" in out
     assert key not in out
     record = next((tmp_path / "recordings").glob("llm-*.jsonl")).read_text(encoding="utf-8")
-    assert key not in record and record.count("\n") == 4
+    assert key not in record and record.count("\n") == 5
     lanes = [json.loads(line)["lane"] for line in record.splitlines()]
-    assert lanes == ["fast", "deep", "fast", "deep"]
+    assert lanes == ["hero", "fast", "deep", "fast", "deep"]
 
 
 def test_deep_thinking_high_waits_longer(monkeypatch, tmp_path, capsys):
@@ -311,11 +320,48 @@ def test_replay_with_deep_analysis_off(monkeypatch, tmp_path, capsys):
     from helpers import MINI_LOG
 
     answer = json.dumps({"actions": [{"type": "buy", "entity_id": 31, "reason": "海盗"}]})
-    _ai_cli_setup(monkeypatch, tmp_path, [answer] * 2, extra="deep_analysis = false\n")
+    _ai_cli_setup(
+        monkeypatch, tmp_path, [MINI_HERO] + [answer] * 2, extra="deep_analysis = false\n"
+    )
     assert main(["replay", str(MINI_LOG), "--ai"]) == 0
     out = capsys.readouterr().out
     assert "深度分析：关闭" in out and "🧠" not in out
+    assert "本局 AI 调用 3 次" in out  # 选英雄 1 次 + 两个招募回合各 1 次
+
+
+def test_replay_with_hero_advice_off(monkeypatch, tmp_path, capsys):
+    import json
+
+    from helpers import MINI_LOG
+
+    answer = json.dumps({"actions": [{"type": "buy", "entity_id": 31, "reason": "海盗"}]})
+    extra = "deep_analysis = false\nhero_advice = false\n"
+    _ai_cli_setup(monkeypatch, tmp_path, [answer] * 2, extra=extra)
+    assert main(["replay", str(MINI_LOG), "--ai"]) == 0
+    out = capsys.readouterr().out
+    assert "选英雄建议：关闭" in out
+    assert "  📋 规则：护甲信息不全，等 AI 建议" in out  # 规则建议照常
     assert "本局 AI 调用 2 次" in out
+    record = next((tmp_path / "recordings").glob("llm-*.jsonl")).read_text(encoding="utf-8")
+    assert [json.loads(line)["lane"] for line in record.splitlines()] == ["fast", "fast"]
+
+
+def test_replay_sends_heroes_md_to_the_hero_lane(monkeypatch, tmp_path, capsys):
+    from helpers import MINI_LOG
+
+    import lscs.cli
+    import lscs.llm.provider
+    from lscs.llm.provider import FakeProvider
+
+    _ai_cli_setup(monkeypatch, tmp_path, [], extra="deep_analysis = false\n")
+    fake = FakeProvider([MINI_HERO])
+    monkeypatch.setattr(lscs.llm.provider, "OpenAICompatProvider", lambda cfg: fake)
+    heroes = tmp_path / "heroes.md"
+    heroes.write_text("2026-10-20 英雄强度资料\n", encoding="utf-8")
+    monkeypatch.setattr(lscs.cli, "DEFAULT_HEROES", heroes)
+    assert main(["replay", str(MINI_LOG), "--ai"]) == 0
+    assert fake.calls[0].system.endswith("【本月英雄强度资料】\n2026-10-20 英雄强度资料")
+    assert "英雄强度资料" not in fake.calls[1].system  # 招募阶段的系统提示不变
 
 
 def test_replay_with_ai_and_broken_config_fails(monkeypatch, tmp_path, capsys):
@@ -393,7 +439,8 @@ def test_watch_accepts_no_ai_flag():
 
 
 def _catch_up(lines):
-    """模拟 watch 启动时从头读到 lines：第一次轮询读到全部，之后没有新行。"""
+    """模拟 watch 启动时从头读到 lines：第一次轮询读到全部，之后没有新行。
+    轮询间隔 0.2 秒（假时钟）：一共 5 次轮询，选英雄等的 0.5 秒会过去，刷新等的 1 秒不会。"""
     from helpers import FIXTURES
 
     from lscs.advisor.display import AdviceDisplay
@@ -410,9 +457,15 @@ def _catch_up(lines):
 
     cards = CardDB.from_json_file(FIXTURES / "cards_mini.json")
     jobs, out = [], []
+    now = [1000.0]
     provider = FakeProvider([])
     scheduler = LLMScheduler(
-        provider, LLMConfig(api_key="sk-x-123456789"), cards, guide="", run_async=jobs.append
+        provider,
+        LLMConfig(api_key="sk-x-123456789"),
+        cards,
+        guide="",
+        run_async=jobs.append,
+        clock=lambda: now[0],
     )
     runner = AdviceRunner(
         load_rules_config(DEFAULT_RULES),
@@ -429,7 +482,11 @@ def _catch_up(lines):
             return next(batches, [])
 
     pipeline = Pipeline(StateTracker(load_pool_config(DEFAULT_POOL)), runner.on_update)
-    watch(FakeTailer(), pipeline, interval=0, max_polls=3, sleep=lambda _: None, tick=runner.tick)
+
+    def sleep(seconds):
+        now[0] += seconds
+
+    watch(FakeTailer(), pipeline, interval=0.2, max_polls=5, sleep=sleep, tick=runner.tick)
     return jobs, provider, out
 
 
@@ -467,6 +524,30 @@ def test_watch_catch_up_mid_game_calls_once_for_the_current_turn():
         job()
     assert {c.thinking for c in provider.calls} == {"disabled", "low"}
     assert all(c.user.split("\n\n", 1)[1].startswith("第 7 回合") for c in provider.calls)
+
+
+@NEEDS_USER_LOG
+def test_watch_catch_up_during_hero_select_calls_the_hero_lane_once():
+    from helpers import TEST_POOL, USER_LOG
+
+    from lscs.pipeline import Pipeline
+    from lscs.replay import read_log_lines
+    from lscs.state.models import EventType
+    from lscs.state.tracker import StateTracker
+
+    lines = list(read_log_lines(USER_LOG))
+    offered = []
+
+    def on_update(_state, events):
+        offered.extend(e for e in events if e.type == EventType.HEROES_OFFERED)
+
+    pipeline = Pipeline(StateTracker(TEST_POOL), on_update)
+    cut = next(i for i, line in enumerate(lines) if pipeline.push(line) or offered)
+    jobs, provider, out = _catch_up(lines[: cut + 50])  # 选英雄时启动 watch（离选定还有 28 秒）
+    assert len(jobs) == 1
+    jobs[0]()
+    assert provider.calls[0].user.startswith("选英雄（4 选 1）")
+    assert out[0].startswith("  📋 规则：选 BG21_HERO_000（这几个英雄里它护甲最少")  # 凯瑞尔
 
 
 def test_watch_stops_when_asked():

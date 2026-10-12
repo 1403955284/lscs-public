@@ -10,7 +10,8 @@ api_key = ""                   # 你的 DeepSeek Key
 thinking = "disabled"          # 请保持 disabled；思考交给下面的深度分析
 timeout_seconds = 20
 max_output_tokens = 1500
-max_calls_per_game = 80        # 每局最多调用几次（快速和深度一起算）
+max_calls_per_game = 80        # 每局最多调用几次（快速、深度和选英雄一起算）
+hero_advice = true             # 选英雄时也让 AI 推荐一个（每局 1 次，重随时再 1 次）
 # 深度分析：每回合开始时和快速建议同时发出，开思考，约 20 秒（偶尔 1 分钟）出结果
 deep_analysis = true           # false 关闭深度分析（每局大约省 5 毛到 1 块钱）
 deep_thinking = "low"          # 思考强度：low 或 high（high 更慢）

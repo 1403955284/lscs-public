@@ -9,7 +9,8 @@ from typing import TYPE_CHECKING
 
 from lscs.advisor.context import build_context, hero_power_used
 from lscs.advisor.display import AdviceSink
-from lscs.advisor.models import Action, Advice, Lane, Plan
+from lscs.advisor.hero_rules import rule_hero_pick
+from lscs.advisor.models import Action, Advice, HeroAdvice, Lane, Plan
 from lscs.advisor.rules import rule_plans
 from lscs.advisor.rules_config import RulesConfig
 from lscs.advisor.validate import validate_plan
@@ -80,14 +81,19 @@ class AdviceRunner:
         self._state: GameState | None = None
         self._rules_error_turn: int | None = None  # 这个回合已经提示过规则出错
         self.last_rules: Advice | None = None
+        self.last_hero: HeroAdvice | None = None  # 最近一次选英雄的规则建议
 
     def on_update(self, state: GameState, events: list[Event]) -> None:
         self._state = state
         types = {e.type for e in events}
         if EventType.GAME_STARTED in types:
             self._rules_error_turn = None
+            self.last_hero = None
             if self._scheduler is not None:
                 self._scheduler.reset_game()
+        if state.phase == Phase.HERO_SELECT and EventType.HEROES_OFFERED in types:
+            # 只在出现一组新的备选英雄时提示（开局、重随）；之后的更新只交给调度器
+            self._advise_hero(state)
         if state.phase == Phase.RECRUIT and state.me is not None:
             # 回合开始时先发铸币（商店还是空的）、再摆商店，还可能先选饰品花掉铸币；
             # 这些都在 STEP 变成 MAIN_ACTION（招募开始）之前，不提示，也不通知调度器。
@@ -128,14 +134,26 @@ class AdviceRunner:
         if self._scheduler is not None:
             self._scheduler.observe(state, events, ctx)
 
-    def _rules_error(self, turn: int) -> None:
+    def _advise_hero(self, state: GameState) -> None:
+        select = state.hero_select
+        if select is None:
+            return
+        try:
+            advice = rule_hero_pick(select)
+        except Exception:
+            self._rules_error(state.turn, hero=True)  # AI 照常调用
+            return
+        self.last_hero = advice
+        self._display.show_hero(state, advice)
+
+    def _rules_error(self, turn: int, hero: bool = False) -> None:
         """在 except 里调用：每回合只提示一次、记一次完整堆栈，之后的只记调试日志。"""
         if self._rules_error_turn == turn:
             log.debug("计算规则建议时又出错", exc_info=True)
             return
         self._rules_error_turn = turn
         log.warning("计算规则建议时出错", exc_info=True)
-        self._display.rules_error()
+        self._display.rules_error(hero)
 
     def tick(self) -> None:
         """主循环每次轮询调用：取回 AI 的结果并显示。"""
@@ -158,6 +176,9 @@ class AdviceRunner:
 
     def _show_result(self, result: AIResult) -> None:
         lane = result.lane
+        if lane == "hero":
+            self._show_hero_result(result)
+            return
         if result.error is not None:
             self._display.ai_text(_error_text(result.error, lane), lane)
             return
@@ -207,8 +228,32 @@ class AdviceRunner:
         )
         self._display.show_ai(current, advice, agrees)
 
+    def _show_hero_result(self, result: AIResult) -> None:
+        """选英雄的 AI 结果：已经选完（或已经过了选英雄阶段）、重随过（备选变了）都丢弃，
+        只记日志——新的请求已经发出，面板上的"分析中…"是它的。"""
+        if result.error is not None:
+            self._display.ai_text(result.error, "hero")
+            return
+        current, hero = self._state, result.hero
+        select = current.hero_select if current is not None else None
+        if current is None or current.phase != Phase.HERO_SELECT or select is None:
+            log.info("选英雄的 AI 结果回来时已经选完英雄，丢弃")
+            return
+        if hero is None or select.signature() != result.request.signature:
+            log.info("选英雄的 AI 结果回来时备选英雄已经变了，丢弃")
+            return
+        advice = hero.model_copy(update={"elapsed": result.elapsed})
+        rules = self.last_hero
+        agrees = (
+            rules is not None
+            and rules.signature == advice.signature
+            and rules.pick is not None
+            and rules.pick == advice.pick
+        )
+        self._display.show_hero(current, advice, agrees)
+
 
 def _error_text(error: str, lane: Lane) -> str:
-    if lane == "fast":
+    if lane != "deep":
         return error
     return "深度分析超时" if error == TIMEOUT else f"深度分析失败：{error}"

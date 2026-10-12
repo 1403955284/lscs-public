@@ -19,7 +19,7 @@ from lscs.overlay.model import OverlayModel, OverlayView, condense
 log = logging.getLogger(__name__)
 
 RENDER_MS = 150  # 读取数据模型的间隔
-CONDENSE_LEVELS = 3  # 0 全部；1 去掉"方向"；2 再去掉"要找"和附注、"目标"只留一行
+CONDENSE_LEVELS = 3  # 0 全部；1 去掉"方向"；2 再去掉"要找"、附注和点评，"目标"只留一行
 PLACE_MS = 500  # 重新定位、判断显示/隐藏的间隔
 BG = "#1e1e24"
 TITLE = "#d4d4dc"

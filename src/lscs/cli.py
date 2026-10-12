@@ -35,6 +35,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_POOL = PROJECT_ROOT / "strategy" / "current" / "pool.toml"
 DEFAULT_RULES = PROJECT_ROOT / "strategy" / "current" / "rules.toml"
 DEFAULT_GUIDE = PROJECT_ROOT / "strategy" / "current" / "guide.md"
+DEFAULT_HEROES = PROJECT_ROOT / "strategy" / "current" / "heroes.md"  # 可选：当月英雄强度资料
 RECORDINGS_DIR = PROJECT_ROOT / "recordings"
 POLL_INTERVAL = 0.2  # watch 默认的轮询间隔（秒）
 OVERLAY_REPLAY_SPEED = 20.0  # replay --overlay 没填 --speed 时的倍速（不等待的话面板一闪而过）
@@ -184,12 +185,16 @@ def _build_scheduler(cards, sync: bool):
             "思考交给深度分析就好，thinking 建议改回 disabled。",
             flush=True,
         )
-    extra = {"debounce": 0.0, "run_async": lambda job: job()} if sync else {}
+    if not llm.hero_advice:
+        print("选英雄建议：关闭", flush=True)  # 开启时不打印，少一行
+    heroes = load_guide(DEFAULT_HEROES) if DEFAULT_HEROES.exists() else None
+    extra = {"debounce": 0.0, "hero_debounce": 0.0, "run_async": lambda job: job()} if sync else {}
     return LLMScheduler(
         OpenAICompatProvider(llm),
         llm,
         cards,
         load_guide(DEFAULT_GUIDE),
+        heroes_note=heroes,
         recorder=Recorder(RECORDINGS_DIR),
         **extra,
     )

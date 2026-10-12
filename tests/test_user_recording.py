@@ -103,3 +103,37 @@ def test_hero_power_usable_at_each_recruit_start_then_used(updates):
         assert later, turn
         assert later[-1].option == "unusable"
         assert later[-1].unusable_reason == "REQ_NOT_EXHAUSTED_HERO_POWER"
+
+
+def test_heroes_offered_once_before_the_choice(updates):
+    order = [e.type for _, events in updates for e in events]
+    assert order.count(EventType.HEROES_OFFERED) == 1
+    offered_at = order.index(EventType.HEROES_OFFERED)
+    assert order.index(EventType.GAME_STARTED) < offered_at < order.index(EventType.HERO_CHOSEN)
+    state, event = next(
+        (s, e) for s, events in updates for e in events if e.type == EventType.HEROES_OFFERED
+    )
+    assert event.data == {"count": 4, "changed": 0}
+    select = state.hero_select
+    # 按 ZONE_POSITION（游戏里从左到右）排序：创建后洗过一次牌，92 排到了第一个
+    assert [(h.entity_id, h.card_id, h.armor) for h in select.offered] == [
+        (92, "TB_BaconShop_HERO_91", 17),
+        (89, "BG21_HERO_000", 10),
+        (90, "BG28_HERO_800", 18),
+        (91, "BG33_HERO_001", 19),
+    ]
+    assert [h.position for h in select.offered] == [1, 2, 3, 4]
+    assert [h.hero_power_dbf for h in select.offered] == [64486, 73941, 105432, 129164]
+    assert {h.entity_id for h in select.offered if h.locked} == {91, 92}
+    assert {h.health for h in select.offered} == {30}
+    assert select.reroll is True
+
+
+def test_hero_select_cleared_once_chosen(updates):
+    chosen = next(
+        i
+        for i, (_, events) in enumerate(updates)
+        if any(e.type == EventType.HERO_CHOSEN for e in events)
+    )
+    assert all(state.hero_select is None for state, _ in updates[chosen:])
+    assert recruit(updates, 1).hero_select is None

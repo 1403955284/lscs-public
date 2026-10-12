@@ -34,3 +34,8 @@ def tribe_zh(race: str) -> str:
 
 def keyword_zh(keyword: str) -> str:
     return KEYWORD_ZH.get(keyword, keyword)
+
+
+def armor_zh(armor: int) -> str:
+    """备选英雄的护甲；日志里没有 ARMOR 标签（读成 0）时写"未知"。"""
+    return f"护甲 {armor}" if armor > 0 else "护甲 未知"

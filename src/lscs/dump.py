@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from lscs.advisor.names import armor_zh
 from lscs.state.models import Event, EventType, GameState, Minion, TribesConfidence
 
 Namer = Callable[[str], str]
 KEY_EVENTS = (
     EventType.GAME_STARTED,
+    EventType.HEROES_OFFERED,
     EventType.HERO_CHOSEN,
     EventType.RECRUIT_STARTED,
     EventType.COMBAT_STARTED,
@@ -42,6 +44,12 @@ def describe(
         match event.type:
             case EventType.GAME_STARTED:
                 lines.append(f"{prefix} 对局开始")
+            case EventType.HEROES_OFFERED if state.hero_select is not None:
+                heroes = "、".join(
+                    f"{name(h.card_id)}（{armor_zh(h.armor)}）" for h in state.hero_select.offered
+                )
+                again = "重新随机：" if event.data.get("changed") else ""
+                lines.append(f"{prefix} {again}备选英雄 {heroes}")
             case EventType.HERO_CHOSEN:
                 lines.append(f"{prefix} 选择英雄 {name(str(event.data['hero']))}")
             case EventType.RECRUIT_STARTED if me is not None:

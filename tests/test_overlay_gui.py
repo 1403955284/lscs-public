@@ -85,6 +85,67 @@ def test_overlay_window_renders_states_and_closes():
     assert all(h <= window._layout.max_height for _, (_w, h) in snapshots)
 
 
+def test_overlay_window_renders_hero_select():
+    tk = pytest.importorskip("tkinter")
+    from factory import hero_select_state, offered_event
+
+    from lscs.advisor.models import HeroAdvice, HeroComment
+    from lscs.overlay.window import OverlayWindow
+
+    try:
+        window = OverlayWindow(OverlayConfig(position="right", opacity=0.9))
+    except tk.TclError as exc:
+        pytest.skip(f"没有图形界面：{exc}")
+    names = {
+        "BG21_HERO_000": "凯瑞尔·罗姆",
+        "BG28_HERO_800": "泰瑟兰·血望者",
+        "BG33_HERO_001": "洛，在世传奇",
+        "TB_BaconShop_HERO_91": "了不起的杰弗里斯",
+    }
+    model = OverlayModel(lambda c: names.get(c, c))
+    state = hero_select_state()
+    signature = state.hero_select.signature()
+    rules = HeroAdvice(source="rules", signature=signature, pick=89, reason="护甲最少")
+    comments = ((90, "要靠对子才强，前期慢"), (91, "技能复杂，新手难发挥"), (92, "发现随机"))
+    ai = HeroAdvice(
+        source="llm",
+        signature=signature,
+        pick=89,
+        reason="0 费技能每回合白送属性，新手也能稳定用",
+        comments=tuple(HeroComment(entity_id=e, text=t) for e, t in comments),
+    )
+    steps = [
+        lambda: model.on_update(state, [offered_event(state)]),
+        lambda: model.show_hero(state, rules),
+        lambda: model.ai_pending("hero"),
+        lambda: model.show_hero(state, ai, True),
+        lambda: model.on_update(hero_select_state(seq=2, chosen="BG21_HERO_000"), []),
+    ]
+    snapshots = []
+    polls = 0
+
+    def keep_running():
+        nonlocal polls
+        polls += 1
+        if polls % 3:
+            return True
+        snapshots.append((window.texts(), window.size))
+        if not steps:
+            return False
+        steps.pop(0)()
+        return True
+
+    window.run(model, keep_running)
+    texts = [t for shown, _ in snapshots for t in shown]
+    assert "选英雄 · 护甲越少越强" in texts
+    assert "★ 凯瑞尔·罗姆  护甲 10" in texts and "洛，在世传奇  护甲 19" in texts
+    assert "分析中…" in texts
+    assert any(t.startswith("✓ 也选 凯瑞尔·罗姆：") for t in texts)
+    assert "泰瑟兰·血望者：要靠对子才强，前期慢" in texts
+    assert snapshots[-1][0] == ["已选 凯瑞尔·罗姆 · 等待招募阶段"]
+    assert all(h <= window._layout.max_height for _, (_w, h) in snapshots)
+
+
 def test_overlay_window_condenses_when_too_tall():
     tk = pytest.importorskip("tkinter")
     from lscs.overlay.window import OverlayWindow

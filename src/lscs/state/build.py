@@ -9,6 +9,8 @@
 - 排行榜上的对手英雄由 Bob 控制，PLAYER_ID 是对手的玩家 ID
 - 英雄技能能不能用看本回合最近一组选项：error=NONE 能用，带错误码不能用，
   被动技能从不出现在选项里；选项在招募开始（STEP 变成 MAIN_ACTION）之后才到
+- 选英雄阶段（TURN=0）的备选英雄是我方手牌区里 CARDTYPE=HERO 的实体；选中后离开手牌区。
+  其他玩家选好的英雄在 SETASIDE 区、由 Bob 控制，不会混进来
 """
 
 from __future__ import annotations
@@ -23,7 +25,9 @@ from lscs.state.models import (
     NO_TARGET,
     GameState,
     HandCard,
+    HeroOption,
     HeroPower,
+    HeroSelect,
     Minion,
     OpponentView,
     Phase,
@@ -255,6 +259,30 @@ def global_dbfs(store: EntityStore) -> tuple[int, ...]:
     return tuple(value for _, value in sorted(found))
 
 
+def hero_select(store: EntityStore) -> HeroSelect | None:
+    """选英雄阶段我方手牌区里的备选英雄，按位置排序；不在选英雄阶段或手牌区没有英雄时为 None。"""
+    player_id = me_player_id(store)
+    if player_id is None or phase_of(store) != Phase.HERO_SELECT:
+        return None
+    ids = sorted_zone(store, player_id, Zone.HAND, (CardType.HERO,))
+    if not ids:
+        return None
+    offered = tuple(
+        HeroOption(
+            entity_id=e,
+            card_id=store.card_id(e) or "",
+            position=store.tag(e, GameTag.ZONE_POSITION, 0) or 0,
+            armor=store.tag(e, GameTag.ARMOR, 0) or 0,
+            health=store.tag(e, GameTag.HEALTH, 0) or 0,
+            hero_power_dbf=store.tag(e, GameTag.HERO_POWER) or None,
+            locked=bool(store.tag(e, GameTag.BACON_LOCKED_MULLIGAN_HERO, 0)),
+        )
+        for e in ids
+    )
+    reroll = store.tag(store.game_entity_id, GameTag.BACON_MULLIGAN_HERO_REROLL_ACTIVE, 0)
+    return HeroSelect(offered=offered, reroll=bool(reroll))
+
+
 def player_view(store: EntityStore) -> PlayerView | None:
     player_id = me_player_id(store)
     entity = store.player_entity(player_id)
@@ -373,4 +401,5 @@ def build_state(
         uncertain=uncertain,
         final_place=final_place,
         global_dbfs=global_dbfs(store),
+        hero_select=hero_select(store) if phase == Phase.HERO_SELECT else None,
     )

@@ -23,6 +23,8 @@ class TribesConfidence(StrEnum):
 
 class EventType(StrEnum):
     GAME_STARTED = "GAME_STARTED"
+    # 选英雄阶段出现了一组新的备选英雄；data：count 个数，changed 本局之前已经有过一组（重随）
+    HEROES_OFFERED = "HEROES_OFFERED"
     HERO_CHOSEN = "HERO_CHOSEN"
     RECRUIT_STARTED = "RECRUIT_STARTED"
     SHOP_CHANGED = "SHOP_CHANGED"
@@ -127,6 +129,28 @@ class OpponentView(_Frozen):
     last_seen_turn: int | None = None
 
 
+class HeroOption(_Frozen):
+    """选英雄阶段的一个备选英雄（我方手牌区里 CARDTYPE=HERO 的实体）。"""
+
+    entity_id: int
+    card_id: str
+    position: int  # ZONE_POSITION：游戏里从左到右
+    armor: int  # ARMOR 标签；没有就是 0（2022 年的日志大多没有）
+    health: int  # HEALTH
+    hero_power_dbf: int | None  # HERO_POWER 标签：英雄技能卡的 dbfId
+    locked: bool = False  # BACON_LOCKED_MULLIGAN_HERO
+
+
+class HeroSelect(_Frozen):
+    offered: tuple[HeroOption, ...]  # 按位置排序，开局一般是 4 个
+    reroll: bool = False  # 游戏实体的 BACON_MULLIGAN_HERO_REROLL_ACTIVE：本局可以重新随机英雄
+
+    def signature(self) -> tuple[tuple[int, str], ...]:
+        """(实体编号, 卡牌 ID)，按实体编号排序：重随后不管换的是实体还是卡牌 ID 都会变，
+        只是位置变了（开局洗牌）则不变。"""
+        return tuple(sorted((h.entity_id, h.card_id) for h in self.offered))
+
+
 class GameState(_Frozen):
     seq: int = 0
     phase: Phase = Phase.WAITING
@@ -143,6 +167,8 @@ class GameState(_Frozen):
     uncertain: bool = False
     final_place: int | None = None
     global_dbfs: tuple[int, ...] = ()  # 本局全局机制（BACON_GLOBAL_*_DBID）的卡牌 dbfId
+    # 只在选英雄阶段、我方手牌区里有备选英雄时不为 None；选完（英雄离开手牌区）就是 None
+    hero_select: HeroSelect | None = None
 
 
 class Event(_Frozen):

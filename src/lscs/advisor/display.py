@@ -6,7 +6,7 @@ import logging
 from collections.abc import Callable
 from typing import Protocol
 
-from lscs.advisor.models import Action, Advice, Expired, Lane, Plan
+from lscs.advisor.models import Action, Advice, Expired, HeroAdvice, Lane, Plan
 from lscs.state.models import GameState
 
 log = logging.getLogger(__name__)
@@ -15,7 +15,7 @@ Namer = Callable[[str], str]
 Output = Callable[[str], None]
 CIRCLED = "①②③④⑤⑥⑦⑧⑨"
 INDENT = "          "  # 让多步方案的后续行与第一步对齐
-ICONS: dict[Lane, str] = {"fast": "🤖 ", "deep": "🧠 "}
+ICONS: dict[Lane, str] = {"fast": "🤖 ", "deep": "🧠 ", "hero": "🤖 "}
 EXPIRED_LABELS: dict[Expired, str] = {
     "refreshed": "操作已过期（商店刷新了），只看思路",
     "invalid": "操作不可用，只看思路",
@@ -110,14 +110,33 @@ def thought_lines(plan: Plan, summary: bool = True, extra: tuple[str, ...] = ())
     return lines
 
 
+def hero_name(state: GameState, entity_id: int | None, name: Namer) -> str:
+    """备选英雄的名字；不在当前备选里时用编号。"""
+    select = state.hero_select
+    offered = select.offered if select is not None else ()
+    hero = next((h for h in offered if h.entity_id == entity_id), None)
+    return name(hero.card_id) if hero is not None else f"#{entity_id}"
+
+
+def hero_comment_lines(state: GameState, advice: HeroAdvice, name: Namer) -> list[str]:
+    """AI 对每个英雄的点评，按备选顺序，跳过没有点评的（推荐的那个有点评也列出）。"""
+    comments = {c.entity_id: c.text for c in advice.comments if c.text}
+    select = state.hero_select
+    offered = select.offered if select is not None else ()
+    return [
+        f"{name(h.card_id)}：{comments[h.entity_id]}" for h in offered if h.entity_id in comments
+    ]
+
+
 class AdviceSink(Protocol):
     """AdviceRunner 输出建议的对象：终端（AdviceDisplay）、悬浮面板或 DisplayGroup。"""
 
     def show_rules(self, state: GameState, advice: Advice) -> None: ...
-    def rules_error(self) -> None: ...
+    def rules_error(self, hero: bool = False) -> None: ...
     def ai_pending(self, lane: Lane = "fast") -> None: ...
     def ai_text(self, text: str, lane: Lane = "fast") -> None: ...
     def show_ai(self, state: GameState, advice: Advice, agrees: bool) -> None: ...
+    def show_hero(self, state: GameState, advice: HeroAdvice, agrees: bool = False) -> None: ...
     def ai_summary(self, calls: int, input_tokens: int, output_tokens: int) -> None: ...
 
 
@@ -145,8 +164,9 @@ class AdviceDisplay:
             lines.append("⚠ 状态可能不准")
         self._block("📋 规则：", lines)
 
-    def rules_error(self) -> None:
-        self._out("  📋 本回合规则建议出错")
+    def rules_error(self, hero: bool = False) -> None:
+        """hero：选英雄的规则建议出错。"""
+        self._out("  📋 选英雄规则建议出错" if hero else "  📋 本回合规则建议出错")
 
     def ai_pending(self, lane: Lane = "fast") -> None:
         self._out(("  🧠 " + self._deep_pending) if lane == "deep" else "  🤖 AI 分析中…")
@@ -176,6 +196,21 @@ class AdviceDisplay:
         label = f"深度分析（{seconds}）：" if deep else f"AI（{seconds}）："
         self._block(icon + label, lines)
 
+    def show_hero(self, state: GameState, advice: HeroAdvice, agrees: bool = False) -> None:
+        """选英雄建议。规则：一行；AI：推荐和理由一行，下面每个英雄的点评各一行。
+        agrees：AI 和规则推荐的是同一个英雄。"""
+        pick = hero_name(state, advice.pick, self._name)
+        if advice.source == "rules":
+            text = f"选 {pick}（{advice.reason}）" if advice.pick is not None else advice.reason
+            self._out(f"  📋 规则：{text}")
+            return
+        seconds = "?" if advice.elapsed is None else f"{advice.elapsed:.1f} 秒"
+        if agrees:
+            first = f"✓ AI 也选 {pick}（{seconds}）：{advice.reason}"
+        else:
+            first = f"AI（{seconds}）：选 {pick} —— {advice.reason}"
+        self._block("🤖 ", [first, *hero_comment_lines(state, advice, self._name)])
+
     def ai_summary(self, calls: int, input_tokens: int, output_tokens: int) -> None:
         self._out(
             f"本局 AI 调用 {calls} 次，输入 {input_tokens / 1000:.1f} 千、"
@@ -199,8 +234,8 @@ class DisplayGroup:
     def show_rules(self, state: GameState, advice: Advice) -> None:
         self._each("show_rules", state, advice)
 
-    def rules_error(self) -> None:
-        self._each("rules_error")
+    def rules_error(self, hero: bool = False) -> None:
+        self._each("rules_error", hero)
 
     def ai_pending(self, lane: Lane = "fast") -> None:
         self._each("ai_pending", lane)
@@ -210,6 +245,9 @@ class DisplayGroup:
 
     def show_ai(self, state: GameState, advice: Advice, agrees: bool) -> None:
         self._each("show_ai", state, advice, agrees)
+
+    def show_hero(self, state: GameState, advice: HeroAdvice, agrees: bool = False) -> None:
+        self._each("show_hero", state, advice, agrees)
 
     def ai_summary(self, calls: int, input_tokens: int, output_tokens: int) -> None:
         self._each("ai_summary", calls, input_tokens, output_tokens)

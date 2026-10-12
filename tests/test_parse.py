@@ -2,8 +2,8 @@ import json
 
 import pytest
 
-from lscs.advisor.models import Action
-from lscs.llm.parse import EmptyResponse, ParseError, parse_plan
+from lscs.advisor.models import Action, HeroComment
+from lscs.llm.parse import EmptyResponse, ParseError, parse_hero_pick, parse_plan
 
 
 def test_valid_answer():
@@ -113,3 +113,98 @@ def test_look_for_is_limited():
     assert len(plan.look_for) == 6  # 最多 6 个
     assert plan.look_for[0] == "很" * 19 + "…"  # 每个最长 20 字
     assert plan.look_for[1:] == tuple(names[:5])
+
+
+# ---- 选英雄 ----
+
+OFFERED = (92, 89, 90, 91)
+SIGNATURE = ((89, "BG21_HERO_000"), (90, "BG28_HERO_800"), (91, "BG33_HERO_001"), (92, "X"))
+
+
+def hero_answer(**fields):
+    return json.dumps({"pick": 89, "reason": "0 费技能白送属性", **fields}, ensure_ascii=False)
+
+
+def test_hero_pick_valid():
+    advice = parse_hero_pick(
+        hero_answer(
+            reason=" 0 费技能\n每回合白送属性 ",
+            heroes=[
+                {"entity_id": 90, "comment": " 要靠对子才强 "},
+                {"entity_id": "#91", "comment": "技能复杂"},
+            ],
+            confidence=0.7,
+        ),
+        OFFERED,
+        signature=SIGNATURE,
+    )
+    assert (advice.source, advice.pick, advice.signature) == ("llm", 89, SIGNATURE)
+    assert advice.reason == "0 费技能 每回合白送属性"  # 合成一行
+    assert advice.comments == (
+        HeroComment(entity_id=90, text="要靠对子才强"),
+        HeroComment(entity_id=91, text="技能复杂"),
+    )
+    assert (advice.confidence, advice.elapsed) == (0.7, None)
+
+
+def test_hero_pick_accepts_hash_numbers():
+    assert parse_hero_pick(hero_answer(pick="#92"), OFFERED).pick == 92
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        ("不是json", "不是合法的 JSON"),
+        ("[89]", "不是 JSON 对象"),
+        ('{"reason": "好"}', "缺少 pick（推荐的英雄编号）"),
+        ('{"pick": "凯瑞尔"}', "缺少 pick（推荐的英雄编号）"),
+        ('{"pick": true}', "缺少 pick（推荐的英雄编号）"),
+        ('{"pick": 93}', "推荐的英雄不在备选里"),
+    ],
+)
+def test_invalid_hero_picks(text, message):
+    with pytest.raises(ParseError) as exc:
+        parse_hero_pick(text, OFFERED)
+    assert str(exc.value) == message
+    assert not isinstance(exc.value, EmptyResponse)
+
+
+def test_empty_hero_answer():
+    with pytest.raises(EmptyResponse):
+        parse_hero_pick(" ", OFFERED)
+
+
+def test_hero_comments_skip_bad_items():
+    heroes = [
+        "不是对象",
+        {"comment": "没有编号"},
+        {"entity_id": 99, "comment": "不在备选里"},
+        {"entity_id": 90, "comment": ""},
+        {"entity_id": 90, "comment": 3},
+        {"entity_id": 91, "comment": "第一条"},
+        {"entity_id": 91, "comment": "重复的"},
+        {"entity_id": 89, "comment": "推荐的也可以"},
+    ]
+    advice = parse_hero_pick(hero_answer(heroes=heroes), OFFERED)
+    assert [(c.entity_id, c.text) for c in advice.comments] == [
+        (91, "第一条"),
+        (89, "推荐的也可以"),
+    ]
+    assert parse_hero_pick(hero_answer(heroes={"90": "x"}), OFFERED).comments == ()
+
+
+def test_hero_reason_and_comments_are_cut():
+    advice = parse_hero_pick(
+        hero_answer(reason="理" * 61, heroes=[{"entity_id": 90, "comment": "评" * 21}]), OFFERED
+    )
+    assert advice.reason == "理" * 59 + "…"  # 最多 60 字
+    assert advice.comments[0].text == "评" * 19 + "…"  # 最多 20 字
+    fits = parse_hero_pick(hero_answer(reason="理" * 60), OFFERED)
+    assert fits.reason == "理" * 60
+
+
+def test_hero_reason_missing():
+    for reason in ("", None, 3):
+        advice = parse_hero_pick(json.dumps({"pick": 89, "reason": reason}), OFFERED)
+        assert advice.reason == "（AI 没有给理由）"
+    assert parse_hero_pick('{"pick": 89}', OFFERED).confidence is None

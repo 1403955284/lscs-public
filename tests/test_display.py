@@ -1,7 +1,8 @@
 from factory import hand_spell, make_state, minion, power, shop_minion, shop_spell
 
-from lscs.advisor.display import AdviceDisplay, describe_action, format_plan
-from lscs.advisor.models import Action, Advice, Plan
+from lscs.advisor.display import AdviceDisplay, DisplayGroup, describe_action, format_plan
+from lscs.advisor.models import Action, Advice, HeroAdvice, HeroComment, Plan
+from lscs.state.models import HeroOption, HeroSelect, Phase
 
 NAMES = {"A": "小鬼", "B": "海盗", "S": "香蕉", "BG21_HERO_000p": "定罪", "AIM": "瞄准"}
 
@@ -104,6 +105,7 @@ def test_display_group_forwards_every_method_and_isolates_errors(caplog):
     advice = Advice(state_seq=1, turn=3, plan=Plan(source="rules"))
     group.show_rules(STATE, advice)
     group.rules_error()
+    group.rules_error(True)
     group.ai_pending()
     group.ai_pending("deep")
     group.ai_text("AI 超时")
@@ -112,7 +114,8 @@ def test_display_group_forwards_every_method_and_isolates_errors(caplog):
     group.ai_summary(2, 300, 40)
     expected = [
         ("show_rules", (STATE, advice)),
-        ("rules_error", ()),
+        ("rules_error", (False,)),
+        ("rules_error", (True,)),
         ("ai_pending", ("fast",)),
         ("ai_pending", ("deep",)),
         ("ai_text", ("AI 超时", "fast")),
@@ -232,3 +235,99 @@ def test_deep_wait_hint_follows_the_thinking_setting():
     out = []
     AdviceDisplay(name, out.append, deep_thinking="high").ai_pending("deep")
     assert out == ["  🧠 深度分析中…（约 40 秒）"]
+
+
+HERO_NAMES = {
+    "H1": "凯瑞尔·罗姆",
+    "H2": "泰瑟兰·血望者",
+    "H3": "洛，在世传奇",
+    "H4": "了不起的杰弗里斯",
+}
+HEROES = HeroSelect(
+    offered=tuple(
+        HeroOption(
+            entity_id=88 + i,
+            card_id=f"H{i}",
+            position=i,
+            armor=armor,
+            health=30,
+            hero_power_dbf=None,
+        )
+        for i, armor in enumerate((10, 18, 19, 17), start=1)
+    )
+)
+HERO_STATE = make_state(turn=0, phase=Phase.HERO_SELECT, hero="TB_BaconShop_HERO_PH").model_copy(
+    update={"hero_select": HEROES}
+)
+
+
+def hero_name(card_id):
+    return HERO_NAMES.get(card_id, card_id)
+
+
+def hero_advice(source="llm", pick=89, reason="0 费技能每回合白送属性", comments=(), elapsed=2.34):
+    return HeroAdvice(
+        source=source,
+        signature=HEROES.signature(),
+        pick=pick,
+        reason=reason,
+        comments=tuple(HeroComment(entity_id=e, text=t) for e, t in comments),
+        elapsed=elapsed,
+    )
+
+
+def test_show_hero_rules():
+    out = []
+    display = AdviceDisplay(hero_name, out.append)
+    display.show_hero(HERO_STATE, hero_advice("rules", reason="护甲最少", elapsed=None))
+    display.show_hero(HERO_STATE, hero_advice("rules", None, "护甲信息不全，等 AI 建议"))
+    assert out == ["  📋 规则：选 凯瑞尔·罗姆（护甲最少）", "  📋 规则：护甲信息不全，等 AI 建议"]
+
+
+def test_show_hero_ai_with_comments_in_offered_order():
+    out = []
+    comments = (
+        (92, "发现随机，看运气"),
+        (90, "要靠对子才强，前期慢"),
+        (91, ""),
+        (99, "不在备选里"),
+    )
+    AdviceDisplay(hero_name, out.append).show_hero(HERO_STATE, hero_advice(comments=comments))
+    assert out == [
+        "  🤖 AI（2.3 秒）：选 凯瑞尔·罗姆 —— 0 费技能每回合白送属性",
+        "          泰瑟兰·血望者：要靠对子才强，前期慢",
+        "          了不起的杰弗里斯：发现随机，看运气",
+    ]
+
+
+def test_show_hero_ai_agreeing_with_rules():
+    out = []
+    advice = hero_advice(comments=((89, "稳"),))
+    AdviceDisplay(hero_name, out.append).show_hero(HERO_STATE, advice, agrees=True)
+    assert out == [
+        "  🤖 ✓ AI 也选 凯瑞尔·罗姆（2.3 秒）：0 费技能每回合白送属性",
+        "          凯瑞尔·罗姆：稳",  # 推荐的那个有点评也列出
+    ]
+
+
+def test_show_hero_with_an_unknown_entity_uses_its_number():
+    out = []
+    AdviceDisplay(hero_name, out.append).show_hero(HERO_STATE, hero_advice(pick=7, elapsed=None))
+    assert out == ["  🤖 AI（?）：选 #7 —— 0 费技能每回合白送属性"]
+
+
+def test_display_group_forwards_show_hero():
+    first, second = [], []
+    group = DisplayGroup(
+        AdviceDisplay(hero_name, first.append), AdviceDisplay(hero_name, second.append)
+    )
+    group.show_hero(HERO_STATE, hero_advice("rules", reason="护甲最少"))
+    assert first == second == ["  📋 规则：选 凯瑞尔·罗姆（护甲最少）"]
+
+
+def test_rules_error_at_hero_select_says_so():
+    out = []
+    display = AdviceDisplay(name, out.append)
+    display.rules_error()
+    display.rules_error(hero=True)
+    assert out == ["  📋 本回合规则建议出错", "  📋 选英雄规则建议出错"]

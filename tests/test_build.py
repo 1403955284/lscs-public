@@ -37,6 +37,15 @@ def test_hero_select_phase(mini_lines):
     assert state.turn == 0
     assert state.me.hand == ()  # 备选英雄不算手牌
     assert set(state.opponents) == {3, 4}
+    assert [h.entity_id for h in state.hero_select.offered] == [14]  # 而是在 hero_select 里
+
+
+def test_hero_select_only_while_choosing(mini_lines):
+    chosen = build(store_until(mini_lines, "Entity=14 tag=ZONE value=PLAY"))
+    assert chosen.phase == Phase.HERO_SELECT
+    assert chosen.hero_select is None  # 选中的英雄离开了手牌区
+    recruit = build(store_until(mini_lines, "tag=TURN value=1"))
+    assert recruit.hero_select is None
 
 
 def test_first_recruit_turn(mini_lines):

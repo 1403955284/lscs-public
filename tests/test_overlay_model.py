@@ -1,13 +1,23 @@
 import threading
 
-from factory import make_state, minion, power, shop_minion
+from factory import hero_select_state, make_state, minion, offered_event, power, shop_minion
 
-from lscs.advisor.models import Action, Advice, Plan
+from lscs.advisor.models import Action, Advice, HeroAdvice, HeroComment, Plan
 from lscs.llm.notices import AUTH_DISABLED, BUDGET_EXHAUSTED
 from lscs.overlay.model import IDLE, Line, OverlayModel, OverlayView, condense
 from lscs.state.models import Event, EventType, Phase
 
-NAMES = {"A": "小鬼", "B": "海盗", "C": "蚀脑怪", "BG21_HERO_000p": "定罪"}
+NAMES = {
+    "A": "小鬼",
+    "B": "海盗",
+    "C": "蚀脑怪",
+    "BG21_HERO_000p": "定罪",
+    "BG21_HERO_000": "凯瑞尔·罗姆",
+    "BG28_HERO_800": "泰瑟兰·血望者",
+    "BG33_HERO_001": "洛，在世传奇",
+    "TB_BaconShop_HERO_91": "了不起的杰弗里斯",
+    "BG22_HERO_003": "范达尔·雷矛",
+}
 
 
 def name(card_id):
@@ -243,7 +253,8 @@ def test_waiting_hero_select_and_new_game():
     model = OverlayModel(name)
     model.on_update(T3, started(3))
     model.show_rules(T3, rules_advice())
-    hero = make_state(turn=0, phase=Phase.HERO_SELECT, seq=9)
+    # 还没发备选英雄：英雄还是占位的
+    hero = make_state(turn=0, phase=Phase.HERO_SELECT, seq=9, hero="TB_BaconShop_HERO_PH")
     model.on_update(hero, [Event(type=EventType.GAME_STARTED, turn=0)])
     assert model.snapshot().title == IDLE
     model.on_update(T3, started(3))  # 新对局的同一个回合数，不能留着上一局的建议
@@ -536,3 +547,212 @@ def test_budget_notice_with_deep_pending():
     model.ai_text(BUDGET_EXHAUSTED)
     model.ai_pending("deep")
     assert model.snapshot().ai == (Line(BUDGET_EXHAUSTED, "muted"), Line("深度分析中…", "muted"))
+
+
+# ---- 选英雄 ----
+
+HERO_TITLE = "选英雄 · 护甲越少越强"
+HERO_ROWS = (
+    Line("凯瑞尔·罗姆  护甲 10"),
+    Line("泰瑟兰·血望者  护甲 18"),
+    Line("洛，在世传奇  护甲 19"),
+    Line("了不起的杰弗里斯  护甲 17"),
+)
+COMMENTS = ((92, "发现随机，看运气"), (90, "要靠对子才强，前期慢"), (91, "技能复杂，新手难发挥"))
+
+
+def hero_advice(state, source="llm", pick=89, reason="0 费技能每回合白送属性", comments=()):
+    return HeroAdvice(
+        source=source,
+        signature=state.hero_select.signature(),
+        pick=pick,
+        reason=reason,
+        comments=tuple(HeroComment(entity_id=e, text=t) for e, t in comments),
+    )
+
+
+def rules_pick(state, pick=89):
+    return hero_advice(state, "rules", pick, "护甲最少")
+
+
+def choosing(model, state=None):
+    state = state or hero_select_state()
+    model.on_update(state, [Event(type=EventType.GAME_STARTED, turn=0), offered_event(state)])
+    return state
+
+
+def test_hero_select_view():
+    model = OverlayModel(name)
+    st = choosing(model)
+    view = model.snapshot()
+    assert (view.title, view.compact, view.ai_title, view.warning) == (
+        HERO_TITLE,
+        False,
+        "AI",
+        None,
+    )
+    assert (view.rules, view.ai) == (HERO_ROWS, ())  # 规则建议还没到：先列出英雄，不标 ★
+    model.show_hero(st, rules_pick(st))
+    assert model.snapshot().rules == (Line("★ 凯瑞尔·罗姆  护甲 10"), *HERO_ROWS[1:])
+    model.ai_pending("hero")
+    assert model.snapshot().ai == (Line("分析中…", "muted"),)
+    model.show_hero(st, hero_advice(st, comments=COMMENTS))
+    assert model.snapshot().ai == (
+        Line("选 凯瑞尔·罗姆：0 费技能每回合白送属性"),
+        Line("泰瑟兰·血望者：要靠对子才强，前期慢", role="comment"),  # 按备选顺序
+        Line("洛，在世传奇：技能复杂，新手难发挥", role="comment"),
+        Line("了不起的杰弗里斯：发现随机，看运气", role="comment"),
+    )
+    assert model.snapshot().title == HERO_TITLE
+
+
+def test_hero_rules_without_a_pick_and_ai_agreeing():
+    model = OverlayModel(name)
+    st = choosing(model)
+    model.show_hero(st, rules_pick(st, pick=None))
+    assert (model.snapshot().title, model.snapshot().rules) == (HERO_TITLE, HERO_ROWS)
+    model.show_hero(st, hero_advice(st, pick=91, comments=((91, "稳"),)), agrees=True)
+    assert model.snapshot().ai == (
+        Line("✓ 也选 洛，在世传奇：0 费技能每回合白送属性"),
+        Line("洛，在世传奇：稳", role="comment"),
+    )
+
+
+def test_hero_reason_is_cut_to_one_line():
+    model = OverlayModel(name)
+    st = choosing(model)
+    model.show_hero(st, hero_advice(st, reason="理" * 60))
+    first = model.snapshot().ai[0]
+    assert first.text == ("选 凯瑞尔·罗姆：" + "理" * 60)[:40] + "…"
+    assert first.role == "main"
+
+
+def test_hero_errors_and_ai_off_are_muted():
+    model = OverlayModel(name)
+    choosing(model)
+    model.ai_text("AI 超时", "hero")
+    assert model.snapshot().ai == (Line("AI 超时", "muted"),)
+    model.ai_text(BUDGET_EXHAUSTED)  # 调度器的提示不分路：选英雄时显示在选英雄的 AI 区
+    assert model.snapshot().ai == (Line(BUDGET_EXHAUSTED, "muted"),)
+    model.on_update(make_state(turn=1, seq=5), started(1))
+    assert model.snapshot().ai == (Line("本局 AI 次数已用完", "muted"),)
+    off = OverlayModel(name, ai_enabled=False)
+    choosing(off)
+    assert off.snapshot().ai == (Line("AI 未开启", "muted"),)
+    disabled = OverlayModel(name)
+    disabled.ai_text(AUTH_DISABLED)
+    choosing(disabled)  # 新的一局也一直有效
+    assert disabled.snapshot().ai == (Line("AI 已关闭（Key 无效）", "muted"),)
+
+
+def test_condense_drops_hero_comments_at_level_two():
+    model = OverlayModel(name)
+    st = choosing(model)
+    model.show_hero(st, hero_advice(st, comments=COMMENTS))
+    view = model.snapshot()
+    assert condense(view, 1) == view
+    assert condense(view, 2).ai == (Line("选 凯瑞尔·罗姆：0 费技能每回合白送属性"),)
+    assert condense(view, 2).rules == view.rules
+
+
+def test_reroll_shows_the_new_heroes_and_waits_for_the_ai_again():
+    model = OverlayModel(name)
+    st = choosing(model)
+    model.show_hero(st, rules_pick(st))
+    model.show_hero(st, hero_advice(st))
+    heroes = ((89, "BG21_HERO_000", 10, 1), (95, "BG22_HERO_003", 12, 2))
+    again = hero_select_state(heroes, seq=2)
+    model.on_update(again, [offered_event(again, changed=1)])
+    view = model.snapshot()
+    assert view.rules == (Line("凯瑞尔·罗姆  护甲 10"), Line("范达尔·雷矛  护甲 12"))
+    assert view.ai == ()  # 上一组的推荐不再显示
+    model.show_hero(again, rules_pick(again))
+    model.ai_pending("hero")
+    view = model.snapshot()
+    assert view.rules[0] == Line("★ 凯瑞尔·罗姆  护甲 10")
+    assert view.ai == (Line("分析中…", "muted"),)
+
+
+def test_after_the_choice_a_compact_title_until_recruit():
+    model = OverlayModel(name)
+    st = choosing(model)
+    model.show_hero(st, rules_pick(st))
+    model.show_hero(st, hero_advice(st))
+    picked = hero_select_state(seq=3, chosen="BG21_HERO_000")
+    model.on_update(picked, [Event(type=EventType.HERO_CHOSEN, turn=0)])
+    view = model.snapshot()
+    assert (view.title, view.compact) == ("已选 凯瑞尔·罗姆 · 等待招募阶段", True)
+    model.on_update(T3.model_copy(update={"turn": 1}), started(1))
+    view = model.snapshot()
+    assert view.title.startswith("第 1 回合") and (view.rules, view.ai) == ((), ())
+
+
+def test_new_game_drops_the_hero_advice():
+    model = OverlayModel(name)
+    st = choosing(model)
+    model.show_hero(st, rules_pick(st))
+    model.show_hero(st, hero_advice(st))
+    choosing(model, st.model_copy(update={"seq": 9}))  # 重连：同一组英雄，重新开始
+    assert (model.snapshot().rules, model.snapshot().ai) == (HERO_ROWS, ())
+
+
+def test_hero_view_shows_the_uncertain_warning():
+    model = OverlayModel(name)
+    choosing(model, hero_select_state(uncertain=True))
+    assert model.snapshot().warning == "⚠ 状态可能不准"
+
+
+def test_concurrent_hero_calls_are_safe():
+    model = OverlayModel(name)
+    errors = []
+
+    def writer(seq):
+        try:
+            for i in range(200):
+                st = hero_select_state(seq=seq * 1000 + i)
+                model.on_update(st, [offered_event(st)])
+                model.show_hero(st, rules_pick(st))
+                model.ai_pending("hero")
+                model.show_hero(st, hero_advice(st, comments=COMMENTS), agrees=i % 2 == 0)
+                model.ai_text("AI 超时", "hero")
+                model.snapshot()
+        except Exception as exc:  # pragma: no cover - 失败时才走到
+            errors.append(exc)
+
+    threads = [threading.Thread(target=writer, args=(n,)) for n in (1, 2, 3)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == []
+
+
+def test_new_offer_drops_the_old_hero_ai_lines():
+    # 上一组的错误、提示不能留到新的一组上（新的请求会再给"分析中…"）
+    model = OverlayModel(name)
+    choosing(model)
+    model.ai_text("AI 超时", "hero")
+    heroes = ((89, "BG21_HERO_000", 10, 1), (95, "BG22_HERO_003", 12, 2))
+    again = hero_select_state(heroes, seq=2)
+    model.on_update(again, [offered_event(again, changed=1)])
+    assert model.snapshot().ai == ()
+    model.ai_text("生成 AI 局面时出错，本次跳过")
+    model.on_update(again.model_copy(update={"seq": 3}), [])  # 别的更新：提示留着
+    assert model.snapshot().ai == (Line("生成 AI 局面时出错，本次跳过", "muted"),)
+
+
+def test_title_before_the_recruit_starts_leaves_out_the_upgrade():
+    # TURN 变成 1 之后约 0.5 秒才有升本按钮：这时不显示"已满本"
+    model = OverlayModel(name)
+    early = make_state(turn=1, gold=0, upgrade_cost=None, main_action=False)
+    model.on_update(early, [])
+    assert model.snapshot().title == "第 1 回合 · 铸币 0 · 1 本"
+    model.on_update(make_state(turn=1, gold=3, seq=2), started(1))
+    assert model.snapshot().title == "第 1 回合 · 铸币 3 · 1 本 · 升本 5"
+
+
+def test_hero_rules_error_keeps_the_hero_rows():
+    model = OverlayModel(name)
+    choosing(model)
+    model.rules_error(hero=True)
+    assert model.snapshot().rules == HERO_ROWS  # 英雄和护甲照样列出，只是没有 ★

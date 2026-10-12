@@ -8,6 +8,8 @@ from lscs.advisor.rules_config import load_rules_config
 from lscs.cards.db import CardDB
 from lscs.llm.prompt import (
     AIMemory,
+    build_hero_message,
+    build_hero_system_prompt,
     build_system_prompt,
     build_user_message,
     card_pool_block,
@@ -531,3 +533,116 @@ def test_system_prompt_rules():
     assert "买来的随从在手牌里，要先打出去，给场上随从加属性的技能才会作用到它" in system
     assert "hero_power（英雄技能）" in system
     assert "需要目标时 entity_id 填目标编号" in system
+
+
+# ---- 选英雄 ----
+
+EXPECTED_HERO_SYSTEM = """你是《炉石传说》酒馆战棋的高分教练，正在帮一位 6000 分以下的新手在开局的 4 个备选英雄里选一个。只有大约 1 分钟，请用简体中文，直接给结论。
+
+【怎么判断】
+- 护甲：官方用起始护甲做平衡——越强的英雄给的护甲越少，护甲最少的英雄通常就是当前版本最强的。这是最可靠的强度信号，默认按它选；只有技能明显不适合新手、或明显依赖本局没有的条件时才偏离。
+- 技能：看技能描述。新手优先选"每回合都有稳定收益、不需要复杂操作"的技能（加属性、给铸币、减费、免费刷新），少选要靠特定种族、特定卡或精细计算才强的技能。
+- 本局种族在选英雄时还看不到，所以依赖某个种族的技能要打折扣；只有本局机制（如神明）是已知的，可以结合它判断。
+- 不知道的事不要编：没有给出的数据（如胜率榜）不要假装知道。
+
+只输出一个 json 对象，格式：
+{"pick": 89, "reason": "为什么选它，30 字以内，会显示在游戏画面上", "heroes": [{"entity_id": 90, "comment": "一句点评，15 字以内"}, {"entity_id": 91, "comment": "..."}], "confidence": 0.7}
+pick 必须是备选英雄的实体编号；heroes 给其他每个英雄一句点评（推荐的那个也可以给）。
+
+【攻略要点】
+要点
+
+【本月英雄强度资料】
+（本月还没有可靠的英雄强度资料，请按护甲和技能判断。）"""
+
+
+def test_hero_system_prompt_snapshot():
+    assert build_hero_system_prompt("要点", None) == EXPECTED_HERO_SYSTEM
+    assert build_hero_system_prompt("要点", "") == EXPECTED_HERO_SYSTEM  # 空文件当作没有
+    with_note = build_hero_system_prompt("要点", "2026-10-20 英雄榜：A 档 凯瑞尔")
+    assert with_note == EXPECTED_HERO_SYSTEM.rsplit("\n", 1)[0] + "\n2026-10-20 英雄榜：A 档 凯瑞尔"
+
+
+def test_hero_system_prompt_leaves_the_recruit_prompt_alone():
+    assert build_system_prompt("要点") == EXPECTED_SYSTEM
+    assert not build_hero_system_prompt("要点", None).startswith(EXPECTED_SYSTEM[:40])
+
+
+HERO_CARDS = CardDB(
+    [
+        {"id": "BG21_HERO_000", "dbfId": 59000, "name": "凯瑞尔·罗姆", "type": "HERO"},
+        {
+            "id": "BG21_HERO_000p",
+            "dbfId": 73941,
+            "name": "定罪",
+            "type": "HERO_POWER",
+            "cost": 0,
+            "text": "随机使1个友方随从获得+1/+1。",
+        },
+        {"id": "TB_BaconShop_HERO_91", "dbfId": 61000, "name": "了不起的杰弗里斯", "type": "HERO"},
+        {
+            "id": "TB_BaconShop_HP_102",
+            "dbfId": 64486,
+            "name": "三个愿望",
+            "type": "HERO_POWER",
+            "cost": 3,
+            "text": "如果你有两个相同的随从，找到第三个。",
+        },
+        {"id": "BG28_HERO_800", "dbfId": 105000, "name": "泰瑟兰·血望者", "type": "HERO"},
+        {"id": "BG33_HERO_001", "dbfId": 129000, "name": "洛，在世传奇", "type": "HERO"},
+        {
+            "id": "BG33_HERO_001p",
+            "dbfId": 129164,
+            "name": "英勇鼓舞",
+            "type": "HERO_POWER",
+            "text": "被动：在15个友方随从攻击后，获取一份三连奖励。",
+        },
+        {"id": "BGFYM_011", "dbfId": 132532, "name": "亚煞极", "type": "MINION", "text": "神明。"},
+    ]
+)
+
+
+def hero_state(rerolled_heroes=None, global_dbfs=(132532,)):
+    from lscs.state.models import HeroOption, HeroSelect, Phase
+
+    heroes = rerolled_heroes or [
+        (92, "TB_BaconShop_HERO_91", 17, 64486),
+        (89, "BG21_HERO_000", 10, 73941),
+        (90, "BG28_HERO_800", 0, 105432),  # 卡牌数据里没有这个技能；没有护甲标签
+        (91, "BG33_HERO_001", 19, 129164),  # 技能卡没有费用
+    ]
+    select = HeroSelect(
+        offered=tuple(
+            HeroOption(entity_id=e, card_id=c, position=i, armor=a, health=30, hero_power_dbf=dbf)
+            for i, (e, c, a, dbf) in enumerate(heroes, start=1)
+        )
+    )
+    state = make_state(
+        turn=0, phase=Phase.HERO_SELECT, hero="TB_BaconShop_HERO_PH", global_dbfs=global_dbfs
+    )
+    return state.model_copy(update={"hero_select": select})
+
+
+def test_hero_message():
+    assert build_hero_message(hero_state(), HERO_CARDS) == (
+        "选英雄（4 选 1）\n"
+        "本局机制：亚煞极（神明。）\n"
+        "本局种族：未知（选英雄时还看不到）\n"
+        "备选英雄：\n"
+        "  [#92] 了不起的杰弗里斯 | 护甲 17 | 技能 三个愿望（3 金）：如果你有两个相同的随从，找到第三个。\n"
+        "  [#89] 凯瑞尔·罗姆 | 护甲 10 | 技能 定罪（0 金）：随机使1个友方随从获得+1/+1。\n"
+        "  [#90] 泰瑟兰·血望者 | 护甲 未知 | 技能 未知\n"
+        "  [#91] 洛，在世传奇 | 护甲 19 | 技能 英勇鼓舞（? 金）：被动：在15个友方随从攻击后，获取一份三连奖励。"
+    )
+
+
+def test_hero_message_after_reroll_without_mechanics():
+    heroes = [(15, "UNKNOWN_HERO", 12, None), (89, "BG21_HERO_000", 10, 73941)]
+    text = build_hero_message(hero_state(heroes, global_dbfs=()), HERO_CARDS, rerolled=True)
+    assert text.splitlines() == [
+        "选英雄（2 选 1，已重新随机）",
+        "本局种族：未知（选英雄时还看不到）",
+        "备选英雄：",
+        "  [#15] UNKNOWN_HERO | 护甲 12 | 技能 未知",
+        "  [#89] 凯瑞尔·罗姆 | 护甲 10 | 技能 定罪（0 金）：随机使1个友方随从获得+1/+1。",
+    ]

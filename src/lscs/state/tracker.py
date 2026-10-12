@@ -56,6 +56,7 @@ class StateTracker:
         self._board_captured = True
         self._uncertain = False
         self._awaiting_options = False
+        self._heroes_offered = False  # 本局已经发过备选英雄事件（再发就是重随）
 
     def mark_uncertain(self) -> None:
         self._uncertain = True
@@ -91,7 +92,9 @@ class StateTracker:
             pool_config=self._pool_config,
             uncertain=self._uncertain,
         )
-        before, after = _diff_events(self._state, new)
+        before, after = _diff_events(self._state, new, self._heroes_offered)
+        if any(e.type == EventType.HEROES_OFFERED for e in before):
+            self._heroes_offered = True
         pending = self._pending if new.phase != Phase.WAITING else []  # 非酒馆战棋对局不发事件
         events = before + pending + after
         self._pending = []
@@ -176,11 +179,25 @@ class StateTracker:
         self._last_boards[self._combat_opponent] = (board, bg_turn(self._store))
 
 
-def _diff_events(old: GameState, new: GameState) -> tuple[list[Event], list[Event]]:
+def _diff_events(
+    old: GameState, new: GameState, heroes_offered: bool = False
+) -> tuple[list[Event], list[Event]]:
+    """heroes_offered：本局已经发过备选英雄事件，这次再发就是重随（changed=1）。"""
     before: list[Event] = []
     after: list[Event] = []
     if old.phase == Phase.WAITING and new.phase != Phase.WAITING:
         before.append(Event(type=EventType.GAME_STARTED, turn=new.turn))
+    select = new.hero_select
+    if new.phase == Phase.HERO_SELECT and select is not None:
+        old_signature = old.hero_select.signature() if old.hero_select is not None else None
+        if select.signature() != old_signature:
+            before.append(
+                Event(
+                    type=EventType.HEROES_OFFERED,
+                    turn=0,
+                    data={"count": len(select.offered), "changed": int(heroes_offered)},
+                )
+            )
     if new.phase == Phase.RECRUIT and new.me is not None:
         old_me = old.me
         if old.shop != new.shop:

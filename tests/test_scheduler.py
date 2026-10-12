@@ -1,6 +1,6 @@
 import json
 
-from factory import make_state, minion, shop_minion
+from factory import HEROES, hero_select_state, make_state, minion, offered_event, shop_minion
 from helpers import FIXTURES
 
 from lscs.advisor.context import build_context
@@ -8,7 +8,7 @@ from lscs.cards.db import CardDB
 from lscs.config import LLMConfig
 from lscs.llm.provider import FakeProvider, LLMError
 from lscs.llm.record import Recorder
-from lscs.llm.scheduler import AINotice, AIResult, LLMScheduler
+from lscs.llm.scheduler import HERO_DEBOUNCE, AINotice, AIResult, LLMScheduler
 from lscs.state.models import Event, EventType, Phase
 
 CARDS = CardDB.from_json_file(FIXTURES / "cards_mini.json")
@@ -34,8 +34,11 @@ class Deferred:
         self.jobs.append(job)
 
 
-def scheduler(responses, *, clock=None, run_async=None, recorder=None, deep=False, **cfg):
-    """deep=False：只有快速一路（大部分测试只关心快速建议的时机）。"""
+def scheduler(
+    responses, *, clock=None, run_async=None, recorder=None, deep=False, hero_debounce=0.0, **cfg
+):
+    """deep=False：只有快速一路（大部分测试只关心快速建议的时机）。
+    hero_debounce=0：选英雄这一路不等（等待只在专门的测试里看）。"""
     provider = FakeProvider(responses)
     sched = LLMScheduler(
         provider,
@@ -45,6 +48,7 @@ def scheduler(responses, *, clock=None, run_async=None, recorder=None, deep=Fals
         recorder=recorder,
         clock=clock or Clock(),
         run_async=run_async or (lambda job: job()),
+        hero_debounce=hero_debounce,
     )
     return sched, provider
 
@@ -727,3 +731,220 @@ def test_late_deep_result_replaces_a_newer_fast_judgement():
     deferred.jobs[1]()  # 按返回的先后记最近的一次；深度分析比快速建议更有参考价值
     sched.tick()
     assert (sched.memory.turn, sched.memory.deep, sched.memory.direction) == (3, True, "畸变")
+
+
+# ---- 选英雄（第三路 hero）----
+
+HERO = json.dumps(
+    {"pick": 89, "reason": "护甲最少", "heroes": [{"entity_id": 90, "comment": "前期慢"}]},
+    ensure_ascii=False,
+)
+REROLLED = ((89, "BG21_HERO_000", 10, 73941), (95, "BG22_HERO_003", 12, 80248))
+
+
+def offer(sched, st, changed=0):
+    sched.observe(st, [offered_event(st, changed)], None)
+
+
+def chosen(seq=2):
+    st = hero_select_state(seq=seq, chosen="BG21_HERO_000")
+    return st, [Event(type=EventType.HERO_CHOSEN, turn=0, data={"hero": "BG21_HERO_000"})]
+
+
+def test_heroes_offered_calls_with_the_fast_settings():
+    sched, provider = scheduler([HERO], thinking="low", max_output_tokens=900)
+    st = hero_select_state()
+    offer(sched, st)
+    events = sched.tick()
+    assert lanes(events) == [("AIStarted", "hero"), ("AIResult", "hero")]
+    result = events[1]
+    assert (result.error, result.plan) == (None, None)
+    assert (result.hero.source, result.hero.pick) == ("llm", 89)
+    assert result.hero.signature == result.request.signature == st.hero_select.signature()
+    assert result.request.ctx is None and result.request.state is st
+    system, user, timeout, thinking, max_tokens = provider.calls[0]
+    assert system.startswith(
+        "你是《炉石传说》酒馆战棋的高分教练，正在帮一位 6000 分以下的新手在开局"
+    )
+    assert "【攻略要点】\n要点" in system and "本月还没有可靠的英雄强度资料" in system
+    assert (
+        user.startswith("选英雄（4 选 1）\n本局种族：未知")
+        and "[#89] BG21_HERO_000 | 护甲 10" in user
+    )
+    assert (timeout, thinking, max_tokens) == (20, "low", 900)
+    assert sched.calls == 1
+
+
+def test_hero_lane_waits_so_a_half_read_shuffle_calls_once():
+    # 开局洗牌时 watch 可能读到半组英雄，0.2 秒后又是完整的一组：等 0.5 秒，只为后一组调用一次
+    clock = Clock()
+    provider = FakeProvider([HERO, HERO])
+    sched = LLMScheduler(
+        provider,
+        LLMConfig(api_key=SECRET, deep_analysis=False),
+        CARDS,
+        guide="要点",
+        clock=clock,
+        run_async=lambda job: job(),
+    )
+    assert HERO_DEBOUNCE == 0.5
+    offer(sched, hero_select_state(HEROES[:3]))
+    assert sched.tick() == []
+    clock.now += 0.2
+    full = hero_select_state(seq=2)
+    offer(sched, full, changed=1)
+    clock.now += 0.4  # 离第一组 0.6 秒，离第二组 0.4 秒：重新计时，还在等
+    assert sched.tick() == []
+    clock.now += 0.2
+    events = sched.tick()
+    assert lanes(events) == [("AIStarted", "hero"), ("AIResult", "hero")]
+    assert len(provider.calls) == 1
+    assert events[1].request.signature == full.hero_select.signature()
+    # 被替换的那组还没发出去：不算重新随机
+    assert provider.calls[0].user.startswith("选英雄（4 选 1）\n")
+    clock.now += 5
+    assert sched.tick() == [] and len(provider.calls) == 1
+
+
+def test_hero_lane_waiting_ends_if_the_hero_is_chosen_meanwhile():
+    clock = Clock()
+    sched, provider = scheduler([HERO], clock=clock, hero_debounce=0.5)
+    offer(sched, hero_select_state())
+    sched.observe(*chosen(), None)  # 0.5 秒内就选好了
+    clock.now += 1
+    assert sched.tick() == [] and provider.calls == []
+
+
+def test_heroes_note_goes_into_the_hero_prompt_only():
+    provider = FakeProvider([HERO, GOOD])
+    sched = LLMScheduler(
+        provider,
+        LLMConfig(api_key=SECRET, deep_analysis=False),
+        CARDS,
+        guide="要点",
+        heroes_note="2026-10-20 英雄榜",
+        run_async=lambda job: job(),
+        hero_debounce=0.0,
+    )
+    offer(sched, hero_select_state())
+    sched.tick()
+    observe(sched, state(), EventType.RECRUIT_STARTED)
+    sched.tick()
+    hero_system, recruit_system = provider.calls[0].system, provider.calls[1].system
+    assert hero_system.endswith("【本月英雄强度资料】\n2026-10-20 英雄榜")
+    assert "英雄榜" not in recruit_system
+
+
+def test_hero_advice_off_never_calls():
+    sched, provider = scheduler([HERO], hero_advice=False)
+    offer(sched, hero_select_state())
+    assert sched.tick() == [] and provider.calls == []
+
+
+def test_other_updates_while_choosing_do_not_call_again():
+    sched, provider = scheduler([HERO, HERO])
+    st = hero_select_state()
+    offer(sched, st)
+    sched.tick()
+    sched.observe(st.model_copy(update={"seq": 2}), [], None)  # 其他玩家的英雄陆续出现
+    assert sched.tick() == [] and len(provider.calls) == 1
+
+
+def test_result_after_the_choice_is_dropped():
+    deferred = Deferred()
+    sched, _ = scheduler([HERO], run_async=deferred)
+    offer(sched, hero_select_state())
+    assert lanes(sched.tick()) == [("AIStarted", "hero")]
+    sched.observe(*chosen(), None)  # 选完了还要等 20 秒才到第 1 回合，仍是选英雄阶段
+    deferred.jobs[0]()
+    assert sched.tick() == []
+
+
+def test_reroll_drops_the_old_request_and_asks_again():
+    deferred = Deferred()
+    sched, provider = scheduler([HERO, HERO], run_async=deferred)
+    offer(sched, hero_select_state())
+    sched.tick()
+    second = hero_select_state(REROLLED, seq=2)
+    offer(sched, second, changed=1)
+    assert lanes(sched.tick()) == [("AIStarted", "hero")]
+    for job in deferred.jobs:
+        job()
+    results = [e for e in sched.tick() if isinstance(e, AIResult)]
+    assert [r.request.request_id for r in results] == [2]
+    assert results[0].hero.signature == second.hero_select.signature()
+    assert provider.calls[1].user.startswith("选英雄（2 选 1，已重新随机）")
+
+
+def test_hero_answers_are_checked_and_empty_ones_retried():
+    sched, provider = scheduler(["", json.dumps({"pick": 93, "reason": "不在备选里"})])
+    offer(sched, hero_select_state())
+    result = sched.tick()[-1]
+    assert (result.lane, result.error, result.hero) == ("hero", "AI 建议无效，已忽略", None)
+    assert len(provider.calls) == 2 and sched.calls == 2
+
+
+def test_budget_is_shared_with_the_hero_lane():
+    sched, provider = scheduler([HERO, GOOD], max_calls_per_game=1)
+    offer(sched, hero_select_state())
+    sched.tick()
+    observe(sched, state(turn=1), EventType.RECRUIT_STARTED)
+    assert sched.tick() == [AINotice("本局 AI 预算已用完，之后只显示规则建议")]
+    assert len(provider.calls) == 1 and sched.calls == 1
+
+
+def test_hero_request_times_out_on_its_own():
+    clock, deferred = Clock(), Deferred()
+    sched, _ = scheduler([HERO], clock=clock, run_async=deferred, timeout_seconds=10)
+    offer(sched, hero_select_state())
+    sched.tick()
+    clock.now += 12.5
+    events = sched.tick()
+    assert [(e.lane, e.error) for e in events] == [("hero", "AI 超时")]
+    deferred.jobs[0]()
+    assert sched.tick() == []  # 超时之后才回来的结果不再显示
+
+
+def test_catch_up_through_the_choice_calls_no_hero():
+    # watch 启动时一次读完：备选 → 选择 → 第 1 回合招募，最后才 tick
+    deferred = Deferred()
+    sched, _ = scheduler([], run_async=deferred, deep=True)
+    offer(sched, hero_select_state())
+    sched.observe(*chosen(), None)
+    observe(sched, state(turn=1, seq=3), EventType.RECRUIT_STARTED)
+    assert lanes(sched.tick()) == [("AIStarted", "fast"), ("AIStarted", "deep")]
+
+
+def test_catch_up_ending_while_choosing_calls_the_hero_lane_once():
+    deferred = Deferred()
+    sched, _ = scheduler([], run_async=deferred, deep=True)
+    st = hero_select_state()
+    offer(sched, st)
+    sched.observe(st.model_copy(update={"seq": 2}), [], None)
+    assert lanes(sched.tick()) == [("AIStarted", "hero")]
+    assert len(deferred.jobs) == 1
+
+
+def test_reset_game_drops_the_hero_request():
+    sched, provider = scheduler([HERO])
+    offer(sched, hero_select_state())
+    sched.reset_game()
+    assert sched.tick() == [] and provider.calls == []
+
+
+def test_record_has_the_hero_lane(tmp_path):
+    recorder = Recorder(tmp_path)
+    sched, _ = scheduler([HERO, GOOD], recorder=recorder)
+    offer(sched, hero_select_state())
+    sched.tick()
+    observe(sched, state(), EventType.RECRUIT_STARTED)
+    sched.tick()
+    text = next(tmp_path.glob("llm-*.jsonl")).read_text(encoding="utf-8")
+    rows = [json.loads(line) for line in text.splitlines()]
+    assert [(r["lane"], r["turn"], r["thinking"], r["outcome"]) for r in rows] == [
+        ("hero", 0, "disabled", "合法"),
+        ("fast", 3, "disabled", "合法"),
+    ]
+    assert rows[0]["system_sha1"] != rows[1]["system_sha1"]  # 选英雄有自己的系统提示
+    assert rows[0]["user"].startswith("选英雄")
+    assert SECRET not in text

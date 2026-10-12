@@ -1,4 +1,5 @@
-"""生成发给大模型的系统提示和局面消息（M2 设计文档第 7.1 节、更聪明的 AI 建议设计文档第 3 节）。"""
+"""生成发给大模型的系统提示和局面消息（M2 设计文档第 7.1 节、更聪明的 AI 建议设计文档第 3 节）。
+选英雄用单独的系统提示和局面消息（选英雄建议设计文档第 5 节），招募阶段的提示不受影响。"""
 
 from __future__ import annotations
 
@@ -8,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from lscs.advisor.context import MINION, TurnContext, hero_power_blocker, hero_power_used
-from lscs.advisor.names import keyword_zh, tribe_zh
+from lscs.advisor.names import armor_zh, keyword_zh, tribe_zh
 from lscs.cards.db import CardDB, CardInfo
 from lscs.llm.parse import MAX_ACTIONS
 from lscs.state.models import (
@@ -73,6 +74,36 @@ summary 用一句话（25 字以内）直接写本回合要做什么、为了什
 【攻略要点】
 {guide}"""  # noqa: E501
 
+# 选英雄建议设计文档第 5.1 节的原文。招募阶段的 SYSTEM_TEMPLATE 一个字都不改（DeepSeek 按前缀
+# 缓存）；选英雄每局只调一次，缓存不命中无所谓
+HERO_EXAMPLE = {
+    "pick": 89,
+    "reason": "为什么选它，30 字以内，会显示在游戏画面上",
+    "heroes": [
+        {"entity_id": 90, "comment": "一句点评，15 字以内"},
+        {"entity_id": 91, "comment": "..."},
+    ],
+    "confidence": 0.7,
+}
+HERO_SYSTEM_TEMPLATE = """你是《炉石传说》酒馆战棋的高分教练，正在帮一位 6000 分以下的新手在开局的 4 个备选英雄里选一个。只有大约 1 分钟，请用简体中文，直接给结论。
+
+【怎么判断】
+- 护甲：官方用起始护甲做平衡——越强的英雄给的护甲越少，护甲最少的英雄通常就是当前版本最强的。这是最可靠的强度信号，默认按它选；只有技能明显不适合新手、或明显依赖本局没有的条件时才偏离。
+- 技能：看技能描述。新手优先选"每回合都有稳定收益、不需要复杂操作"的技能（加属性、给铸币、减费、免费刷新），少选要靠特定种族、特定卡或精细计算才强的技能。
+- 本局种族在选英雄时还看不到，所以依赖某个种族的技能要打折扣；只有本局机制（如神明）是已知的，可以结合它判断。
+- 不知道的事不要编：没有给出的数据（如胜率榜）不要假装知道。
+
+只输出一个 json 对象，格式：
+{example}
+pick 必须是备选英雄的实体编号；heroes 给其他每个英雄一句点评（推荐的那个也可以给）。
+
+【攻略要点】
+{guide}
+
+【本月英雄强度资料】
+{heroes_note}"""  # noqa: E501
+NO_HEROES_NOTE = "（本月还没有可靠的英雄强度资料，请按护甲和技能判断。）"
+
 MAX_TAVERN_TIER = 6  # 酒馆最高 6 本；7 本的牌不会出现在商店里，不让 AI 叫新手去找
 POOL_TITLE = "【本局卡池（本局种族的随从和中立随从，按酒馆等级）】"
 SPELLS_TITLE = "【酒馆法术】"
@@ -99,6 +130,15 @@ def load_guide(path: Path) -> str:
 def build_system_prompt(guide: str) -> str:
     return SYSTEM_TEMPLATE.format(
         example=json.dumps(EXAMPLE, ensure_ascii=False), guide=guide, max_actions=MAX_ACTIONS
+    )
+
+
+def build_hero_system_prompt(guide: str, heroes_note: str | None) -> str:
+    """heroes_note：strategy/current/heroes.md 的全文（当月的英雄强度资料）；没有时为 None。"""
+    return HERO_SYSTEM_TEMPLATE.format(
+        example=json.dumps(HERO_EXAMPLE, ensure_ascii=False),
+        guide=guide,
+        heroes_note=heroes_note or NO_HEROES_NOTE,
     )
 
 
@@ -269,6 +309,14 @@ def _budget_line(ctx: TurnContext) -> str:
     return line
 
 
+def _mechanics_line(state: GameState, cards: CardDB) -> str | None:
+    """本局机制（古神等），招募和选英雄的消息共用；卡牌数据里都查不到时为 None。"""
+    mechanics = [cards.get_by_dbf(dbf) for dbf in state.global_dbfs]
+    if not any(mechanics):
+        return None
+    return "本局机制：" + "；".join(f"{m.name}（{m.text}）" for m in mechanics if m is not None)
+
+
 def build_user_message(
     state: GameState, ctx: TurnContext, cards: CardDB, memory: AIMemory | None = None
 ) -> str:
@@ -297,11 +345,9 @@ def build_user_message(
     lines.append(f"本局种族：{tribes}")
     if me.trinkets:
         lines.append("饰品：" + "；".join(f"{w.name(t)}（{w.text(t)}）" for t in me.trinkets))
-    mechanics = [cards.get_by_dbf(dbf) for dbf in state.global_dbfs]
-    if any(mechanics):
-        lines.append(
-            "本局机制：" + "；".join(f"{m.name}（{m.text}）" for m in mechanics if m is not None)
-        )
+    mechanics = _mechanics_line(state, cards)
+    if mechanics is not None:
+        lines.append(mechanics)
     lines += w.section("商店：", state.shop)
     lines += w.section(f"场面（已用 {len(me.board)}/7）：", me.board)
     lines += w.section("手牌：", me.hand)
@@ -332,3 +378,32 @@ def build_user_message(
     if memory is not None:
         lines.append(_memory_line(memory, state.turn))
     return card_pool_block(cards, state.tribes) + "\n\n" + "\n".join(lines)
+
+
+def _hero_power_part(dbf: int | None, cards: CardDB) -> str:
+    power = cards.get_by_dbf(dbf) if dbf is not None else None
+    if power is None:
+        return "技能 未知"
+    cost = "?" if power.cost is None else power.cost
+    text = f"：{power.text}" if power.text else ""  # 被动技能的描述本身就写着"被动"
+    return f"技能 {power.name}（{cost} 金）{text}"
+
+
+def build_hero_message(state: GameState, cards: CardDB, rerolled: bool = False) -> str:
+    """选英雄的局面消息：本局机制、备选英雄的护甲和技能。不放本局卡池（种族还不知道）。
+    rerolled：玩家重新随机过英雄。"""
+    select = state.hero_select
+    assert select is not None
+    w = _Writer(cards)
+    count = len(select.offered)
+    lines = [f"选英雄（{count} 选 1，已重新随机）" if rerolled else f"选英雄（{count} 选 1）"]
+    mechanics = _mechanics_line(state, cards)
+    if mechanics is not None:
+        lines.append(mechanics)
+    lines += ["本局种族：未知（选英雄时还看不到）", "备选英雄："]
+    lines += [
+        f"  [#{h.entity_id}] {w.name(h.card_id)} | {armor_zh(h.armor)} | "
+        + _hero_power_part(h.hero_power_dbf, cards)
+        for h in select.offered
+    ]
+    return "\n".join(lines)

@@ -2,11 +2,11 @@ import json
 from pathlib import Path
 
 import pytest
-from factory import make_state, minion, shop_minion
+from factory import hero_select_state, make_state, minion, offered_event, shop_minion
 from helpers import FIXTURES, NEEDS_USER_LOG, REAL_LOG, TEST_POOL, USER_LOG
 
 from lscs.advisor.display import AdviceDisplay
-from lscs.advisor.models import Action, Plan
+from lscs.advisor.models import Action, HeroAdvice, HeroComment, Plan
 from lscs.advisor.rules_config import load_rules_config
 from lscs.advisor.runner import AdviceRunner, remaining_plan
 from lscs.cards.db import CardDB
@@ -30,6 +30,7 @@ def make_runner(answers, out, deep=False):
         CARDS,
         guide="",
         debounce=0.0,
+        hero_debounce=0.0,
         clock=lambda: 100.0,
         run_async=lambda job: job(),
     )
@@ -48,6 +49,13 @@ def run(lines, runner):
     pipeline.flush()
 
 
+# mini 录像的选英雄阶段只有一个备选英雄（实体 14，米尔豪斯）
+MINI_HERO = json.dumps(
+    {"pick": 14, "reason": "只有一个可选", "heroes": [{"entity_id": 14, "comment": "经济型技能"}]},
+    ensure_ascii=False,
+)
+
+
 def test_ai_advice_follows_rules_in_terminal(mini_lines):
     agree_turn_1 = json.dumps(
         {"actions": [{"type": "buy", "entity_id": 32, "reason": "嘲讽"}, {"type": "refresh"}]}
@@ -60,9 +68,13 @@ def test_ai_advice_follows_rules_in_terminal(mini_lines):
         }
     )
     out = []
-    runner = make_runner([agree_turn_1, turn_2], out)
+    runner = make_runner([MINI_HERO, agree_turn_1, turn_2], out)
     run(mini_lines, runner)
     assert out == [
+        "  📋 规则：护甲信息不全，等 AI 建议",  # 选英雄：合成日志的英雄没有护甲标签
+        "  🤖 AI 分析中…",
+        "  🤖 AI（0.0 秒）：选 米尔豪斯·法力风暴 —— 只有一个可选",
+        "          米尔豪斯·法力风暴：经济型技能",
         "  📋 规则：① 买 刷新畸体 1/4（商店里身材最好，有嘲讽）",
         "          ② 刷新（剩 1 金，刷新找更好的牌）",
         "  🤖 AI 分析中…",
@@ -72,7 +84,7 @@ def test_ai_advice_follows_rules_in_terminal(mini_lines):
         "  🤖 AI（0.0 秒）：① 买 熔岩潜伏者 2/5（身材好）",
         "          思路：先保血",
         "          方向：纳迦",
-        "本局 AI 调用 2 次，输入 0.2 千、输出 0.0 千 token",
+        "本局 AI 调用 3 次，输入 0.3 千、输出 0.1 千 token",
     ]
 
 
@@ -106,9 +118,13 @@ def test_fast_and_deep_advice_in_terminal(mini_lines):
         }
     )
     out = []
-    runner = make_runner([agree_turn_1, deep_turn_1, turn_2, deep_turn_2], out, deep=True)
+    runner = make_runner([MINI_HERO, agree_turn_1, deep_turn_1, turn_2, deep_turn_2], out, True)
     run(mini_lines, runner)
     assert out == [
+        "  📋 规则：护甲信息不全，等 AI 建议",  # 选英雄：合成日志的英雄没有护甲标签
+        "  🤖 AI 分析中…",  # 选英雄只用快速模型，不做深度分析
+        "  🤖 AI（0.0 秒）：选 米尔豪斯·法力风暴 —— 只有一个可选",
+        "          米尔豪斯·法力风暴：经济型技能",
         "  📋 规则：① 买 刷新畸体 1/4（商店里身材最好，有嘲讽）",
         "          ② 刷新（剩 1 金，刷新找更好的牌）",
         "  🤖 AI 分析中…",
@@ -127,7 +143,7 @@ def test_fast_and_deep_advice_in_terminal(mini_lines):
         "  🧠 深度分析：操作不可用，只看思路",
         "          分析：纳迦核心在高本。",
         "          要找：熔岩潜伏者",
-        "本局 AI 调用 4 次，输入 0.4 千、输出 0.1 千 token",
+        "本局 AI 调用 5 次，输入 0.5 千、输出 0.1 千 token",
     ]
 
 
@@ -324,7 +340,8 @@ def test_ai_request_at_recruit_start_already_knows_the_hero_power(path, line):
     )
     runner = AdviceRunner(RULES, CARDS.name, AdviceDisplay(CARDS.name, lambda _: None), scheduler)
     run(read_log_lines(path), runner)
-    situations = [c.user.split("\n\n", 1)[1] for c in provider.calls]  # 去掉开头的本局卡池
+    recruit = [c for c in provider.calls if not c.user.startswith("选英雄")]
+    situations = [c.user.split("\n\n", 1)[1] for c in recruit]  # 去掉开头的本局卡池
     starts = [text for text in situations if text.startswith("第 1 回合")]
     assert starts and any(text.startswith(line) for text in starts[0].splitlines())
 
@@ -344,4 +361,75 @@ def test_deep_result_arriving_in_combat_still_shows_the_thoughts():
     runner._show_result(result_for(old, THOUGHTS, lane="deep"))
     runner._state = make_state(turn=4, phase=Phase.COMBAT, seq=4)  # 别的回合：丢弃
     runner._show_result(result_for(old, THOUGHTS, lane="deep"))
+    assert len(out) == 3
+
+
+# ---- 选英雄的 AI 结果 ----
+
+
+def hero_result(request_state, pick=89, error=None, comments=(), elapsed=2.34):
+    signature = request_state.hero_select.signature()
+    request = AIRequest(7, request_state, None, 100.0, "hero", signature)
+    hero = None
+    if error is None:
+        hero = HeroAdvice(
+            source="llm",
+            signature=signature,
+            pick=pick,
+            reason="护甲最少，技能稳定",
+            comments=tuple(HeroComment(entity_id=e, text=t) for e, t in comments),
+        )
+    return AIResult(request, None, error, elapsed, hero=hero)
+
+
+def hero_runner(answers=()):
+    out = []
+    runner = make_runner(list(answers), out)
+    st = hero_select_state()
+    runner.on_update(st, [offered_event(st)])
+    return runner, out, st
+
+
+def test_hero_result_agreeing_with_the_rules():
+    runner, out, st = hero_runner()
+    runner._show_result(hero_result(st, comments=((90, "前期慢"), (92, "看运气"))))
+    assert out == [
+        "  📋 规则：选 BG21_HERO_000（这几个英雄里它护甲最少：官方给越强的英雄发越少的护甲）",
+        "  🤖 ✓ AI 也选 BG21_HERO_000（2.3 秒）：护甲最少，技能稳定",
+        "          BG28_HERO_800：前期慢",
+        "          TB_BaconShop_HERO_91：看运气",
+    ]
+
+
+def test_hero_result_with_another_pick():
+    runner, out, st = hero_runner()
+    runner._show_result(hero_result(st, pick=91))
+    assert out[-1] == "  🤖 AI（2.3 秒）：选 BG33_HERO_001 —— 护甲最少，技能稳定"
+
+
+def test_hero_result_after_the_choice_or_a_reroll_is_dropped():
+    runner, out, st = hero_runner()
+    runner._state = hero_select_state(seq=2, chosen="BG21_HERO_000")  # 已经选了
+    runner._show_result(hero_result(st))
+    runner._state = hero_select_state(((89, "BG21_HERO_000", 10, 1), (95, "X", 12, 2)), seq=3)
+    runner._show_result(hero_result(st))  # 重随了：新的请求已经发出
+    runner._state = make_state(turn=1, seq=4)  # 已经到了招募阶段
+    runner._show_result(hero_result(st))
+    assert len(out) == 1  # 只有规则建议
+
+
+def test_hero_errors_are_shown_as_text():
+    runner, out, st = hero_runner()
+    runner._show_result(hero_result(st, error="AI 超时"))
+    runner._show_result(hero_result(st, error="AI 建议无效，已忽略"))
+    assert out[1:] == ["  🤖 AI 超时", "  🤖 AI 建议无效，已忽略"]
+
+
+def test_hero_advice_from_the_scheduler_end_to_end():
+    answer = json.dumps({"pick": 92, "reason": "稳"}, ensure_ascii=False)
+    runner, out, st = hero_runner([answer])
+    runner.tick()
+    assert out[1:] == ["  🤖 AI 分析中…", "  🤖 AI（0.0 秒）：选 TB_BaconShop_HERO_91 —— 稳"]
+    runner.on_update(st.model_copy(update={"seq": 2}), [])  # 其他更新：不再提示，也不再调用
+    runner.tick()
     assert len(out) == 3

@@ -29,6 +29,7 @@ def test_event_sequence(run_log, mini_lines):
     ]
     assert key == [
         EventType.GAME_STARTED,
+        EventType.HEROES_OFFERED,  # 备选英雄（米尔豪斯）在手牌区
         EventType.HERO_CHOSEN,
         EventType.RECRUIT_STARTED,
         EventType.COMBAT_STARTED,
@@ -173,3 +174,126 @@ def test_hero_power_change_emits_event(mini_lines):
     state, events = tracker.flush()
     assert state.me.hero_power.option == "usable"
     assert [e.type for e in events] == [EventType.HERO_POWER_CHANGED]
+
+
+# ---- 选英雄（合成日志 hero_select.log）----
+
+
+def hero_lines():
+    from helpers import HERO_LOG
+
+    from lscs.replay import read_log_lines
+
+    return list(read_log_lines(HERO_LOG))
+
+
+def offers(updates):
+    return [
+        (state, event)
+        for state, events in updates
+        for event in events
+        if event.type == EventType.HEROES_OFFERED
+    ]
+
+
+def offered(state):
+    return [(h.entity_id, h.card_id, h.position, h.armor) for h in state.hero_select.offered]
+
+
+def test_heroes_offered_then_rerolled_then_chosen(run_log):
+    updates = run_log(hero_lines())
+    found = offers(updates)
+    assert [e.data for _, e in found] == [{"count": 4, "changed": 0}, {"count": 4, "changed": 1}]
+    (first, _), (second, _) = found
+    assert offered(first) == [
+        (11, "BG21_HERO_000", 1, 10),
+        (12, "BG28_HERO_800", 2, 18),
+        (13, "BG33_HERO_001", 3, 19),
+        (14, "TB_BaconShop_HERO_91", 4, 17),
+    ]
+    hero = first.hero_select.offered[0]
+    assert (hero.health, hero.hero_power_dbf, hero.locked) == (30, 73941, False)
+    assert [h.locked for h in first.hero_select.offered] == [False, False, True, True]
+    assert first.hero_select.reroll is True
+    # 重随：12 离开手牌，新实体 15 补到同一位置；仍按位置排序
+    assert offered(second) == [
+        (11, "BG21_HERO_000", 1, 10),
+        (15, "BG22_HERO_003", 2, 12),
+        (13, "BG33_HERO_001", 3, 19),
+        (14, "TB_BaconShop_HERO_91", 4, 17),
+    ]
+    assert first.hero_select.signature() != second.hero_select.signature()
+    assert all(e.turn == 0 for _, e in found)
+
+
+def test_heroes_offered_order_of_events(run_log):
+    types = event_types(run_log(hero_lines()))
+    assert [t for t in types if t != EventType.GOLD_CHANGED][:5] == [
+        EventType.GAME_STARTED,
+        EventType.HEROES_OFFERED,
+        EventType.HEROES_OFFERED,
+        EventType.HERO_CHOSEN,
+        EventType.RECRUIT_STARTED,
+    ]
+
+
+def test_hero_select_is_none_after_the_choice_and_in_recruit(run_log):
+    updates = run_log(hero_lines())
+    chosen = next(
+        i for i, (_, ev) in enumerate(updates) if EventType.HERO_CHOSEN in {e.type for e in ev}
+    )
+    assert all(state.hero_select is not None for state, _ in updates[1:chosen])
+    assert all(state.hero_select is None for state, _ in updates[chosen:])
+    assert updates[chosen][0].phase == Phase.HERO_SELECT  # 选完后还要等一会儿才到第 1 回合
+    assert updates[-1][0].phase == Phase.RECRUIT
+
+
+def test_other_players_heroes_are_not_offered_to_me(run_log):
+    # 其他玩家的英雄（SETASIDE、由 Bob 控制）陆续出现，不算备选，也不重新发事件
+    lines = hero_lines()
+    at = next(i for i, line in enumerate(lines) if line.startswith("D 10:00:20"))  # 选择之前
+    updates = run_log(lines[:at])
+    assert len(updates) == 4 and len(offers(updates)) == 2
+    assert all(
+        7 not in {h.entity_id for h in state.hero_select.offered}
+        for state, _ in updates
+        if state.hero_select is not None
+    )
+
+
+def test_reroll_by_changing_the_card_of_the_same_entity(run_log):
+    lines = [line for line in hero_lines() if not line.startswith("D 10:00:05")]
+    power = "D 10:00:05.0000000 GameState.DebugPrintPower() - "
+    reroll = [
+        power + "CHANGE_ENTITY - Updating Entity=12 CardID=BG22_HERO_003",
+        power + "    tag=ARMOR value=12",
+        power + "    tag=HERO_POWER value=80248",
+    ]
+    at = next(i for i, line in enumerate(lines) if line.startswith("D 10:00:20"))
+    found = offers(run_log(lines[:at] + reroll))
+    assert [e.data["changed"] for _, e in found] == [0, 1]
+    assert offered(found[1][0])[1] == (12, "BG22_HERO_003", 2, 12)
+    assert found[1][0].hero_select.offered[1].hero_power_dbf == 80248
+
+
+def test_reconnect_during_hero_select_offers_again(run_log):
+    lines = hero_lines()
+    at = next(i for i, line in enumerate(lines) if line.startswith("D 10:00:03"))
+    # 重连：重新写一遍 CREATE_GAME 和完整的实体快照，这时英雄已经在手牌区
+    again = [
+        line.replace("10:00:00.0000000", "10:01:00.0000000").replace(
+            "10:00:01.0000000", "10:01:00.0000000"
+        )
+        for line in lines[:at]
+    ]
+    updates = run_log(lines[:at] + again)
+    _, events = updates[-1]
+    assert [e.type for e in events] == [EventType.GAME_STARTED, EventType.HEROES_OFFERED]
+    assert events[1].data == {"count": 4, "changed": 0}  # 新对局从头算
+
+
+def test_mini_log_offers_its_single_hero(run_log, mini_lines):
+    state, event = first_with(run_log(mini_lines), EventType.HEROES_OFFERED)
+    assert event.data == {"count": 1, "changed": 0}
+    assert offered(state) == [(14, "TB_BaconShop_HERO_49", 0, 0)]
+    assert state.hero_select.reroll is False

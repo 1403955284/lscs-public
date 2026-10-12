@@ -27,13 +27,16 @@ class LLMConfig(BaseModel):
     # 快速建议：招募开始和每次刷新后各调用一次，不开思考，2~3 秒出结果
     thinking: Literal["disabled", "low", "high"] = "disabled"
     timeout_seconds: float = Field(default=20, gt=0)
-    max_calls_per_game: int = Field(default=80, ge=0)  # 快速和深度两路共用
+    max_calls_per_game: int = Field(default=80, ge=0)  # 快速、深度和选英雄三路共用
     max_output_tokens: int = Field(default=1500, gt=0)  # 800 不够写 analysis
     # 深度分析：只在招募开始时和快速建议同时发出，开思考，约 20 秒
     deep_analysis: bool = True
     deep_thinking: Literal["low", "high"] = "low"
     deep_max_output_tokens: int = Field(default=16000, gt=0)
     deep_timeout_seconds: float = Field(default=75, gt=0)
+    # 选英雄：看到备选英雄时让快速模型推荐一个（每局 1 次，重随时再 1 次）；
+    # 思考模式、输出上限、超时沿用快速建议的
+    hero_advice: bool = True
 
     @field_validator("api_key")
     @classmethod

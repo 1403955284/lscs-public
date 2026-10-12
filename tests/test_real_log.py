@@ -127,3 +127,22 @@ def test_passive_hero_power_is_absent_from_options(updates):
             "absent",
             False,
         )
+
+
+def test_heroes_offered(updates):
+    assert count(updates, EventType.HEROES_OFFERED) == 1
+    state, event = at(updates, EventType.HEROES_OFFERED, 0)
+    assert event.data == {"count": 4, "changed": 0}
+    select = state.hero_select
+    # 2022 年的日志：只有两个英雄带 ARMOR 标签，其他的没有（读成 0）；没有重随
+    assert [(h.entity_id, h.armor, h.health) for h in select.offered] == [
+        (92, 5, 40),
+        (91, 0, 40),
+        (93, 0, 40),
+        (94, 10, 40),
+    ]
+    assert [h.hero_power_dbf for h in select.offered] == [58028, 62267, 60405, 80248]
+    assert select.reroll is False
+    assert not any(h.locked for h in select.offered)
+    chosen, _ = at(updates, EventType.HERO_CHOSEN, 0)
+    assert chosen.hero_select is None

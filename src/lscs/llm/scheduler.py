@@ -1,6 +1,7 @@
-"""决定何时调用大模型，并在后台执行（M2 设计文档第 7.4 节，更聪明的 AI 建议设计文档第 3.3 节）。
+"""决定何时调用大模型，并在后台执行（M2 设计文档第 7.4 节，更聪明的 AI 建议设计文档第 3.3 节，
+选英雄建议设计文档第 6 节）。
 
-两路调用，各自有当前请求、在途请求和超时；每局预算和认证失败计数两路共用：
+三路调用，各自有当前请求、在途请求和超时；每局预算和认证失败计数三路共用：
 - 快速（fast）：按 thinking / max_output_tokens / timeout_seconds 调用，2~3 秒出结果。
   招募开始时立即调用；刷新（商店实体编号与上次完全不重合）后，商店稳定 debounce 秒再调用，
   期间的买卖会更新待发的局面；刷新前发出、还没返回的快速请求作废（方案里的牌已经不在商店了）；
@@ -8,6 +9,12 @@
 - 深度（deep，deep_analysis 打开时）：按 deep_thinking / deep_max_output_tokens /
   deep_timeout_seconds 调用，约 20 秒。只在招募开始时和快速请求同时发出；不重试；
   刷新后不作废——操作过期，但分析仍然有用，结果照常交付并标明 expired="refreshed"。
+- 选英雄（hero，hero_advice 打开时）：参数和快速建议一样，但用自己的系统提示和局面消息。
+  出现一组新的备选英雄（开局、重随）后等 hero_debounce 秒（默认 0.5）再调用，上一组的请求作废：
+  开局洗牌时 watch 可能读到半组英雄、紧接着又是完整的一组，等待期间来了新的一组就换成新的、
+  重新计时，只调用一次（设计文档第 6.2 节，原设计是立即发出）。replay 同步执行时不等。
+  返回空内容时重试一次。离开选英雄（选完、进招募）时待发和在途的请求都作废：
+  选完之后再回来的推荐没有意义。
 
 其他规则：
 - observe() 只记下待发的请求，由主循环每次轮询调用的 tick() 发出。watch 启动时会从头读
@@ -15,7 +22,7 @@
 - 每路同一时间只认最新的请求，旧请求的结果不显示；新回合、新对局时两路的旧请求都作废
   （例外：上一回合晚到的深度分析不显示，但它的方向和要找的牌会记下来）；
 - 请求超过该路的超时 + 2 秒还没返回：提示"AI 超时"并作废；
-- 每局最多 max_calls_per_game 次（两路合计，含空内容重试）；
+- 每局最多 max_calls_per_game 次（三路合计，含空内容重试）；
 - Key 连续 3 次认证失败后关闭 AI；
 - 记住本局最近一次合法结果的方向、要找的牌和分析（同一回合深度优先），附在之后的局面消息末尾。
 """
@@ -31,13 +38,19 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 
 from lscs.advisor.context import TurnContext
-from lscs.advisor.models import Expired, Lane, Plan
+from lscs.advisor.models import Expired, HeroAdvice, Lane, Plan
 from lscs.advisor.validate import normalize_actions, validate_plan
 from lscs.cards.db import CardDB
 from lscs.config import LLMConfig
 from lscs.llm.notices import AUTH_DISABLED, AUTH_FAILURE_LIMIT, BUDGET_EXHAUSTED, TIMEOUT
-from lscs.llm.parse import EmptyResponse, ParseError, parse_plan
-from lscs.llm.prompt import AIMemory, build_system_prompt, build_user_message
+from lscs.llm.parse import EmptyResponse, ParseError, parse_hero_pick, parse_plan
+from lscs.llm.prompt import (
+    AIMemory,
+    build_hero_message,
+    build_hero_system_prompt,
+    build_system_prompt,
+    build_user_message,
+)
 from lscs.llm.provider import LLMError, LLMProvider, LLMResult, Thinking
 from lscs.llm.record import Recorder
 from lscs.state.models import Event, EventType, GameState, Phase
@@ -46,6 +59,8 @@ log = logging.getLogger(__name__)
 
 # openai 的 timeout 是单次读取的超时，DeepSeek 的保活字节会让整次调用拖得更久；超过这个余量就放弃
 DEADLINE_GRACE = 2.0
+# 选英雄：看到一组备选英雄后等这么久再调用（开局洗牌时可能先读到半组英雄）
+HERO_DEBOUNCE = 0.5
 INVALID = "AI 建议无效，已忽略"
 
 
@@ -53,16 +68,18 @@ INVALID = "AI 建议无效，已忽略"
 class AIRequest:
     request_id: int
     state: GameState
-    ctx: TurnContext
+    ctx: TurnContext | None  # 选英雄没有
     started: float
     lane: Lane = "fast"
+    signature: tuple[tuple[int, str], ...] = ()  # 选英雄：基于哪一组备选（HeroSelect.signature()）
 
 
 @dataclass(frozen=True)
 class _Pending:
     state: GameState
-    ctx: TurnContext
+    ctx: TurnContext | None  # 招募的两路总有；选英雄没有
     due: float  # 到这个时间（clock）之后的第一次 tick() 发出
+    rerolled: bool = False  # 选英雄：玩家重新随机过英雄
 
 
 @dataclass(frozen=True)
@@ -85,6 +102,7 @@ class AIResult:
     llm: LLMResult | None = None
     # 只有深度分析会有：plan 里的操作不能用，只看分析（refreshed 发出后商店刷新过；invalid 不合法）
     expired: Expired | None = None
+    hero: HeroAdvice | None = None  # 选英雄的结果（plan 为 None）
 
     @property
     def lane(self) -> Lane:
@@ -96,7 +114,7 @@ SchedulerEvent = AIStarted | AINotice | AIResult
 
 @dataclass
 class _LaneState:
-    """一路调用的设置和状态。请求编号两路共用一个计数器（调用记录里不重复），
+    """一路调用的设置和状态。请求编号三路共用一个计数器（调用记录里不重复），
     但每路只认自己最新的请求。
 
     线程：所有状态字段只在主线程（observe / tick / reset_game）里写。后台线程只读设置
@@ -119,6 +137,10 @@ class _LaneState:
         return self.stale_up_to < request.request_id == self.current_id
 
 
+def _sha1(text: str) -> str:
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
+
+
 def _run_in_thread(job: Callable[[], None]) -> None:
     threading.Thread(target=job, name="lscs-llm", daemon=True).start()
 
@@ -130,18 +152,23 @@ class LLMScheduler:
         cfg: LLMConfig,
         cards: CardDB,
         guide: str,
+        heroes_note: str | None = None,
         recorder: Recorder | None = None,
         debounce: float = 1.0,
         clock: Callable[[], float] = time.monotonic,
         run_async: Callable[[Callable[[], None]], None] = _run_in_thread,
+        hero_debounce: float = HERO_DEBOUNCE,
     ) -> None:
         self._provider = provider
         self._cfg = cfg
         self._cards = cards
         self._system = build_system_prompt(guide)
-        self._system_hash = hashlib.sha1(self._system.encode("utf-8")).hexdigest()[:12]
+        self._system_hash = _sha1(self._system)
+        self._hero_system = build_hero_system_prompt(guide, heroes_note)
+        self._hero_hash = _sha1(self._hero_system)
         self._recorder = recorder
         self._debounce = debounce
+        self._hero_debounce = hero_debounce
         self._clock = clock
         self._run_async = run_async
         self._events: queue.Queue[SchedulerEvent] = queue.Queue()
@@ -156,7 +183,11 @@ class LLMScheduler:
             cfg.deep_timeout_seconds,
             retry_empty=False,
         )
-        self._lanes = (self._fast, self._deep)  # 同时到期时先发快速
+        self._hero = _LaneState(
+            "hero", cfg.thinking, cfg.max_output_tokens, cfg.timeout_seconds, retry_empty=True
+        )
+        self._recruit_lanes = (self._fast, self._deep)
+        self._lanes = (self._fast, self._deep, self._hero)  # 同时到期时先发快速
         self._last_id = 0
         self._auth_failures = 0
         self.disabled_reason: str | None = None
@@ -189,8 +220,9 @@ class LLMScheduler:
 
     def observe(self, state: GameState, events: Sequence[Event], ctx: TurnContext | None) -> None:
         """每次状态更新都调用；只记下要发的请求，不在这里发出。"""
+        self._observe_hero(state, events)
         if state.phase != Phase.RECRUIT:
-            for lane in self._lanes:
+            for lane in self._recruit_lanes:
                 lane.pending = None
             return
         shop = frozenset(s.entity_id for s in state.shop)
@@ -203,7 +235,7 @@ class LLMScheduler:
         started = any(e.type == EventType.RECRUIT_STARTED for e in events)
         if started:
             with self._lock:
-                for lane in self._lanes:
+                for lane in self._recruit_lanes:
                     lane.stale_up_to = lane.current_id  # 新回合：上回合两路的请求都作废
         elif refreshed:
             with self._lock:
@@ -222,12 +254,36 @@ class LLMScheduler:
                 self._deep.pending = replace(self._deep.pending, state=state, ctx=ctx)
         else:
             # 还没发出请求时又买卖了：用最新的局面，时间不变
-            for lane in self._lanes:
+            for lane in self._recruit_lanes:
                 if lane.pending is not None:
                     lane.pending = replace(lane.pending, state=state, ctx=ctx)
         if shop or state.turn != self._last_turn:
             self._last_shop = shop  # 买空商店时保留上次的商品，之后刷新仍能识别
         self._last_turn = state.turn
+
+    def _observe_hero(self, state: GameState, events: Sequence[Event]) -> None:
+        hero = self._hero
+        if state.phase == Phase.HERO_SELECT and state.hero_select is not None:
+            offers = [e for e in events if e.type == EventType.HEROES_OFFERED]
+            if not offers:
+                return  # 已经在等这一组的结果了
+            with self._lock:
+                hero.stale_up_to = hero.current_id  # 重随：上一组的请求作废
+            replaced, hero.pending = hero.pending, None
+            if self._cfg.hero_advice:
+                # 替换还没发出的那组（洗牌读到一半）时沿用它的"是否重随"，免得说成重新随机
+                rerolled = (
+                    replaced.rerolled
+                    if replaced is not None
+                    else bool(offers[-1].data.get("changed"))
+                )
+                due = self._clock() + self._hero_debounce
+                hero.pending = _Pending(state, None, due, rerolled)
+            return
+        hero.pending = None
+        if hero.current_id > hero.stale_up_to:
+            with self._lock:
+                hero.stale_up_to = hero.current_id
 
     def tick(self) -> list[SchedulerEvent]:
         """主循环每次轮询调用：取回已完成的结果，发出到期的请求，处理超时。"""
@@ -273,7 +329,7 @@ class LLMScheduler:
             out.append(event)
 
     def _lane(self, request: AIRequest) -> _LaneState:
-        return self._deep if request.lane == "deep" else self._fast
+        return next(lane for lane in self._lanes if lane.name == request.lane)
 
     def _remember_late(self, result: AIResult) -> None:
         """本局上一回合的深度分析在新回合开始后才返回：不显示，但它的判断仍然记下来。"""
@@ -311,18 +367,22 @@ class LLMScheduler:
             lane.pending = None
         if self.disabled_reason is not None:
             return
-        messages: dict[int, str | None] = {}  # 两路同时发出时局面相同，只生成一次
+        # 快速和深度同时发出时局面相同，只生成一次
+        messages: dict[tuple[bool, int], str | None] = {}
         for lane, pending in due:
-            key = id(pending.state)
+            key = (lane is self._hero, id(pending.state))
             if key not in messages:
-                messages[key] = self._message(pending)
+                messages[key] = self._message(lane, pending)
             user = messages[key]
             if user is not None:
                 self._start(lane, pending, user)
 
-    def _message(self, pending: _Pending) -> str | None:
+    def _message(self, lane: _LaneState, pending: _Pending) -> str | None:
         # 先生成局面消息：出错时不占预算，也不作废在途的请求
         try:
+            if lane is self._hero:
+                return build_hero_message(pending.state, self._cards, pending.rerolled)
+            assert pending.ctx is not None
             return build_user_message(pending.state, pending.ctx, self._cards, self._memory)
         except Exception:
             log.warning("生成 AI 局面消息时出错", exc_info=True)
@@ -338,7 +398,11 @@ class LLMScheduler:
                 return
             self.calls += 1
             self._last_id += 1
-            request = AIRequest(self._last_id, pending.state, pending.ctx, self._clock(), lane.name)
+            select = pending.state.hero_select
+            signature = select.signature() if lane is self._hero and select is not None else ()
+            request = AIRequest(
+                self._last_id, pending.state, pending.ctx, self._clock(), lane.name, signature
+            )
             lane.current_id = request.request_id
         lane.in_flight = request
         self._events.put(AIStarted(request.request_id, lane.name))
@@ -362,7 +426,7 @@ class LLMScheduler:
                 "state_seq": request.state.seq,
                 "model": self._cfg.model,
                 "thinking": lane.thinking,
-                "system_sha1": self._system_hash,
+                "system_sha1": self._hero_hash if lane is self._hero else self._system_hash,
                 "user": user,
                 "response": result.text if result else None,
                 "elapsed": round(result.elapsed, 3) if result else None,
@@ -373,25 +437,35 @@ class LLMScheduler:
             }
         )
 
-    def _finish(self, request: AIRequest, plan=None, error=None, llm=None, expired=None) -> None:
+    def _finish(
+        self, request: AIRequest, plan=None, error=None, llm=None, expired=None, hero=None
+    ) -> None:
         elapsed = self._clock() - request.started
-        self._events.put(AIResult(request, plan, error, elapsed, llm, expired))
+        self._events.put(AIResult(request, plan, error, elapsed, llm, expired, hero))
+
+    def _parse(self, lane: _LaneState, request: AIRequest, text: str) -> Plan | HeroAdvice:
+        if lane is not self._hero:
+            return parse_plan(text)
+        select = request.state.hero_select
+        offered = [h.entity_id for h in select.offered] if select is not None else []
+        return parse_hero_pick(text, offered, request.signature)
 
     def _work(self, lane: _LaneState, request: AIRequest, user: str) -> None:
         deadline = request.started + lane.timeout
+        system = self._hero_system if lane is self._hero else self._system
         retried = False
         try:
             while True:
                 timeout = max(deadline - self._clock(), 1.0)
                 result = self._provider.complete_json(
-                    self._system, user, timeout, thinking=lane.thinking, max_tokens=lane.max_tokens
+                    system, user, timeout, thinking=lane.thinking, max_tokens=lane.max_tokens
                 )
                 with self._lock:
                     self.input_tokens += result.input_tokens
                     self.output_tokens += result.output_tokens
                     self._auth_failures = 0
                 try:
-                    plan = parse_plan(result.text)
+                    parsed = self._parse(lane, request, result.text)
                 except EmptyResponse:
                     self._record(lane, request, user, result, "空内容")
                     with self._lock:
@@ -413,6 +487,12 @@ class LLMScheduler:
                     self._record(lane, request, user, result, f"无效：{exc}")
                     self._finish(request, error=INVALID, llm=result)
                     return
+                if isinstance(parsed, HeroAdvice):  # 选英雄没有动作序列，不用校验
+                    self._record(lane, request, user, result, "合法")
+                    self._finish(request, llm=result, hero=parsed)
+                    return
+                plan = parsed
+                assert request.ctx is not None
                 problem = validate_plan(plan.actions, request.ctx)
                 if problem is not None:
                     self._record(lane, request, user, result, f"无效：{problem}")

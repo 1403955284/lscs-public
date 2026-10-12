@@ -12,6 +12,7 @@ def lines_for(updates, verbose=False, name=lambda c: c):
 def test_key_events_timeline(run_log, mini_lines):
     assert lines_for(run_log(mini_lines)) == [
         "[T 0] 对局开始",
+        "[T 0] 备选英雄 TB_BaconShop_HERO_49（护甲 未知）",  # 这份合成日志的英雄没有护甲标签
         "[T 0] 选择英雄 TB_BaconShop_HERO_49",
         "[T 1] 招募开始 | 铸币 3 | 酒馆 1 本 | 升本 5 | 刷新 1 | 血量 30+0"
         " | 种族 DEMON、ELEMENTAL、PIRATE（推断中）",
@@ -53,3 +54,20 @@ def test_uncertain_warning(run_log, mini_lines):
     state, events = run_log(mini_lines)[0]
     lines = describe(state.model_copy(update={"uncertain": True}), events)
     assert lines[-1].endswith("状态可能不准")
+
+
+def test_heroes_offered_and_rerolled(run_log):
+    from helpers import HERO_LOG
+
+    from lscs.replay import read_log_lines
+
+    names = {"BG21_HERO_000": "凯瑞尔·罗姆", "BG22_HERO_003": "范达尔·雷矛"}
+    lines = lines_for(run_log(read_log_lines(HERO_LOG)), name=lambda c: names.get(c, c))
+    assert lines[:4] == [
+        "[T 0] 对局开始",
+        "[T 0] 备选英雄 凯瑞尔·罗姆（护甲 10）、BG28_HERO_800（护甲 18）、BG33_HERO_001（护甲 19）"
+        "、TB_BaconShop_HERO_91（护甲 17）",
+        "[T 0] 重新随机：备选英雄 凯瑞尔·罗姆（护甲 10）、范达尔·雷矛（护甲 12）"
+        "、BG33_HERO_001（护甲 19）、TB_BaconShop_HERO_91（护甲 17）",
+        "[T 0] 选择英雄 凯瑞尔·罗姆",
+    ]

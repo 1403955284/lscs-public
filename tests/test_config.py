@@ -38,10 +38,16 @@ def test_missing_file_gives_defaults(tmp_path):
         llm.deep_timeout_seconds,
     )
     assert deep == (True, "low", 16000, 75)
+    assert llm.hero_advice is True
+
+
+def test_hero_advice_can_be_switched_off(tmp_path):
+    assert load_config(write(tmp_path, "[llm]\nhero_advice = false\n")).llm.hero_advice is False
 
 
 def test_example_file_matches_defaults():
     assert load_config(EXAMPLE) == AppConfig()
+    assert "\nhero_advice = true " in EXAMPLE.read_text(encoding="utf-8")
 
 
 def test_values_are_read(tmp_path):
