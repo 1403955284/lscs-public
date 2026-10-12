@@ -5,7 +5,8 @@
 比例（卡牌跟着高度缩放）。一排 count 个槽位以内容区中心对称排开：
 中心 x = 内容区中心 + (index - (count - 1) / 2) × pitch × 高度。
 
-默认值是按 1080p 的 16:9 画面估计的（选项建议设计文档第 8.3 节），用 lscs highlight-test 对照截图
+商店、场面和四个按钮按用户的两张招募阶段截图（2560×1440、2559×1369）校准过（2026-10-12）；选项、
+选英雄两排还是按 16:9 估计的。按钮半径为 0 表示还没校准、不画框。用 lscs highlight-test 对照截图
 校准后改这里和 config.example.toml；config.toml 的 [highlight] 可以覆盖每一个数。
 """
 
@@ -24,6 +25,8 @@ if TYPE_CHECKING:
 ROWS = ("shop", "board", "choice", "choice4", "hero")  # highlight-test 能画的排
 BUTTONS = ("upgrade", "refresh", "freeze", "hero_power")
 CALIBRATION_ROWS = (*ROWS, "buttons")
+# highlight-test 不加 --rows 时只画招募阶段的商店、场面和按钮，避免几排框叠在一起看不清
+DEFAULT_CALIBRATION_ROWS = ("shop", "board", "buttons")
 # highlight-test 每排画几个
 CALIBRATION_SLOTS = {"shop": 7, "board": 7, "choice": 3, "choice4": 4, "hero": 4}
 CALIBRATION_LABELS = {
@@ -57,15 +60,15 @@ class ButtonSpec:
 @dataclass(frozen=True)
 class HighlightLayout:
     aspect: float = 16 / 9
-    shop: RowSpec = RowSpec(y=0.31, pitch=0.143, width=0.125, height=0.175)
-    board: RowSpec = RowSpec(y=0.585, pitch=0.143, width=0.125, height=0.175)
+    shop: RowSpec = RowSpec(y=0.367, pitch=0.128, width=0.11, height=0.15)
+    board: RowSpec = RowSpec(y=0.55, pitch=0.128, width=0.11, height=0.15)
     choice: RowSpec = RowSpec(y=0.50, pitch=0.42, width=0.33, height=0.50)  # 2~3 个选项
     choice4: RowSpec = RowSpec(y=0.50, pitch=0.34, width=0.28, height=0.44)  # 4 个选项（饰品）
     hero: RowSpec = RowSpec(y=0.47, pitch=0.36, width=0.27, height=0.46)  # 选英雄
-    upgrade: ButtonSpec = ButtonSpec(x=0.19, y=0.30, radius=0.05)
-    refresh: ButtonSpec = ButtonSpec(x=0.19, y=0.43, radius=0.045)
-    freeze: ButtonSpec = ButtonSpec(x=0.81, y=0.43, radius=0.045)
-    hero_power: ButtonSpec = ButtonSpec(x=0.585, y=0.82, radius=0.06)
+    upgrade: ButtonSpec = ButtonSpec(x=0.412, y=0.175, radius=0.05)
+    refresh: ButtonSpec = ButtonSpec(x=0.588, y=0.175, radius=0.05)
+    freeze: ButtonSpec = ButtonSpec(x=0.646, y=0.175, radius=0.05)
+    hero_power: ButtonSpec = ButtonSpec(x=0.593, y=0.78, radius=0.055)
 
     @classmethod
     def from_config(cls, cfg: HighlightConfig) -> HighlightLayout:
@@ -117,6 +120,12 @@ def slot_rect(layout: HighlightLayout, row: str, index: int, count: int, client:
     return _box(cx, content.y + spec.y * h, spec.width * h, spec.height * h)
 
 
+def button_calibrated(layout: HighlightLayout, button: str) -> bool:
+    """半径为 0 表示这个按钮的位置还没校准，不画框。"""
+    spec: ButtonSpec = getattr(layout, button)
+    return spec.radius > 0
+
+
 def button_rect(layout: HighlightLayout, button: str, client: Rect) -> Rect:
     """按钮外接正方形（画成圆）。"""
     content = content_rect(client, layout.aspect)
@@ -144,6 +153,8 @@ def step_frames(layout: HighlightLayout, step: NextStep | None, client: Rect) ->
     target = step.target
     if target.button is None and (target.row is None or target.count <= 0):
         return []
+    if target.button is not None and not button_calibrated(layout, target.button):
+        return []  # 这个按钮的位置还没校准，宁可不画也不画错地方
     return [target_frame(layout, target, client, step.badge)]
 
 
@@ -157,6 +168,7 @@ def calibration_frames(
             frames += [
                 Frame(button_rect(layout, b, client), round=True, label=CALIBRATION_LABELS[b])
                 for b in BUTTONS
+                if button_calibrated(layout, b)
             ]
             continue
         count = CALIBRATION_SLOTS[row]

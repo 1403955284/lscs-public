@@ -29,20 +29,21 @@ click_through = true           # 鼠标点击穿透面板，不影响游戏操�
 
 [highlight]
 # 游戏画面上的高亮：给"下一步"指的那张牌或按钮画一个金色框（只在 Windows 上显示）。
-# 下面的位置是按 16:9 画面估计的，用 uv run lscs highlight-test 对照截图校准；
+# 商店、场面和四个按钮按两张招募阶段截图（2560×1440、2559×1369）校准过；选项和选英雄两排还是估计的。
+# 对不准时用 uv run lscs highlight-test 对照截图再校准。
 # x 是内容区宽度的比例，y 和尺寸是内容区高度的比例（内容区：客户区里居中的最大 16:9 矩形）。
 enabled = true                 # false 只关高亮，面板的"下一步"照常
 color = "#ffd34d"              # 框的颜色
 aspect = 1.7777777777777777    # 内容区的宽高比（16:9）
 # 一排牌：中心的高度、相邻两张的间距、一张的宽和高
-shop_y = 0.31                  # 商店
-shop_pitch = 0.143
-shop_width = 0.125
-shop_height = 0.175
-board_y = 0.585                # 我方场面
-board_pitch = 0.143
-board_width = 0.125
-board_height = 0.175
+shop_y = 0.367                 # 商店
+shop_pitch = 0.128
+shop_width = 0.11
+shop_height = 0.15
+board_y = 0.55                 # 我方场面
+board_pitch = 0.128
+board_width = 0.11
+board_height = 0.15
 choice_y = 0.5                 # 弹出的 2~3 个选项（发现、黑暗之赐、三连、技能升级）
 choice_pitch = 0.42
 choice_width = 0.33
@@ -55,8 +56,8 @@ hero_y = 0.47                  # 选英雄
 hero_pitch = 0.36
 hero_width = 0.27
 hero_height = 0.46
-# 按钮：[中心 x, 中心 y, 半径]
-upgrade = [0.19, 0.3, 0.05]    # 升本
-refresh = [0.19, 0.43, 0.045]  # 刷新
-freeze = [0.81, 0.43, 0.045]   # 冻结
-hero_power = [0.585, 0.82, 0.06]  # 英雄技能
+# 按钮：[中心 x, 中心 y, 半径]；半径 0 表示还没校准、不画框
+upgrade = [0.412, 0.175, 0.05]  # 升本
+refresh = [0.588, 0.175, 0.05]  # 刷新
+freeze = [0.646, 0.175, 0.05]   # 冻结
+hero_power = [0.593, 0.78, 0.055]  # 英雄技能

@@ -870,6 +870,7 @@ def test_overlay_check_with_broken_config(monkeypatch, tmp_path, capsys):
 def test_highlight_test_command(monkeypatch, tmp_path, capsys):
     import lscs.cli
     import lscs.overlay.calibrate
+    from lscs.overlay.layout import DEFAULT_CALIBRATION_ROWS
 
     config = tmp_path / "config.toml"
     config.write_text("[highlight]\nshop_y = 0.3\n", encoding="utf-8")
@@ -884,9 +885,12 @@ def test_highlight_test_command(monkeypatch, tmp_path, capsys):
     assert main(["highlight-test"]) == 0
     assert main(["highlight-test", "--seconds", "3", "--rows", "shop, buttons"]) == 0
     assert calls == [
-        (0.3, 10.0, ["shop", "board", "choice", "choice4", "hero", "buttons"]),
+        (0.3, 10.0, ["shop", "board", "buttons"]),  # 不加 --rows：只画招募阶段的几排
         (0.3, 3.0, ["shop", "buttons"]),
     ]
+    assert calls[0][2] == list(DEFAULT_CALIBRATION_ROWS)
+    assert main(["highlight-test", "--rows", "choice4"]) == 0
+    assert calls[-1] == (0.3, 10.0, ["choice4"])
     monkeypatch.setattr(lscs.overlay.calibrate, "run_highlight_test", lambda *_: False)
     assert main(["highlight-test"]) == 1
 
@@ -919,5 +923,5 @@ def test_highlight_test_on_this_platform_previews(monkeypatch, tmp_path, capsys)
         lscs.overlay.calibrate, "show_tk", lambda frames, *rest: shown.append(len(frames))
     )
     assert main(["highlight-test", "--seconds", "1"]) == 0
-    assert shown == [29]
-    assert "不是 Windows：在一个 1280×720 的预览窗口里画出所有位置" in capsys.readouterr().out
+    assert shown == [7 + 7 + 4]  # 默认只画商店、场面和四个按钮
+    assert "不是 Windows：在一个 1280×720 的预览窗口里画出要检查的位置" in capsys.readouterr().out

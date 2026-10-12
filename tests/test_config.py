@@ -188,7 +188,9 @@ def test_highlight_defaults_and_values():
     cfg = AppConfig().highlight
     assert cfg == HighlightConfig()
     assert (cfg.enabled, cfg.color, cfg.aspect) == (True, "#ffd34d", 16 / 9)
-    assert cfg.upgrade == (0.19, 0.30, 0.05)
+    assert (cfg.shop_y, cfg.shop_pitch, cfg.board_y) == (0.367, 0.128, 0.55)
+    assert (cfg.upgrade, cfg.refresh) == ((0.412, 0.175, 0.05), (0.588, 0.175, 0.05))
+    assert (cfg.freeze, cfg.hero_power) == ((0.646, 0.175, 0.05), (0.593, 0.78, 0.055))
 
 
 @pytest.mark.parametrize(

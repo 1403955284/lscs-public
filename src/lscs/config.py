@@ -83,14 +83,14 @@ class HighlightConfig(BaseModel):
     enabled: bool = True
     color: str = Field(default="#ffd34d", pattern=r"^#[0-9a-fA-F]{6}$")
     aspect: float = Field(default=16 / 9, gt=0.5, le=4)
-    shop_y: Ratio = 0.31
-    shop_pitch: Ratio = 0.143
-    shop_width: Ratio = 0.125
-    shop_height: Ratio = 0.175
-    board_y: Ratio = 0.585
-    board_pitch: Ratio = 0.143
-    board_width: Ratio = 0.125
-    board_height: Ratio = 0.175
+    shop_y: Ratio = 0.367
+    shop_pitch: Ratio = 0.128
+    shop_width: Ratio = 0.11
+    shop_height: Ratio = 0.15
+    board_y: Ratio = 0.55
+    board_pitch: Ratio = 0.128
+    board_width: Ratio = 0.11
+    board_height: Ratio = 0.15
     choice_y: Ratio = 0.50
     choice_pitch: Ratio = 0.42
     choice_width: Ratio = 0.33
@@ -103,10 +103,11 @@ class HighlightConfig(BaseModel):
     hero_pitch: Ratio = 0.36
     hero_width: Ratio = 0.27
     hero_height: Ratio = 0.46
-    upgrade: ButtonPlace = (0.19, 0.30, 0.05)
-    refresh: ButtonPlace = (0.19, 0.43, 0.045)
-    freeze: ButtonPlace = (0.81, 0.43, 0.045)
-    hero_power: ButtonPlace = (0.585, 0.82, 0.06)
+    # 按钮：[x, y, 半径]；半径 0 表示还没校准，不画框
+    upgrade: ButtonPlace = (0.412, 0.175, 0.05)
+    refresh: ButtonPlace = (0.588, 0.175, 0.05)
+    freeze: ButtonPlace = (0.646, 0.175, 0.05)
+    hero_power: ButtonPlace = (0.593, 0.78, 0.055)
 
 
 class AppConfig(BaseModel):

@@ -10,7 +10,7 @@
 uv run lscs fix-log-config      # 只需一次；看到"已写入"后完全重启炉石
 Copy-Item config.example.toml config.toml; notepad config.toml   # 只需一次；填 DeepSeek Key
 uv run lscs overlay-check       # 只需一次；先打开炉石，检查悬浮面板
-uv run lscs highlight-test      # 只需一次；在炉石上画出金色框的所有位置，截图发给开发者校准
+uv run lscs highlight-test      # 只需一次；在炉石上画出招募阶段金色框的位置，截图发给开发者校准
 uv run lscs watch               # 每次打游戏前运行，PowerShell 不要关；Ctrl+C 退出
 ```
 
@@ -29,7 +29,7 @@ Windows 上双击项目文件夹里的 `启动.bat` 等于 `uv run lscs watch`�
 | `uv run lscs replay <文件> --ai` | 回放时真的调用大模型（花费 token，用来检查 AI 建议） |
 | `uv run lscs replay <文件> --overlay --speed 20` | 回放时打开悬浮面板预览（不开炉石、在 Mac 上也能看） |
 | `uv run lscs overlay-check` | 逐项检查悬浮面板能否贴靠炉石、穿透鼠标（在 Windows 上先打开炉石再运行） |
-| `uv run lscs highlight-test` | 在炉石画面上画出画面高亮的所有位置（每排的槽位和四个按钮），截图核对位置；`--seconds 60` 显示更久，`--rows shop,buttons` 只画几排；不是 Windows 时开一个预览窗口 |
+| `uv run lscs highlight-test` | 在炉石画面上画出画面高亮的位置（默认只画商店、场面和四个按钮），截图核对位置；`--seconds 60` 显示更久，`--rows choice`（`choice4`、`hero`……）画别的排；不是 Windows 时开一个预览窗口 |
 
 `watch` 总是显示中文卡名；`replay` 加 `--names` 才显示。第一次使用会从 HearthstoneJSON 下载约 10MB 的卡牌数据。
 
@@ -63,7 +63,8 @@ Windows 上双击项目文件夹里的 `启动.bat` 等于 `uv run lscs watch`�
 - 画面高亮（`[highlight]`）：Windows 上贴靠炉石时，再开一个和面板同一个 Tk 的置顶窗口盖住炉石客户区，
   背景用 `-transparentcolor` 色键（完全透明），再加上穿透、不抢焦点的扩展样式（不调 `SetLayeredWindowAttributes`，
   否则会盖掉色键），只给"下一步"画三层描边的金色框和步骤编号；面板隐藏时清空，出错只关高亮。位置由
-  `overlay/layout.py` 的布局模型按客户区里居中的 16:9 内容区按比例算出，默认值是估计的，用 `highlight-test`
+  `overlay/layout.py` 的布局模型按客户区里居中的 16:9 内容区按比例算出；商店、场面和四个按钮按两张招募阶段截图
+  （2560×1440、2559×1369）校准过，选项和选英雄还是估计的；按钮半径填 0 表示没校准、不画。用 `highlight-test`
   的截图校准后改默认值和 `config.example.toml`。
 
 ## 添加录像（在 Mac 上）

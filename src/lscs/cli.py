@@ -437,7 +437,7 @@ def _seconds(text: str) -> float:
 
 def _cmd_highlight_test(args: argparse.Namespace) -> int:
     from lscs.overlay import calibrate
-    from lscs.overlay.layout import CALIBRATION_ROWS
+    from lscs.overlay.layout import DEFAULT_CALIBRATION_ROWS
 
     try:
         cfg = load_config(DEFAULT_CONFIG).highlight  # 只用 [highlight]；没有文件时用默认值
@@ -445,7 +445,7 @@ def _cmd_highlight_test(args: argparse.Namespace) -> int:
         print(exc)
         return 1
     try:
-        rows = args.rows or CALIBRATION_ROWS
+        rows = args.rows or DEFAULT_CALIBRATION_ROWS
         return 0 if calibrate.run_highlight_test(cfg, args.seconds, rows) else 1
     except KeyboardInterrupt:
         return 0
@@ -517,14 +517,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser(
         "highlight-test",
-        help="在炉石画面上画出高亮的所有位置，截图核对位置（Windows，先打开炉石）",
+        help="在炉石画面上画出高亮的位置（默认商店、场面和按钮），截图核对位置（Windows，先打开炉石）",
     )
     p.add_argument("--seconds", type=_seconds, default=10.0, help="显示几秒后自动关闭")
     p.add_argument(
         "--rows",
         type=_rows,
         default=None,
-        help="只画这几排，逗号分隔：shop,board,choice,choice4,hero,buttons（默认全画）",
+        help="只画这几排，逗号分隔：shop,board,choice,choice4,hero,buttons（默认商店、场面、按钮）",
     )
     p.set_defaults(func=_cmd_highlight_test)
     return parser

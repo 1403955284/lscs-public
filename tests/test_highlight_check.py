@@ -1,4 +1,4 @@
-"""lscs highlight-test：把高亮能画的所有位置都画出来（不真的开窗口，用假的窗口函数）。"""
+"""lscs highlight-test：把高亮能画的位置画出来（不真的开窗口，用假的窗口函数）。"""
 
 import pytest
 from fake_win32 import FakeWin32Api, FakeWindow
@@ -54,8 +54,11 @@ def test_windows_draws_every_slot_over_hearthstone(monkeypatch):
     assert len(labels) == 7 + 7 + 3 + 4 + 4 + 4
     assert out[0] == "炉石客户区：2560×1080，左上角 (0, 0)"
     assert out[1] == "内容区（16:9）：1920×1080，左上角 (320, 0)"
-    assert "  shop_y = 0.31  shop_pitch = 0.143  shop_width = 0.125  shop_height = 0.175" in out
-    assert any("请在招募阶段和弹出选项时各截一张图发给开发者" in line for line in out)
+    assert "  shop_y = 0.367  shop_pitch = 0.128  shop_width = 0.11  shop_height = 0.15" in out
+    assert "  upgrade = [0.412, 0.175, 0.05]" in out
+    assert out[-1] == calibrate.SCREENSHOT_HINT
+    assert "默认只画招募阶段的商店、场面和已校准的按钮" in out[-1]
+    assert "--rows choice" in out[-1] and "--rows hero" in out[-1]
 
 
 def test_rows_can_be_chosen_and_config_values_are_used(monkeypatch):
@@ -105,7 +108,7 @@ def test_other_platforms_draw_a_preview(monkeypatch):
     ok, out = run(show)
     _frames, client, _seconds, preview, _cfg, focus = show.calls[0]
     assert ok and preview and client == calibrate.PREVIEW_CLIENT and focus is None
-    assert out[0].startswith("不是 Windows：在一个 1280×720 的预览窗口里画出所有位置")
+    assert out[0].startswith("不是 Windows：在一个 1280×720 的预览窗口里画出要检查的位置")
 
 
 def test_window_failure_is_reported(monkeypatch):
