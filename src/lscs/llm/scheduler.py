@@ -266,6 +266,19 @@ class LLMScheduler:
         return self._memory
 
     @property
+    def provider(self) -> LLMProvider:
+        """对局复盘用同一个提供商和配置（不占本局的调用预算）。"""
+        return self._provider
+
+    @property
+    def config(self) -> LLMConfig:
+        return self._cfg
+
+    @property
+    def recorder(self) -> Recorder | None:
+        return self._recorder
+
+    @property
     def deep_thinking(self) -> str:
         return self._cfg.deep_thinking
 

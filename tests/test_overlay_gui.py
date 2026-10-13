@@ -221,6 +221,71 @@ def test_overlay_window_condenses_when_too_tall():
     assert "⚠ 状态可能不准" in texts or height == window._layout.max_height
 
 
+def test_overlay_window_renders_the_review_after_the_game():
+    tk = pytest.importorskip("tkinter")
+    from dataclasses import replace
+    from datetime import datetime
+
+    from test_review_flags import RULES, curve_turns, record
+
+    from lscs.overlay.window import OverlayWindow
+    from lscs.review.flags import Flag
+    from lscs.review.report import review_game
+
+    try:
+        window = OverlayWindow(OverlayConfig(position="right", opacity=0.9))
+    except tk.TclError as exc:
+        pytest.skip(f"没有图形界面：{exc}")
+    model = OverlayModel(lambda c: NAMES.get(c, c))
+    over = make_state(phase=Phase.GAME_OVER, seq=9).model_copy(update={"final_place": 3})
+    moments = (
+        Flag(
+            kind="upgrade_without_board",
+            turns=(7, 8),
+            severity=3,
+            facts="连续升本",
+            fix="升本也买",
+            streak_turns=(8, 9),
+            streak_lost=30,
+        ),
+        Flag(kind="good_turn", turns=(11,), severity=0, facts="凑出金色蚀脑怪，打出 10 血", fix=""),
+    )
+    review = replace(
+        review_game(record(curve_turns()), RULES, lambda c: c, datetime(2026, 10, 11, 23, 20)),
+        moments=moments,
+        focus="升本的回合也要买一张随从",
+        shown_path="reviews/2026-10-11_2320_凯瑞尔·罗姆_第3名.md",
+    )
+    steps = [
+        lambda: model.on_update(over, [Event(type=EventType.GAME_ENDED, turn=13)]),
+        lambda: model.show_review(over, review),
+    ]
+    snapshots = []
+    polls = 0
+
+    def keep_running():
+        nonlocal polls
+        polls += 1
+        if polls % 3:
+            return True
+        snapshots.append((window.texts(), window.size))
+        if not steps:
+            return False
+        steps.pop(0)()
+        return True
+
+    window.run(model, keep_running)
+    texts = snapshots[-1][0]
+    assert texts[:2] == ["对局结束 · 第 3 名", "复盘"]
+    assert "① 第 7、8 回合 升本不补场面 → 连掉 30 血" in texts
+    assert "② 第 11 回合 做得好：凑出金色蚀脑怪" in texts
+    assert "下局重点：升本的回合也要买一张随从" in texts
+    assert any(t.startswith("已保存 reviews/") for t in texts)
+    compact = next(size for shown, size in snapshots if shown == ["对局结束 · 第 3 名"])
+    assert snapshots[-1][1][1] > compact[1]  # 有复盘时面板变高
+    assert all(h <= window._layout.max_height for _, (_w, h) in snapshots)
+
+
 def test_windows_path_with_fake_win32(monkeypatch):
     """在 Mac 上用假的 Win32 API 走一遍 Windows 的代码：贴靠、隐藏、连续失败后退回。"""
     tk = pytest.importorskip("tkinter")

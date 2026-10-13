@@ -5,10 +5,13 @@ from __future__ import annotations
 import argparse
 import functools
 import logging
+import re
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Iterator
+from datetime import date, datetime
+from datetime import time as day_time
 from pathlib import Path
 
 from lscs import __version__
@@ -20,6 +23,7 @@ from lscs.config import (
     AppConfig,
     ConfigError,
     HighlightConfig,
+    ReviewConfig,
     load_config,
     mask_key,
     old_highlight_values,
@@ -35,7 +39,8 @@ from lscs.logwatch.tail import LogTailer
 from lscs.overlay import app as overlay_app
 from lscs.overlay.model import OverlayModel
 from lscs.pipeline import Pipeline, UpdateHandler
-from lscs.replay import push_paced, read_log_lines
+from lscs.replay import line_seconds, push_paced, read_log_lines
+from lscs.review.reviewer import GameReviewer
 from lscs.state.models import Event, GameState
 from lscs.state.pool import load_pool_config
 from lscs.state.tracker import StateTracker
@@ -46,6 +51,7 @@ DEFAULT_RULES = PROJECT_ROOT / "strategy" / "current" / "rules.toml"
 DEFAULT_GUIDE = PROJECT_ROOT / "strategy" / "current" / "guide.md"
 DEFAULT_HEROES = PROJECT_ROOT / "strategy" / "current" / "heroes.md"  # 可选：当月英雄强度资料
 RECORDINGS_DIR = PROJECT_ROOT / "recordings"
+REVIEW_BASE = PROJECT_ROOT  # [review] dir 是相对路径时相对它（测试里换成临时目录）
 POLL_INTERVAL = 0.2  # watch 默认的轮询间隔（秒）
 OVERLAY_REPLAY_SPEED = 20.0  # replay --overlay 没填 --speed 时的倍速（不等待的话面板一闪而过）
 RECOMMENDED_OUTPUT_TOKENS = 1500  # 快速建议要写分析和 JSON，800 容易截断
@@ -304,6 +310,99 @@ def _tracker(args: argparse.Namespace) -> StateTracker:
     return StateTracker(load_pool_config(Path(args.pool)))
 
 
+def _review_config(explicit: bool = False) -> ReviewConfig | None:
+    """config.toml 的 [review]（没有文件时用默认值）；关掉复盘时为 None。config.toml 有误时
+    打印原因、这次不出复盘（建议照常）。explicit：lscs review 明确要复盘，不看 enabled。"""
+    try:
+        cfg = load_config(DEFAULT_CONFIG).review
+    except ConfigError as exc:
+        print(f"{exc}（这次不出复盘）")
+        return None
+    return cfg if cfg.enabled or explicit else None
+
+
+def _review_dir(cfg: ReviewConfig) -> Path:
+    path = Path(cfg.dir)
+    return path if path.is_absolute() else REVIEW_BASE / path
+
+
+class _LogClock:
+    """回放日志时复盘用的时间：日期取日志文件名开头的 YYYY-MM-DD（没有时用文件的修改时间），
+    时刻取最近读到的一行日志的时间戳（对局结束时就是结束的时刻）。"""
+
+    _DATE = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
+
+    def __init__(self, path: Path) -> None:
+        try:
+            modified = datetime.fromtimestamp(path.stat().st_mtime)
+        except OSError:
+            modified = datetime.now()
+        self._fallback = modified
+        self._date = modified.date()
+        match = self._DATE.match(path.name)
+        if match:
+            try:
+                self._date = date(*(int(part) for part in match.groups()))
+            except ValueError:
+                pass
+        self._seconds: float | None = None
+
+    def track(self, lines: Iterable[str]) -> Iterator[str]:
+        for line in lines:
+            seconds = line_seconds(line)
+            if seconds is not None:
+                self._seconds = seconds
+            yield line
+
+    def __call__(self) -> datetime:
+        if self._seconds is None:
+            return datetime.combine(self._date, self._fallback.time())
+        total = int(self._seconds) % 86400
+        moment = day_time(total // 3600, total % 3600 // 60, total % 60)
+        return datetime.combine(self._date, moment)
+
+
+def _reviewer(
+    cfg: ReviewConfig | None,
+    rules: RulesConfig,
+    name: Namer,
+    display: AdviceSink,
+    cards,
+    scheduler,
+    *,
+    sync: bool,
+    now: Callable[[], datetime] = datetime.now,
+    save_history: bool = True,
+) -> GameReviewer | None:
+    """[review] 打开时创建复盘，它的显示端是终端（和面板）。有调度器（AI 开着）、[review] ai
+    打开时，打完一局再调一次 AI 写复盘（用调度器的提供商和配置，不占每局的调用预算）。
+    sync：replay 同步执行 AI 调用。"""
+    if cfg is None:
+        return None
+    from lscs.llm.prompt import load_guide
+
+    use_ai = scheduler is not None and cfg.ai
+    extra = {"run_async": lambda job: job()} if sync else {}
+    return GameReviewer(
+        cfg,
+        rules,
+        name,
+        display,
+        cards,
+        provider=scheduler.provider if use_ai else None,
+        llm=scheduler.config if use_ai else None,
+        guide=load_guide(DEFAULT_GUIDE) if use_ai else "",
+        recorder=scheduler.recorder if use_ai else None,
+        directory=_review_dir(cfg),
+        base=REVIEW_BASE,
+        now=now,
+        save_history=save_history,
+        # Key 连续无效、调度器已经关掉 AI 时不再为复盘调用
+        ai_blocked=(lambda: scheduler.disabled_reason) if use_ai else (lambda: None),
+        **extra,
+    )
+
+
 def _cmd_replay(args: argparse.Namespace) -> int:
     advice = args.advice or args.ai or args.overlay
     show = args.dump or advice
@@ -316,6 +415,7 @@ def _cmd_replay(args: argparse.Namespace) -> int:
             return 1
     model = None
     handlers: list[UpdateHandler] = []
+    clock = _LogClock(Path(args.log))
     # 面板是给人看的，预览时总是显示中文卡名
     cards = _load_cards() if (args.names or args.ai or args.overlay) and show else None
     name = cards.name if cards is not None else _identity
@@ -333,12 +433,30 @@ def _cmd_replay(args: argparse.Namespace) -> int:
                 print(exc)
                 return 1
         model, display = _displays(name, overlay, scheduler)
+        # 回放的是录像：复盘照出，但不记进 history.jsonl（免得同一份录像反复算进去）
+        reviewer = _reviewer(
+            _review_config(),
+            rules,
+            name,
+            display,
+            cards,
+            scheduler,
+            sync=True,
+            now=clock,
+            save_history=False,
+        )
+        if reviewer is not None:
+            display = DisplayGroup(display, reviewer.tap)
         runner = AdviceRunner(rules, name, display, scheduler, pool=_pool_estimator(cards, args))
         if model is not None:
             handlers.append(model.on_update)  # 先更新面板的回合，再出建议
         handlers.append(runner.on_update)
         if scheduler is not None:
             handlers.append(lambda _state, _events: runner.tick())
+        if reviewer is not None:
+            # 在建议之后：本局 AI 用量那一行先打印，复盘在后面
+            handlers.append(reviewer.on_update)
+            handlers.append(lambda _state, _events: reviewer.tick())
     tracker = _tracker(args)
     updates = 0
 
@@ -354,7 +472,7 @@ def _cmd_replay(args: argparse.Namespace) -> int:
     def work(stop: threading.Event | None) -> None:
         push_paced(
             pipeline,
-            read_log_lines(Path(args.log)),
+            clock.track(read_log_lines(Path(args.log))),
             speed,
             sleep=time.sleep if stop is None else stop.wait,
             interval=POLL_INTERVAL,
@@ -430,22 +548,30 @@ def _cmd_watch(args: argparse.Namespace) -> int:
             print(exc)
             return 1
     model, display = _displays(name, overlay, scheduler)
+    reviewer = _reviewer(_review_config(), rules, name, display, cards, scheduler, sync=False)
+    if reviewer is not None:
+        display = DisplayGroup(display, reviewer.tap)
     runner = AdviceRunner(rules, name, display, scheduler, pool=_pool_estimator(cards, args))
     print(f"正在监听 {install / 'Logs'}，按 Ctrl+C 退出。")
     handlers = [_timeline(name, args.verbose)]
     if model is not None:
         handlers.append(model.on_update)  # 先更新面板的回合，再出建议
     handlers.append(runner.on_update)
+    if reviewer is not None:
+        handlers.append(reviewer.on_update)  # 在建议之后：本局 AI 用量那一行先打印
     tailer = LogTailer(lambda: latest_power_log(install))
     pipeline = Pipeline(_tracker(args), _combine(*handlers))
 
+    def tick() -> None:
+        runner.tick()
+        if reviewer is not None:
+            reviewer.tick()
+
     def work(stop: threading.Event | None) -> None:
         if stop is None:  # 只用终端：和以前一样，Ctrl+C 抛出 KeyboardInterrupt
-            watch(tailer, pipeline, args.interval, tick=runner.tick)
+            watch(tailer, pipeline, args.interval, tick=tick)
         else:  # 在后台线程里运行，面板模式的 Ctrl+C 只设置停止标志
-            watch(
-                tailer, pipeline, args.interval, tick=runner.tick, stop=stop.is_set, sleep=stop.wait
-            )
+            watch(tailer, pipeline, args.interval, tick=tick, stop=stop.is_set, sleep=stop.wait)
 
     try:
         if model is None or overlay is None:
@@ -454,6 +580,93 @@ def _cmd_watch(args: argparse.Namespace) -> int:
             _run_overlay(work, model, overlay, finished_text=overlay_app.FINISHED_TEXT)
     except KeyboardInterrupt:
         pass
+    return 0
+
+
+def _print_habits(cfg: ReviewConfig) -> int:
+    from lscs.review.flags import FIXES, KIND_NAMES, first_clause
+    from lscs.review.report import HISTORY_FILE, MIN_HABIT_GAMES, habits, history_line, read_history
+
+    path = _review_dir(cfg) / HISTORY_FILE
+    entries = read_history(path)
+    if not entries:
+        print("还没有复盘记录（打完一局自动生成）")
+        return 0
+    recent = entries[-cfg.history_games :]
+    print(f"最近 {len(recent)} 局（{path}）：")
+    for entry in recent:
+        print("  " + history_line(entry))
+    habit = habits(entries, cfg.history_games)
+    if habit is None:
+        print(f"满 {MIN_HABIT_GAMES} 局才看习惯（现在 {len(entries)} 局）")
+        return 0
+    print(habit.line())
+    for kind, count in habit.kinds:
+        fix = first_clause(FIXES.get(kind, ""))
+        print(f"  {KIND_NAMES.get(kind, kind)}（{count} 局）" + (f"→ {fix}" if fix else ""))
+    return 0
+
+
+def _cmd_review(args: argparse.Namespace) -> int:
+    """给录像出复盘：和 replay --advice（--ai）一样回放，但不打时间线和每回合的建议，只打复盘；
+    --habits 只看 history.jsonl 里最近几局的习惯。"""
+    cfg = _review_config(explicit=True)
+    if cfg is None:
+        return 1
+    if args.habits:
+        return _print_habits(cfg)
+    if not args.log:
+        print("请给出要复盘的日志文件（Power.log 或 .log.gz），或者用 --habits 看最近几局的习惯。")
+        return 1
+    log_path = Path(args.log)
+    if not log_path.exists():
+        print(f"找不到 {log_path}")
+        return 1
+    rules = _load_rules()
+    if rules is None:
+        return 1
+    cards = _load_cards()  # 复盘是给人看的：总是显示中文卡名
+    name = cards.name if cards is not None else _identity
+    scheduler = None
+    if args.ai:
+        try:
+            scheduler = _build_scheduler(cards, sync=True)
+        except ConfigError as exc:
+            print(exc)
+            return 1
+        cfg = cfg.model_copy(update={"ai": True})  # 命令行明确要 AI
+    deep_thinking = scheduler.deep_thinking if scheduler is not None else "low"
+    terminal = AdviceDisplay(name, deep_thinking=deep_thinking)
+    clock = _LogClock(log_path)
+    reviewer = _reviewer(
+        cfg,
+        rules,
+        name,
+        terminal,
+        cards,
+        scheduler,
+        sync=True,
+        now=clock,
+        save_history=args.save_history,
+    )
+    assert reviewer is not None
+    # 建议只交给复盘记下来，不打印
+    runner = AdviceRunner(rules, name, reviewer.tap, scheduler, pool=_pool_estimator(cards, args))
+    handlers: list[UpdateHandler] = [runner.on_update]
+    if scheduler is not None:
+        handlers.append(lambda _state, _events: runner.tick())
+    handlers += [reviewer.on_update, lambda _state, _events: reviewer.tick()]
+    pipeline = Pipeline(_tracker(args), _combine(*handlers))
+    push_paced(
+        pipeline,
+        clock.track(read_log_lines(log_path)),
+        None,
+        sleep=time.sleep,
+        interval=POLL_INTERVAL,
+    )
+    reviewer.tick()
+    if reviewer.last_review is None and not reviewer.already_done:
+        print("这份日志里没有打完的对局，没有复盘。")
     return 0
 
 
@@ -563,6 +776,24 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-overlay", action="store_true", help="不打开游戏上的悬浮面板，只在终端显示")
     _add_output_options(p, names_flag=False)
     p.set_defaults(func=_cmd_watch)
+
+    p = sub.add_parser("review", help="给打完的对局出复盘；--habits 看最近几局的习惯")
+    p.add_argument("log", nargs="?", help="Power.log 或 .log.gz 文件")
+    p.add_argument(
+        "--ai",
+        action="store_true",
+        help="同时让 AI 写复盘（会把整局的 AI 建议也重放一遍：计入预算、花费 token）",
+    )
+    p.add_argument(
+        "--save-history",
+        action="store_true",
+        help="把这局记进 history.jsonl（默认不记，免得同一份录像反复算进去）",
+    )
+    p.add_argument("--habits", action="store_true", help="只看 history.jsonl 里最近几局的习惯")
+    # 复盘总是显示中文卡名；保留这个参数，和 replay 的用法一致
+    p.add_argument("--names", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--pool", default=str(DEFAULT_POOL), help="卡池配置文件")
+    p.set_defaults(func=_cmd_review)
 
     p = sub.add_parser(
         "overlay-check", help="检查悬浮面板能否贴靠炉石、穿透鼠标（Windows，先打开炉石）"

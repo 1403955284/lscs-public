@@ -29,6 +29,14 @@ font_size = 0                  # 字号（像素）：0 表示按炉石窗口大
 click_through = true           # 鼠标点击穿透面板，不影响游戏操作（只在 Windows 上有效）
 opponents = true               # 面板上显示对手一览：招募时两行（下一个、最强），战斗中列出全部
 
+[review]
+# 对局复盘：每局打完挑出最要紧的 2~3 个时刻和"下局重点"；uv run lscs review <日志> 也能给录像出复盘，
+# uv run lscs review --habits 看最近几局的习惯
+enabled = true                 # 每局打完自动复盘（终端、面板和 reviews/ 里的文件）
+ai = true                      # 让 AI 把复盘写成一段话（每局 1 次调用，不到 2 分钱；false 只用规则版）
+dir = "reviews"                # 复盘文件和历史记录存在哪（相对项目目录）
+history_games = 10             # "最近 N 局"看几局（3~50）
+
 [highlight]
 # 游戏画面上的高亮：在"下一步"指的那张牌或按钮的四个角画浅金色的括号（只在 Windows 上显示）。
 # 商店、场面和四个按钮按两张招募阶段截图（2560×1440、2559×1369）校准过；选项和选英雄两排还是估计的。

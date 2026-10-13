@@ -13,6 +13,9 @@
 （选项 → 选英雄 → 深度 → 快速 → 规则），带上画面高亮要框的位置（Target）。游戏弹出"选一个"
 时多一个"选择"区，★ 标在 AI 推荐的前面；那组选完就消失。
 
+对局结束后（对局复盘设计文档第 7.3 节）：标题下面多一个"复盘"区，列出关键时刻、下局重点和
+文件路径；AI 复盘到了就换成 AI 的标题和重点；下一局开始时清空。
+
 对手一览（对手一览与卡池估计设计文档第 7 节）：招募时最下面的"对手"区两行（▶ 下一个对手、
 ★ 最强威胁），面板超高时最先去掉；战斗中整个面板列出所有对手。规则区多一行"对子"，
 要找的牌后面写池里还剩约几张。
@@ -35,6 +38,8 @@ from lscs.advisor.runner import remaining_plan
 from lscs.llm.notices import AUTH_DISABLED, BUDGET_EXHAUSTED
 from lscs.llm.parse import MAX_ACTIONS  # 每个方案最多显示几步：和 AI 回答的上限一致
 from lscs.overlay.geometry import STEP_SEP
+from lscs.review.report import CIRCLED as REVIEW_NUMBERS
+from lscs.review.report import GameReview, saved_text
 from lscs.state.build import HERO_PLACEHOLDER
 from lscs.state.models import Choice, Event, EventType, GameState, HeroSelect, Phase
 
@@ -78,6 +83,7 @@ WAIT_NEW = POINT + "等新的建议…"
 ALL_DONE = "✓ 建议的步骤都做完了"
 CHOICE_BADGE = "选"  # 选项、选英雄的高亮框上写的字（方案的步骤写第几步）
 ROW_LABELS: dict[str, str] = {"shop": "商店", "board": "场面", "choice": "选项", "hero": "英雄"}
+GOOD_CHARS = 12  # "做得好："后面只写事实的第一句，最多这么多个字
 
 
 @dataclass(frozen=True)
@@ -121,6 +127,7 @@ class OverlayView:
     next_step: NextStep | None = None  # compact 时为 None
     choice: tuple[Line, ...] = ()  # "选择"区：游戏正弹着"选一个"时才有
     opponents: tuple[Line, ...] = ()  # "对手"区：招募时两行，战斗中列出所有对手
+    review: tuple[Line, ...] = ()  # "复盘"区：对局结束后的关键时刻、下局重点和文件路径
 
 
 def slots_text(row: Row, index: int, count: int) -> str:
@@ -149,6 +156,7 @@ def condense(view: OverlayView, level: int) -> OverlayView:
         ai=keep(view.ai),
         choice=keep(view.choice),
         opponents=keep(view.opponents),
+        review=keep(view.review),
     )
 
 
@@ -328,6 +336,37 @@ def combat_opponent_lines(overview: OpponentOverview, name: Namer) -> tuple[Line
     return tuple(lines)
 
 
+REVIEW_PENDING = "AI 复盘生成中…"
+
+
+def review_lines(review: GameReview) -> tuple[Line, ...]:
+    """复盘区：每个关键时刻一行（"① 第 N 回合 升本不补场面 → 连掉 30 血"，做得好的写事实的
+    第一句），下局重点，文件路径（灰字，面板超高时先去掉）。AI 复盘到了换成 AI 的标题和重点；
+    还在生成时最后一行"AI 复盘生成中…"（灰字），失败时去掉这行。"""
+    lines = []
+    ai = review.ai if review.ai_state == "done" else None
+    if ai is not None:
+        for i, moment in enumerate(ai.moments):
+            lines.append(Line(f"{REVIEW_NUMBERS[i]} 第 {moment.turn} 回合 {moment.title}"))
+        focus = ai.focus
+    else:
+        for i, flag in enumerate(review.moments):
+            text = f"{REVIEW_NUMBERS[i]} {flag.title}"
+            if flag.kind == "good_turn":
+                text += "：" + _clip(flag.facts.split("，", 1)[0], GOOD_CHARS)
+            elif flag.streak_lost:
+                text += f" → 连掉 {flag.streak_lost} 血"
+            lines.append(Line(text))
+        if not review.moments:
+            lines.append(Line("这局没有触发提醒", "muted"))
+        focus = review.focus
+    lines.append(Line(f"下局重点：{focus}"))
+    lines.append(Line(saved_text(review, updated=ai is not None), "muted", role="comment"))
+    if review.ai_state == "pending":
+        lines.append(Line(REVIEW_PENDING, "muted"))
+    return tuple(lines)
+
+
 def _recruit_title(state: GameState) -> str:
     parts = [f"第 {state.turn} 回合"]
     me = state.me
@@ -369,6 +408,7 @@ class OverlayModel:
         self._ai_off: tuple[str, bool] | None = None  # (常驻提示, 新的一局是否清除)
         self._message: str | None = None
         self._overview_failed = False  # 整理对手一览出过错（只记一次警告）
+        self._review: tuple[Line, ...] = ()  # 对局结束后的复盘区
 
     # ---- 界面线程 ----
 
@@ -385,6 +425,7 @@ class OverlayModel:
                 if self._ai_off is not None and self._ai_off[1]:
                     self._ai_off = None
                 self._hero_rules, self._hero_ai = None, ()  # 新对局（或重连）：重新开始
+                self._review = ()
             if any(e.type == EventType.HEROES_OFFERED for e in events):
                 self._hero_ai = ()  # 新的一组备选（重随）：上一组的推荐、错误和提示都不再显示
             if state.choice is None or any(e.type == EventType.CHOICE_OFFERED for e in events):
@@ -480,6 +521,17 @@ class OverlayModel:
 
     def ai_summary(self, calls: int, input_tokens: int, output_tokens: int) -> None:
         """本局 AI 用量只在终端显示。"""
+
+    # ---- 复盘 ----
+
+    def show_review(self, state: GameState, review: GameReview) -> None:
+        """对局结束后的复盘区；已经开始下一局时不显示（晚到的结果只在终端和文件里）。"""
+        with self._lock:
+            current = self._state
+            if current is None or current.phase != Phase.GAME_OVER:
+                return
+            self._review = review_lines(review)
+            self._commit()
 
     # ---- 选英雄 ----
 
@@ -588,6 +640,8 @@ class OverlayModel:
             return self._hero_view(state)
         if state.phase == Phase.GAME_OVER:
             place = f" · 第 {state.final_place} 名" if state.final_place else ""
+            if self._review:
+                return OverlayView(title=f"对局结束{place}", compact=False, review=self._review)
             return OverlayView(title=f"对局结束{place}")
         if state.phase == Phase.COMBAT:
             return self._combat_view(state)

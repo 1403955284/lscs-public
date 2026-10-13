@@ -15,6 +15,7 @@ from lscs.advisor.opponents import (
     eliminated_names,
 )
 from lscs.advisor.pool import PoolNote, note_for
+from lscs.review.report import GameReview, ai_terminal_lines, terminal_lines
 from lscs.state.models import GameState
 
 log = logging.getLogger(__name__)
@@ -23,7 +24,13 @@ Namer = Callable[[str], str]
 Output = Callable[[str], None]
 CIRCLED = "①②③④⑤⑥⑦⑧⑨"
 INDENT = "          "  # 让多步方案的后续行与第一步对齐
-ICONS: dict[Lane, str] = {"fast": "🤖 ", "deep": "🧠 ", "hero": "🤖 ", "choice": "🤖 "}
+ICONS: dict[Lane, str] = {
+    "fast": "🤖 ",
+    "deep": "🧠 ",
+    "hero": "🤖 ",
+    "choice": "🤖 ",
+    "review": "🧠 ",
+}
 EXPIRED_LABELS: dict[Expired, str] = {
     "refreshed": "操作已过期（商店刷新了），只看思路",
     "invalid": "操作不可用，只看思路",
@@ -236,6 +243,7 @@ class AdviceSink(Protocol):
     def show_hero(self, state: GameState, advice: HeroAdvice, agrees: bool = False) -> None: ...
     def show_choice(self, state: GameState, advice: ChoiceAdvice | None) -> None: ...
     def ai_summary(self, calls: int, input_tokens: int, output_tokens: int) -> None: ...
+    def show_review(self, state: GameState, review: GameReview) -> None: ...
 
 
 class AdviceDisplay:
@@ -243,6 +251,7 @@ class AdviceDisplay:
         self._name = name
         self._out = out
         self._deep_pending = f"深度分析中…（{deep_wait_hint(deep_thinking)}）"
+        self._review_pending = f"AI 复盘生成中…（{deep_wait_hint(deep_thinking)}）"
         self._last_rules: tuple | None = None
 
     def _block(self, label: str, lines: list[str]) -> None:
@@ -350,6 +359,18 @@ class AdviceDisplay:
             f"输出 {output_tokens / 1000:.1f} 千 token"
         )
 
+    def show_review(self, state: GameState, review: GameReview) -> None:
+        """对局复盘（对局复盘设计文档第 7.1 节）：先是规则版的一块（要调 AI 时末尾一行"生成中"），
+        AI 复盘到了再打一块，失败时一行。"""
+        if review.ai_state in ("done", "failed"):
+            lines = ai_terminal_lines(review)
+        else:
+            lines = terminal_lines(review)
+            if review.ai_state == "pending":
+                lines.append(f"  🧠 {self._review_pending}")
+        for line in lines:
+            self._out(line)
+
 
 class DisplayGroup:
     """把每条建议依次转发给多个显示端；一个显示端出错只记日志，不影响其他显示端。"""
@@ -393,3 +414,6 @@ class DisplayGroup:
 
     def ai_summary(self, calls: int, input_tokens: int, output_tokens: int) -> None:
         self._each("ai_summary", calls, input_tokens, output_tokens)
+
+    def show_review(self, state: GameState, review: GameReview) -> None:
+        self._each("show_review", state, review)

@@ -1296,3 +1296,85 @@ def test_look_for_with_pool_counts_is_cut_between_cards():
     one = llm_advice(BUY_21, look_for=("长" * 50,))
     model.show_ai(T3, one, False)
     assert model.snapshot().ai[1].text == "要找：" + "长" * 37 + "…"  # 一张就放不下：按字截
+
+
+def _review(**kw):
+    from dataclasses import replace
+    from datetime import datetime
+    from pathlib import Path
+
+    from test_review_flags import RULES, curve_turns, record
+
+    from lscs.review.flags import Flag
+    from lscs.review.report import review_game
+
+    review = review_game(record(curve_turns()), RULES, name, datetime(2026, 10, 11, 23, 20))
+    moments = (
+        Flag(
+            kind="upgrade_without_board",
+            turns=(7, 8),
+            severity=3,
+            facts="连续升本",
+            fix="升本也买；补场面",
+            streak_turns=(8, 9),
+            streak_lost=30,
+        ),
+        Flag(kind="upgrade_without_board", turns=(5,), severity=2, facts="升 4 本", fix="x"),
+        Flag(kind="good_turn", turns=(11,), severity=0, facts="凑出金色蚀脑怪，打出 10 血", fix=""),
+    )
+    values = dict(
+        moments=moments,
+        focus="升本的回合也要买一张随从",
+        path=Path("reviews/x.md"),
+        shown_path="reviews/2026-10-11_2320_凯瑞尔·罗姆_第3名.md",
+    )
+    values.update(kw)
+    return replace(review, **values)
+
+
+GAME_OVER = make_state(phase=Phase.GAME_OVER).model_copy(update={"final_place": 3})
+
+
+def test_review_shows_under_the_game_over_title():
+    model = OverlayModel(name)
+    model.on_update(GAME_OVER, [Event(type=EventType.GAME_ENDED, turn=13, data={"place": 3})])
+    assert model.snapshot().compact
+    model.show_review(GAME_OVER, _review())
+    view = model.snapshot()
+    assert (view.title, view.compact, view.next_step) == ("对局结束 · 第 3 名", False, None)
+    assert view.review == (
+        Line("① 第 7、8 回合 升本不补场面 → 连掉 30 血"),
+        Line("② 第 5 回合 升本不补场面"),
+        Line("③ 第 11 回合 做得好：凑出金色蚀脑怪"),
+        Line("下局重点：升本的回合也要买一张随从"),
+        Line("已保存 reviews/2026-10-11_2320_凯瑞尔·罗姆_第3名.md", "muted", role="comment"),
+    )
+    # 面板超高时先去掉路径那一行
+    assert condense(view, 1).review == view.review
+    assert condense(view, 2).review == view.review[:-1]
+
+
+def test_review_without_moments_and_save_error():
+    model = OverlayModel(name)
+    model.on_update(GAME_OVER, [])
+    model.show_review(GAME_OVER, _review(moments=(), save_error="没有权限", path=None))
+    assert model.snapshot().review == (
+        Line("这局没有触发提醒", "muted"),
+        Line("下局重点：升本的回合也要买一张随从"),
+        Line("复盘没能保存：没有权限", "muted", role="comment"),
+    )
+
+
+def test_review_is_cleared_by_the_next_game_and_ignored_outside_game_over():
+    model = OverlayModel(name)
+    model.on_update(GAME_OVER, [])
+    model.show_review(GAME_OVER, _review())
+    hero = make_state(turn=0, phase=Phase.HERO_SELECT, seq=9, hero="TB_BaconShop_HERO_PH")
+    model.on_update(hero, [Event(type=EventType.GAME_STARTED, turn=0)])
+    model.on_update(GAME_OVER.model_copy(update={"seq": 10}), [])
+    assert model.snapshot().review == ()
+    # 下一局已经开始了：晚到的复盘不显示
+    model.on_update(T3, started(3))
+    model.show_review(T3, _review())
+    model.on_update(GAME_OVER.model_copy(update={"seq": 11}), [])
+    assert model.snapshot().review == ()

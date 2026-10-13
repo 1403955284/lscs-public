@@ -287,3 +287,34 @@ def test_overlay_opponents_defaults_on_and_can_be_switched_off(tmp_path):
     cfg = load_config(write(tmp_path, "[overlay]\nopponents = false\n"))
     assert cfg.overlay.opponents is False
     assert "\nopponents = true " in EXAMPLE.read_text(encoding="utf-8")
+
+
+def test_review_defaults_and_values(tmp_path):
+    from lscs.config import ReviewConfig
+
+    cfg = AppConfig().review
+    assert cfg == ReviewConfig()
+    assert (cfg.enabled, cfg.ai, cfg.dir, cfg.history_games) == (True, True, "reviews", 10)
+    path = write(
+        tmp_path, '[review]\nenabled = false\nai = false\ndir = " D:/复盘 "\nhistory_games = 3\n'
+    )
+    cfg = load_config(path).review
+    assert (cfg.enabled, cfg.ai, cfg.dir, cfg.history_games) == (False, False, "D:/复盘", 3)
+    text = EXAMPLE.read_text(encoding="utf-8")
+    assert text.index("[review]") < text.index("[highlight]")
+    assert '\ndir = "reviews" ' in text and "\nhistory_games = 10 " in text
+
+
+@pytest.mark.parametrize(
+    ("line", "field"),
+    [
+        ("history_games = 2", "review.history_games"),
+        ("history_games = 51", "review.history_games"),
+        ('dir = ""', "review.dir"),
+        ('dir = "  "', "review.dir"),
+        ("save = true", "review.save"),
+    ],
+)
+def test_review_invalid_values_are_rejected(tmp_path, line, field):
+    with pytest.raises(ConfigError, match=field):
+        load_config(write(tmp_path, f"[review]\n{line}\n"))

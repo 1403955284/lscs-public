@@ -1632,3 +1632,10 @@ def test_opponents_block_is_frozen_for_the_turn():
     observe(sched, with_rival(state(turn=4, seq=4), 4), EventType.RECRUIT_STARTED)
     sched.tick()
     assert "酒馆 4 本" in block(messages()[3])  # 新对局：同样的回合数也重算
+
+
+def test_review_uses_the_schedulers_provider_config_and_recorder(tmp_path):
+    recorder = Recorder(tmp_path)
+    sched, provider = scheduler([], recorder=recorder, deep_thinking="high")
+    assert sched.provider is provider and sched.recorder is recorder
+    assert sched.config.deep_thinking == "high" and sched.config.api_key == SECRET

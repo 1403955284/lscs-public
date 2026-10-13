@@ -32,6 +32,7 @@ TITLE = "#d4d4dc"
 RULES_TAG = "#e6b450"  # 金黄
 AI_TAG = "#4fc9e0"  # 青色
 OPP_TAG = "#c9a0dc"  # 淡紫
+REVIEW_TAG = "#9fd3a0"  # 淡绿
 TEXT = "#f0f0f4"
 MUTED = "#8c8c96"
 WARN = "#ff9f43"  # 橙色
@@ -453,6 +454,7 @@ class OverlayWindow:
             ("规则", view.rules, RULES_TAG),
             (view.ai_title, view.ai, AI_TAG),
             ("对手", view.opponents, OPP_TAG),
+            ("复盘", view.review, REVIEW_TAG),
         )
         for tag, lines, color in sections if not view.compact else ():
             if not lines:

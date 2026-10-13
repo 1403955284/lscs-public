@@ -161,11 +161,30 @@ def old_highlight_values(cfg: HighlightConfig) -> list[str]:
     ]
 
 
+class ReviewConfig(BaseModel):
+    """对局复盘（对局复盘设计文档第 8.3 节）。"""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    enabled: bool = True  # 每局打完自动复盘（终端、面板和 reviews/ 里的文件）
+    ai: bool = True  # 让 AI 把复盘写成一段话（每局 1 次调用）；false 只用规则版
+    dir: str = Field(default="reviews", min_length=1)  # 复盘文件和历史记录的目录（相对项目目录）
+    history_games: int = Field(default=10, ge=3, le=50)  # "最近 N 局"看几局
+
+    @field_validator("dir")
+    @classmethod
+    def _check_dir(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("不能为空")
+        return value.strip()
+
+
 class AppConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     llm: LLMConfig = LLMConfig()
     overlay: OverlayConfig = OverlayConfig()
+    review: ReviewConfig = ReviewConfig()
     highlight: HighlightConfig = HighlightConfig()
 
 

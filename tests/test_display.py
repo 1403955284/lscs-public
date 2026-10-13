@@ -546,3 +546,41 @@ def test_empty_captured_board_is_written_as_such():
     out = []
     AdviceDisplay(opp_name, out.append).show_opponents(state, summarize_opponents(state))
     assert out[1] == "  ▶★ 第 2 名 H7 20+0 · 3 本 · 第 5 回合见到空场 · 威胁 35"
+
+
+def _review():
+    from datetime import datetime
+
+    from test_review_flags import RULES, curve_turns, record
+    from test_review_flags import name as card_name
+
+    from lscs.review.report import review_game
+
+    turns = curve_turns({5: dict(tier_start=3, tier_end=4, buys=())})
+    return review_game(record(turns), RULES, card_name, datetime(2026, 10, 11, 23, 20))
+
+
+def test_show_review_prints_the_rules_block():
+    from lscs.review.report import terminal_lines
+
+    out = []
+    review = _review()
+    AdviceDisplay(name, out.append).show_review(STATE, review)
+    assert out == terminal_lines(review)
+    assert out[0] == "  📝 复盘：H 第 4 名（10 回合）"
+
+
+def test_display_group_forwards_show_review():
+    seen = []
+
+    class Panel:
+        def show_review(self, state, review):
+            seen.append(review)
+
+    class Broken:
+        def show_review(self, state, review):
+            raise RuntimeError("坏了")
+
+    review = _review()
+    DisplayGroup(Broken(), Panel()).show_review(STATE, review)
+    assert seen == [review]

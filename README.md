@@ -28,6 +28,8 @@ Windows 上双击项目文件夹里的 `启动.bat` 等于 `uv run lscs watch`�
 | `uv run lscs replay <文件> --advice [--names]` | 回放时附带每回合的规则建议（不调用大模型） |
 | `uv run lscs replay <文件> --ai` | 回放时真的调用大模型（花费 token，用来检查 AI 建议） |
 | `uv run lscs replay <文件> --overlay --speed 20` | 回放时打开悬浮面板预览（不开炉石、在 Mac 上也能看） |
+| `uv run lscs review <文件> [--ai] [--save-history]` | 给录像出对局复盘（只打复盘，不打时间线和每回合的建议；`--ai` 也让 AI 写，会重放整局的 AI 建议；`--save-history` 记进最近几局的统计） |
+| `uv run lscs review --habits` | 看 `reviews/history.jsonl` 里最近几局的名次和常见的提醒 |
 | `uv run lscs overlay-check` | 逐项检查悬浮面板能否贴靠炉石、穿透鼠标（在 Windows 上先打开炉石再运行） |
 | `uv run lscs highlight-test` | 在炉石画面上画出画面高亮的位置（默认只画商店、场面和四个按钮），截图核对位置；`--seconds 60` 显示更久，`--rows choice`（`choice4`、`hero`……）画别的排；不是 Windows 时开一个预览窗口 |
 
@@ -45,8 +47,8 @@ Windows 上双击项目文件夹里的 `启动.bat` 等于 `uv run lscs watch`�
     技能升级）时立即调用一次，选完、换组、进战斗就作废，`choice_advice = false` 关闭。回合开始的技能升级和饰品
     在 `MAIN_ACTION` 之前弹出，所以这一路不等招募开始。
   `watch` 启动时从头读当前的 Power.log，但只为读完后的当前回合（和还没选完的那组选项）调用（每路最多一次）。
-  每次调用的提示词和回答记录在 `recordings/llm-日期.jsonl`（`lane` 是 `fast`、`deep`、`hero` 或 `choice`），
-  不包含 Key，也不进仓库。
+  每次调用的提示词和回答记录在 `recordings/llm-日期.jsonl`（`lane` 是 `fast`、`deep`、`hero`、`choice`，
+  对局复盘是 `review`），不包含 Key，也不进仓库。
 - AI 的回答解析不了、或方案过不了校验器（钱不够、场面放不下、编号不存在……）时，把校验器的原因发回去改正一次：
   多轮对话（原系统提示 + 原局面消息 + 模型自己的回答 + 改正要求），前缀和原请求相同，能命中 DeepSeek 的前缀缓存；
   每个请求最多一次，占一次调用；深度分析改正时不开思考；校验器仍是唯一标准，不从不合法的方案里截取前几步。
@@ -61,6 +63,16 @@ Windows 上双击项目文件夹里的 `启动.bat` 等于 `uv run lscs watch`�
   只算卡池随从；终端、面板和局面消息里给对子和要找的牌写"还剩约 N 张"。没有卡牌数据时都不显示。
 - 对手一览（`advisor/opponents.py`）：终端每回合开始打一块 `👥`，面板招募时最下面两行（▶ 下一个、★ 最强威胁）、
   战斗中列出全部（`[overlay] opponents = false` 关闭）。对手的阵容只有交过手才看得到。
+- 对局复盘（`review/`，`[review]`）：`RecordBuilder` 按相邻状态快照的差异认出每回合的买、卖、打出、刷新、升本、
+  冻结、技能、三连和选项（不靠 BLOCK_START，两份真实日志按真值核对过），战斗结果在下一回合招募开始时结算；
+  `flags.py` 按确定性的规则算提醒、挑 2~3 个关键时刻；`GameReviewer.tap` 挂进 `DisplayGroup` 记下本局显示过的
+  建议、比较做了几个。对局结束后的下一次 `tick` 出规则版（终端 `📝`、面板"复盘"区、`reviews/日期_时间_英雄_第N名.md`、
+  `reviews/history.jsonl`），有 AI 时再在工作线程里调一次（单独的系统提示，深度分析的思考和超时，`max_tokens`
+  4000），结果经队列由 `tick` 交付；AI 写的回合和卡名都要核对，不合格改正一次（`repair_invalid`），仍不行就用
+  规则版；长度放宽到提示词要求的约 1.5 倍，超出时在标点处截断。不占 `max_calls_per_game`，调度器关掉 AI
+  （Key 无效）时不调。`watch` 打完的对局记进 history（同一天指纹相同的局认作已经复盘过，`watch` 重启时不重复），
+  `replay` 和 `lscs review` 回放录像时默认不记。
+  `reviews/` 不进仓库，文件里没有玩家名字。
 - `thinking`（快速建议）请保持 `"disabled"`，思考交给深度分析。
 - 攻略要点在 `strategy/current/guide.md`，会原样发给 AI。
 - 英雄技能能不能用以日志里的选项列表（`GameState.DebugPrintOptions`）为准，选项比招募开始晚几十毫秒才到，

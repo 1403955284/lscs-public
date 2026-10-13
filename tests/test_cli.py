@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from helpers import NEEDS_USER_LOG
 
@@ -300,10 +302,14 @@ def test_replay_with_ai_calls_model_and_hides_key(monkeypatch, tmp_path, capsys)
     assert "  🧠 深度分析的操作不合法（第 1 步：商店里没有 #31），正在让它改正…" in out
     assert "  🤖 AI 改正后仍不合法，已忽略" in out
     assert "  🧠 深度分析失败：AI 改正后仍不合法，已忽略" in out
-    assert "本局 AI 调用 7 次" in out
+    assert "本局 AI 调用 7 次" in out  # 复盘的那次不算进每局的预算
+    # 对局结束后再调一次 AI 写复盘：假的提供商没有回答了（空内容），退回规则版
+    assert out.index("本局 AI 调用 7 次") < out.index("  📝 复盘：米尔豪斯·法力风暴 第 5 名")
+    assert "  🧠 AI 复盘生成中…（约 20 秒）" in out
+    assert "  🧠 AI 复盘失败：返回了空内容（文件里是规则版）" in out
     assert key not in out
     record = next((tmp_path / "recordings").glob("llm-*.jsonl")).read_text(encoding="utf-8")
-    assert key not in record and record.count("\n") == 7
+    assert key not in record and record.count("\n") == 8
     rows = [json.loads(line) for line in record.splitlines()]
     assert [(r["lane"], r["repair"]) for r in rows] == [
         ("hero", False),
@@ -313,7 +319,9 @@ def test_replay_with_ai_calls_model_and_hides_key(monkeypatch, tmp_path, capsys)
         ("fast", True),
         ("deep", False),
         ("deep", True),
+        ("review", False),
     ]
+    assert rows[-1]["outcome"] == "空内容" and rows[-1]["thinking"] == "low"
 
 
 def test_deep_thinking_high_waits_longer(monkeypatch, tmp_path, capsys):
@@ -337,7 +345,7 @@ def test_replay_with_deep_analysis_off(monkeypatch, tmp_path, capsys):
     )
     assert main(["replay", str(MINI_LOG), "--ai"]) == 0
     out = capsys.readouterr().out
-    assert "深度分析：关闭" in out and "🧠" not in out
+    assert "深度分析：关闭" in out and "  🧠 深度分析" not in out
     # 选英雄 1 次 + 两个招募回合各 1 次 + 第 2 回合的回答不合法，改正 1 次
     assert "本局 AI 调用 4 次" in out
 
@@ -356,7 +364,8 @@ def test_replay_with_hero_advice_off(monkeypatch, tmp_path, capsys):
     assert "  📋 规则：护甲信息不全，等 AI 建议" in out  # 规则建议照常
     assert "本局 AI 调用 3 次" in out  # 第 2 回合的回答不合法，改正 1 次
     record = next((tmp_path / "recordings").glob("llm-*.jsonl")).read_text(encoding="utf-8")
-    assert [json.loads(line)["lane"] for line in record.splitlines()] == ["fast"] * 3
+    lanes = [json.loads(line)["lane"] for line in record.splitlines()]
+    assert lanes == ["fast"] * 3 + ["review"]  # 最后一次是对局复盘
 
 
 def test_replay_with_choice_advice_off(monkeypatch, tmp_path, capsys):
@@ -1076,3 +1085,270 @@ def test_overlay_opponents_setting_reaches_the_panel():
         model.on_update(combat, [])
         compact[enabled] = model.snapshot().compact
     assert compact == {True: False, False: True}  # 关掉时战斗中还是一行标题
+
+
+def test_replay_with_advice_prints_and_saves_the_rules_review(capsys):
+
+    from helpers import MINI_LOG
+
+    import lscs.cli
+
+    assert main(["replay", str(MINI_LOG), "--advice"]) == 0
+    out = capsys.readouterr().out
+    # 复盘在对局结束那一行之后
+    assert out.index("[T 2] 对局结束 名次 5") < out.index(
+        "  📝 复盘：TB_BaconShop_HERO_49 第 5 名（2 回合）"
+    )
+    assert "     ① 第 2 回合 铸币没花完：剩了 4 金没用" in out
+    directory = lscs.cli.REVIEW_BASE / "reviews"
+    (saved,) = directory.glob("*.md")
+    assert saved.name.endswith("_TB_BaconShop_HERO_49_第5名.md")
+    assert f"     已保存 {saved.relative_to(lscs.cli.REVIEW_BASE)}" in out
+    assert not (directory / "history.jsonl").exists()  # 回放录像不记进历史
+    text = saved.read_text(encoding="utf-8")
+    assert "- 第 2 回合 铸币没花完（一般）：剩了 4 金没用" in text
+    assert "- 第 2 回合 没按建议升本（一般）：建议升 2 本，你没升" in text
+
+
+def test_replay_review_takes_its_date_from_the_log_name(tmp_path, capsys):
+    from helpers import MINI_LOG
+
+    import lscs.cli
+
+    log = tmp_path / "2026-10-09_mini.log"
+    log.write_bytes(MINI_LOG.read_bytes())
+    assert main(["replay", str(log), "--advice"]) == 0
+    (saved,) = (lscs.cli.REVIEW_BASE / "reviews").glob("*.md")
+    # 对局结束那一行日志的时间戳
+    last = [line for line in log.read_text().splitlines() if line.startswith("D ")][-1]
+    hhmm = last.split()[1][:5].replace(":", "")
+    assert saved.name.startswith(f"2026-10-09_{hhmm}_")
+
+
+def test_replay_dump_only_and_review_switched_off_give_no_review(monkeypatch, tmp_path, capsys):
+    from helpers import MINI_LOG
+
+    import lscs.cli
+
+    assert main(["replay", str(MINI_LOG), "--dump"]) == 0
+    assert "📝 复盘" not in capsys.readouterr().out
+    config = tmp_path / "config.toml"
+    config.write_text("[review]\nenabled = false\n", encoding="utf-8")
+    monkeypatch.setattr(lscs.cli, "DEFAULT_CONFIG", config)
+    assert main(["replay", str(MINI_LOG), "--advice"]) == 0
+    assert "📝 复盘" not in capsys.readouterr().out
+    assert not (lscs.cli.REVIEW_BASE / "reviews").exists()
+
+
+def test_replay_with_broken_config_still_advises_without_review(monkeypatch, tmp_path, capsys):
+    from helpers import MINI_LOG
+
+    import lscs.cli
+
+    config = tmp_path / "config.toml"
+    config.write_text("[review]\nhistory_games = 1\n", encoding="utf-8")
+    monkeypatch.setattr(lscs.cli, "DEFAULT_CONFIG", config)
+    assert main(["replay", str(MINI_LOG), "--advice"]) == 0
+    out = capsys.readouterr().out
+    assert "review.history_games 有误" in out and "（这次不出复盘）" in out
+    assert "  📋 规则：" in out and "📝 复盘" not in out
+
+
+def test_review_dir_can_be_absolute(monkeypatch, tmp_path, capsys):
+    from helpers import MINI_LOG
+
+    import lscs.cli
+
+    target = tmp_path / "我的复盘"
+    config = tmp_path / "config.toml"
+    config.write_text(f'[review]\ndir = "{target.as_posix()}"\n', encoding="utf-8")
+    monkeypatch.setattr(lscs.cli, "DEFAULT_CONFIG", config)
+    assert main(["replay", str(MINI_LOG), "--advice"]) == 0
+    (saved,) = target.glob("*.md")
+    assert f"已保存 {saved}" in capsys.readouterr().out
+
+
+def test_watch_prints_the_review_after_the_game(monkeypatch, tmp_path, mini_lines, capsys):
+    import lscs.cli
+
+    argv, _calls = _watch_setup(monkeypatch, tmp_path, mini_lines)
+
+    def fake_watch(tailer, pipeline, interval, tick=None, stop=None, sleep=None):
+        for line in mini_lines:
+            pipeline.push(line)
+        pipeline.flush()
+        tick()
+        tick()
+
+    monkeypatch.setattr(lscs.cli, "watch", fake_watch)
+    assert main([*argv, "--no-overlay"]) == 0
+    out = capsys.readouterr().out
+    assert out.count("  📝 复盘：米尔豪斯·法力风暴 第 5 名（2 回合）") == 1
+    assert len(list((tmp_path / "Hearthstone").glob("*"))) == 0
+    directory = lscs.cli.REVIEW_BASE / "reviews"
+    assert len(list(directory.glob("*.md"))) == 1
+    # watch 打完的对局记进历史
+    assert (directory / "history.jsonl").read_text(encoding="utf-8").count("\n") == 1
+
+
+MINI_REVIEW = json.dumps(
+    {
+        "moments": [
+            {
+                "turn": 2,
+                "title": "铸币没花完",
+                "what": "剩 4 金",
+                "why": "少一张随从",
+                "next": "买一张",
+            }
+        ],
+        "focus": "每回合把铸币花完",
+        "good": "",
+    },
+    ensure_ascii=False,
+)
+
+
+def test_replay_with_ai_writes_the_ai_review(monkeypatch, tmp_path, capsys):
+    from helpers import MINI_LOG
+
+    import lscs.cli
+
+    plan = json.dumps({"actions": []})
+    answers = [MINI_HERO, plan, plan, MINI_REVIEW]
+    _ai_cli_setup(monkeypatch, tmp_path, answers, extra="deep_analysis = false\n")
+    assert main(["replay", str(MINI_LOG), "--ai"]) == 0
+    out = capsys.readouterr().out
+    assert out.index("  🧠 AI 复盘生成中…（约 20 秒）") < out.index("  🧠 AI 复盘（")
+    assert "     ① 第 2 回合 铸币没花完：剩 4 金" in out
+    assert "     下局重点：每回合把铸币花完" in out
+    (saved,) = (lscs.cli.REVIEW_BASE / "reviews").glob("*.md")
+    assert f"     已更新 {saved.relative_to(lscs.cli.REVIEW_BASE)}" in out
+    assert "1. **第 2 回合 铸币没花完** — 剩 4 金" in saved.read_text(encoding="utf-8")
+
+
+def test_replay_with_ai_but_review_ai_off_makes_no_review_call(monkeypatch, tmp_path, capsys):
+    from helpers import MINI_LOG
+
+    plan = json.dumps({"actions": []})
+    extra = "deep_analysis = false\n[review]\nai = false\n"
+    _ai_cli_setup(monkeypatch, tmp_path, [MINI_HERO, plan, plan], extra=extra)
+    assert main(["replay", str(MINI_LOG), "--ai"]) == 0
+    out = capsys.readouterr().out
+    assert "  📝 复盘：" in out and "AI 复盘" not in out
+    record = next((tmp_path / "recordings").glob("llm-*.jsonl")).read_text(encoding="utf-8")
+    assert '"review"' not in record
+
+
+def test_review_command_prints_only_the_review(monkeypatch, capsys):
+    from helpers import FIXTURES, MINI_LOG
+
+    import lscs.cli
+    from lscs.cards.db import CardDB
+
+    monkeypatch.setattr(
+        lscs.cli, "_load_cards", lambda: CardDB.from_json_file(FIXTURES / "cards_mini.json")
+    )
+    assert main(["review", str(MINI_LOG)]) == 0
+    out = capsys.readouterr().out
+    assert "[T 1]" not in out and "📋" not in out and "👥" not in out
+    assert "  📝 复盘：米尔豪斯·法力风暴 第 5 名（2 回合）" in out
+    assert "建议采纳 0/3" in out  # 规则建议照样记下来比较
+    directory = lscs.cli.REVIEW_BASE / "reviews"
+    assert len(list(directory.glob("*.md"))) == 1
+    assert not (directory / "history.jsonl").exists()  # 默认不记进历史
+    assert main(["review", str(MINI_LOG), "--save-history"]) == 0
+    assert len(list(directory.glob("*.md"))) == 2  # 同名加 _2
+    assert (directory / "history.jsonl").read_text(encoding="utf-8").count("\n") == 1
+
+
+def test_review_command_with_ai(monkeypatch, tmp_path, capsys):
+    from helpers import MINI_LOG
+
+    plan = json.dumps({"actions": []})
+    extra = "deep_analysis = false\n[review]\nai = false\n"  # 命令行的 --ai 优先
+    _ai_cli_setup(monkeypatch, tmp_path, [MINI_HERO, plan, plan, MINI_REVIEW], extra=extra)
+    assert main(["review", str(MINI_LOG), "--ai"]) == 0
+    out = capsys.readouterr().out
+    assert "  🤖" not in out and "本局 AI 调用" not in out  # 不打每回合的建议
+    assert "  🧠 AI 复盘（" in out and "     下局重点：每回合把铸币花完" in out
+
+
+def test_review_command_needs_a_log_and_handles_empty_logs(tmp_path, capsys):
+    assert main(["review"]) == 1
+    assert "请给出要复盘的日志文件" in capsys.readouterr().out
+    assert main(["review", str(tmp_path / "missing.log")]) == 1
+    assert "找不到" in capsys.readouterr().out
+    empty = tmp_path / "empty.log"
+    empty.write_text("", encoding="utf-8")
+    assert main(["review", str(empty)]) == 0
+    assert "这份日志里没有打完的对局，没有复盘。" in capsys.readouterr().out
+
+
+def test_review_habits(capsys):
+    import lscs.cli
+
+    assert main(["review", "--habits"]) == 0
+    assert capsys.readouterr().out == "还没有复盘记录（打完一局自动生成）\n"
+    history = lscs.cli.REVIEW_BASE / "reviews" / "history.jsonl"
+    history.parent.mkdir()
+    rows = [
+        {"time": f"2026-10-1{i}T21:00:00", "hero_name": "H", "place": p, "flags": f}
+        for i, (p, f) in enumerate(
+            [
+                (3, ["gold_unspent", "tier_behind"]),
+                (5, ["gold_unspent", "hp_streak", "tier_behind"]),
+            ]
+        )
+    ]
+    history.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    assert main(["review", "--habits"]) == 0
+    out = capsys.readouterr().out
+    assert "  2026-10-10 21:00 H 第 3 名 · 铸币没花完" in out
+    assert "满 3 局才看习惯（现在 2 局）" in out
+    with history.open("a", encoding="utf-8") as f:
+        f.write(json.dumps({"place": 1, "flags": ["gold_unspent", "tier_behind"]}) + "\n")
+    assert main(["review", "--habits"]) == 0
+    out = capsys.readouterr().out
+    assert "最近 3 局：平均第 3.0 名 · 升本偏晚 3 局 · 铸币没花完 3 局" in out
+    # 升本偏晚的"下次怎么做"是按节奏表现写的，这里用固定的一句（以前这里会 KeyError）
+    assert "  升本偏晚（3 局）→ 血量健康时按节奏升本" in out
+    assert "  铸币没花完（3 局）→ 铸币不会留到下回合：剩 3 金买随从，剩 1~2 金刷新" in out
+
+
+def test_review_command_with_review_switched_off_still_works(monkeypatch, tmp_path, capsys):
+    from helpers import MINI_LOG
+
+    import lscs.cli
+
+    config = tmp_path / "config.toml"
+    config.write_text("[review]\nenabled = false\n", encoding="utf-8")
+    monkeypatch.setattr(lscs.cli, "DEFAULT_CONFIG", config)
+    monkeypatch.setattr(lscs.cli, "_load_cards", lambda: None)
+    assert main(["review", str(MINI_LOG)]) == 0
+    assert "  📝 复盘：TB_BaconShop_HERO_49 第 5 名" in capsys.readouterr().out
+    config.write_text("[review]\nhistory_games = 0\n", encoding="utf-8")
+    assert main(["review", str(MINI_LOG)]) == 1
+
+
+def test_review_ai_follows_the_schedulers_ai_switch(tmp_path):
+    from lscs.advisor.display import AdviceDisplay
+    from lscs.cards.db import CardDB
+    from lscs.cli import DEFAULT_RULES, _load_rules, _reviewer
+    from lscs.config import LLMConfig, ReviewConfig
+    from lscs.llm.provider import FakeProvider
+
+    class Scheduler:
+        provider = FakeProvider([])
+        config = LLMConfig(api_key="sk-x-123456789")
+        recorder = None
+        disabled_reason = None
+
+    scheduler = Scheduler()
+    assert DEFAULT_RULES.exists()
+    r = _reviewer(
+        ReviewConfig(), _load_rules(), str, AdviceDisplay(str), CardDB([]), scheduler, sync=True
+    )
+    assert r.ai_enabled and r._ai_blocked() is None
+    scheduler.disabled_reason = "API Key 连续 3 次无效，已关闭 AI"
+    assert r._ai_blocked() == scheduler.disabled_reason
