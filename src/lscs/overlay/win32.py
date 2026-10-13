@@ -37,6 +37,9 @@ PASSTHROUGH_BITS = WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 PROCESS_PER_MONITOR_DPI_AWARE = 2
 SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN = 76, 77
+SM_SWAPBUTTON = 23
+VK_LBUTTON, VK_RBUTTON = 0x01, 0x02
+KEY_DOWN = 0x8000  # GetAsyncKeyState 的最高位：现在按着
 SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN = 78, 79
 
 
@@ -74,11 +77,12 @@ def should_show(
     panel: int | None,
     minimized: bool,
     highlight: int | None = None,
+    grip: int | None = None,
 ) -> bool:
-    """炉石（或面板自己、画面高亮窗口）在前台、而且没有最小化时才显示。"""
+    """炉石（或面板自己、画面高亮窗口、拖动标签）在前台、而且没有最小化时才显示。"""
     if hearthstone is None or foreground is None or minimized:
         return False
-    return foreground in (hearthstone, panel, highlight)
+    return foreground in (hearthstone, panel, highlight, grip)
 
 
 class HearthstoneLocator:
@@ -159,6 +163,7 @@ def _load() -> SimpleNamespace:
             user32.SetLayeredWindowAttributes, BOOL, HWND, wintypes.COLORREF, ctypes.c_ubyte, DWORD
         ),
         GetSystemMetrics=sig(user32.GetSystemMetrics, ctypes.c_int, ctypes.c_int),
+        GetAsyncKeyState=sig(user32.GetAsyncKeyState, ctypes.c_short, ctypes.c_int),
         SetProcessDPIAware=sig(user32.SetProcessDPIAware, BOOL),
         SetProcessDpiAwareness=(
             sig(shcore.SetProcessDpiAwareness, ctypes.c_long, ctypes.c_int) if shcore else None
@@ -223,11 +228,15 @@ def _required_bits(click_through: bool) -> int:
 
 
 def has_overlay_style(hwnd: int, click_through: bool) -> bool:
+    """要求的样式位都在；不穿透时（拖动标签、click_through = false 的面板）还要求穿透位不在，
+    不然窗口收不到鼠标。"""
     if not IS_WINDOWS:
         return False
     current = _api().GetWindowLongW(hwnd, GWL_EXSTYLE) & 0xFFFFFFFF
     required = _required_bits(click_through)
-    return current & required == required
+    if current & required != required:
+        return False
+    return click_through or not current & WS_EX_TRANSPARENT
 
 
 def set_opacity(hwnd: int, opacity: float) -> bool:
@@ -323,6 +332,16 @@ def client_rect(hwnd: int) -> Rect | None:
     if width <= 0 or height <= 0:
         return None
     return Rect(origin.x, origin.y, width, height)
+
+
+def primary_button_down() -> bool | None:
+    """鼠标主键（Tk 的 Button-1）现在是不是按着；非 Windows 返回 None（不知道）。
+    GetAsyncKeyState 看的是物理按键，左右键对调时主键是物理右键。"""
+    if not IS_WINDOWS:
+        return None
+    api = _api()
+    vk = VK_RBUTTON if api.GetSystemMetrics(SM_SWAPBUTTON) else VK_LBUTTON
+    return bool(api.GetAsyncKeyState(vk) & KEY_DOWN)
 
 
 def virtual_screen() -> Rect | None:

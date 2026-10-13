@@ -1,7 +1,10 @@
+import pytest
 from fake_win32 import FakeWin32Api, FakeWindow
 
 from lscs.config import OverlayConfig
+from lscs.overlay import check
 from lscs.overlay.check import run_check
+from lscs.overlay.win32 import WS_EX_TRANSPARENT
 
 HS = r"C:\Program Files (x86)\Hearthstone\Hearthstone.exe"
 
@@ -9,11 +12,27 @@ HS = r"C:\Program Files (x86)\Hearthstone\Hearthstone.exe"
 class FakeRoot:
     destroyed = False
 
+    def __init__(self, hwnd=0x123):
+        self.hwnd = hwnd
+
     def winfo_id(self):
-        return 0x123
+        return self.hwnd
 
     def destroy(self):
         self.destroyed = True
+
+
+@pytest.fixture(autouse=True)
+def fake_grip(monkeypatch):
+    """拖动标签那一步要在面板窗口上再开一个 Toplevel：换成假的。"""
+    grips = []
+
+    def make(_root):
+        grips.append(FakeRoot(0x456))
+        return grips[-1]
+
+    monkeypatch.setattr(check, "_tk_grip", make)
+    return grips
 
 
 def windows_with_hearthstone(monkeypatch):
@@ -24,15 +43,55 @@ def windows_with_hearthstone(monkeypatch):
     return api
 
 
-def test_all_steps_pass(monkeypatch):
+def test_all_steps_pass(monkeypatch, fake_grip):
     api = windows_with_hearthstone(monkeypatch)
     out, root = [], FakeRoot()
     assert run_check(OverlayConfig(), out=out.append, make_root=lambda: root) is True
-    assert [line[:1] for line in out[:-1]] == ["√"] * 9
+    assert [line[:1] for line in out[:-1]] == ["√"] * 10
     assert "1600×900" in out[3]
-    assert root.destroyed
+    assert out[-2] == "√ 拖动标签：不穿透、不抢焦点、不进任务栏"
+    assert root.destroyed and fake_grip[0].destroyed
     assert api.alpha[api.ancestor] == 217  # 检查完恢复成配置的不透明度
     assert out[-1].startswith("检查通过")
+
+
+def test_grip_is_checked_on_its_own_window(monkeypatch):
+    api = windows_with_hearthstone(monkeypatch)
+    api.ancestor = None  # 面板和标签各有各的句柄
+    api.styles[0x456] = WS_EX_TRANSPARENT  # 标签的穿透位要被清掉
+    out = []
+    assert run_check(OverlayConfig(), out=out.append, make_root=FakeRoot) is True
+    assert "√ 拖动标签：不穿透、不抢焦点、不进任务栏" in out
+    assert api.styles[0x123] & WS_EX_TRANSPARENT  # 面板照样穿透
+    assert not api.styles[0x456] & WS_EX_TRANSPARENT
+
+
+def test_grip_failure_is_not_critical(monkeypatch, fake_grip):
+    api = windows_with_hearthstone(monkeypatch)
+    api.ancestor = None
+    real = api.SetLayeredWindowAttributes
+
+    def only_the_panel(hwnd, key, alpha, flags):
+        return real(hwnd, key, alpha, flags) if hwnd == 0x123 else 0
+
+    api.SetLayeredWindowAttributes = only_the_panel
+    out = []
+    assert run_check(OverlayConfig(), out=out.append, make_root=FakeRoot) is True
+    assert "× 拖动标签：SetLayeredWindowAttributes 失败（错误码 5）；面板能用，只是不能拖" in out
+    assert fake_grip[0].destroyed
+    assert out[-1].startswith("检查通过")
+
+
+def test_grip_window_that_cannot_open_is_not_critical(monkeypatch):
+    windows_with_hearthstone(monkeypatch)
+
+    def no_toplevel(_root):
+        raise RuntimeError("no toplevel")
+
+    monkeypatch.setattr(check, "_tk_grip", no_toplevel)
+    out = []
+    assert run_check(OverlayConfig(), out=out.append, make_root=FakeRoot) is True
+    assert "× 拖动标签：no toplevel；面板能用，只是不能拖" in out
 
 
 def test_failure_names_the_reason_and_fails(monkeypatch):

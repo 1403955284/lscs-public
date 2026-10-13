@@ -1,10 +1,15 @@
-"""纯函数：按炉石客户区和屏幕大小计算面板的位置、宽度、字号，以及文字换行。"""
+"""纯函数：按炉石客户区和屏幕大小计算面板的位置、宽度、字号，以及文字换行。
+
+位置用锚点（Anchor）表示：面板（连同上面的拖动标签，合起来叫"箱子"）的哪条边贴在参照区域的
+哪个比例上。预设和拖动后记住的位置都是锚点，换分辨率、拉窗口时按比例跟着走。
+"""
 
 from __future__ import annotations
 
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Literal
 
 FONT_DIVISOR = 55  # 自动字号约为客户区高度的 1/55
 MIN_FONT, MAX_FONT = 12, 22
@@ -16,9 +21,11 @@ MIN_WIDTH = 160
 MAX_HEIGHT_RATIO = 0.45  # 面板最高为客户区高度的 45%，超出时界面逐级精简内容
 PAD_RATIO = 0.6  # 内边距约 0.6 个字高
 SIDE_MARGIN = 0.02  # 左右位置：距客户区边缘 2% 宽度
-SIDE_TOP = 0.18  # 左右位置：距客户区顶部 18% 高度
+BOTTOM_MARGIN = 0.02  # 左右位置：距客户区底边 2% 高度，向上长（避开"开始战斗"按钮）
 TOP_MARGIN = 0.02  # 顶部位置：距客户区顶部 2% 高度
 CORNER_TOP = 0.05  # 没有炉石窗口可贴时放在屏幕右上角，距顶部 5% 高度（避开 Mac 菜单栏）
+GRIP_CHARS, GRIP_HEIGHT = 4.5, 1.4  # 拖动标签的宽、高（字号的倍数）
+DRAG_THRESHOLD = 3  # 按住标签移动这么多像素才算拖（点一下不写文件）
 
 STEP_SEP = "  "  # 方案各步之间的分隔
 Position = str  # "right" | "left" | "top"
@@ -39,6 +46,22 @@ class Rect:
     @property
     def bottom(self) -> int:
         return self.y + self.height
+
+
+@dataclass(frozen=True)
+class Anchor:
+    x: float  # 锚定边在参照区域宽度上的比例，0~1
+    y: float  # 锚定边在参照区域高度上的比例，0~1
+    h: Literal["left", "center", "right"]  # x 指的是箱子的左边、中线还是右边
+    v: Literal["top", "bottom"]  # y 指的是箱子的上边还是下边
+
+
+PRESETS: dict[str, Anchor] = {
+    "right": Anchor(1 - SIDE_MARGIN, 1 - BOTTOM_MARGIN, "right", "bottom"),  # 右下角
+    "left": Anchor(SIDE_MARGIN, 1 - BOTTOM_MARGIN, "left", "bottom"),  # 左下角
+    "top": Anchor(0.5, TOP_MARGIN, "center", "top"),  # 顶部居中
+}
+CORNER = Anchor(1 - SIDE_MARGIN, CORNER_TOP, "right", "top")  # 贴不上炉石时：屏幕右上角
 
 
 @dataclass(frozen=True)
@@ -72,32 +95,83 @@ def panel_layout(client: Rect, font_size: int = 0) -> Layout:
     )
 
 
-def _keep_on_screen(x: int, y: int, width: int, height: int, screen: Rect) -> tuple[int, int]:
-    # 面板比屏幕还大时贴左上角
-    x = max(screen.x, min(x, screen.right - width))
-    y = max(screen.y, min(y, screen.bottom - height))
+def _keep_in(x: int, y: int, width: int, height: int, rect: Rect) -> tuple[int, int]:
+    # 箱子比区域还大时贴区域左上角
+    x = max(rect.x, min(x, rect.right - width))
+    y = max(rect.y, min(y, rect.bottom - height))
     return x, y
 
 
-def dock(
-    client: Rect, screen: Rect, width: int, height: int, position: Position
+def keep_inside(
+    x: int, y: int, width: int, height: int, area: Rect, screen: Rect
 ) -> tuple[int, int]:
-    """面板左上角的屏幕坐标：贴在客户区的右侧、左侧或顶部，并且不超出屏幕。"""
-    margin = round(client.width * SIDE_MARGIN)
-    if position == "top":
-        x = client.x + (client.width - width) // 2
-        y = client.y + round(client.height * TOP_MARGIN)
+    """把箱子先夹进参照区域（炉石客户区），再夹到屏幕里。"""
+    x, y = _keep_in(x, y, width, height, area)
+    return _keep_in(x, y, width, height, screen)
+
+
+def dock(area: Rect, screen: Rect, width: int, height: int, anchor: Anchor) -> tuple[int, int]:
+    """箱子（面板 + 拖动标签）左上角的屏幕坐标：锚定边放在区域的 anchor 比例上，
+    再夹进区域和屏幕。区域是炉石客户区，贴不上炉石时是屏幕本身。"""
+    x = area.x + round(area.width * anchor.x)
+    if anchor.h == "right":
+        x -= width
+    elif anchor.h == "center":
+        x -= width // 2
+    y = area.y + round(area.height * anchor.y)
+    if anchor.v == "bottom":
+        y -= height
+    return keep_inside(x, y, width, height, area, screen)
+
+
+def _ratio(offset: int, size: int) -> float:
+    return min(1.0, max(0.0, round(offset / size, 4))) if size > 0 else 0.0
+
+
+def anchor_from_rect(box: Rect, area: Rect) -> Anchor:
+    """拖到的位置换成锚点：记住离得近的那两条边（中心在左半边记左边，否则记右边；在上半边记
+    上边，否则记下边），所以放在下半边的面板向上长，换分辨率时贴着的那条边不变。"""
+    if 2 * box.x + box.width < 2 * area.x + area.width:
+        h, x = "left", _ratio(box.x - area.x, area.width)
     else:
-        y = client.y + round(client.height * SIDE_TOP)
-        x = client.x + margin if position == "left" else client.right - margin - width
-    return _keep_on_screen(x, y, width, height, screen)
+        h, x = "right", _ratio(box.right - area.x, area.width)
+    if 2 * box.y + box.height < 2 * area.y + area.height:
+        v, y = "top", _ratio(box.y - area.y, area.height)
+    else:
+        v, y = "bottom", _ratio(box.bottom - area.y, area.height)
+    return Anchor(x, y, h, v)
 
 
-def corner(screen: Rect, width: int, height: int) -> tuple[int, int]:
-    """屏幕右上角（不在 Windows 上、或者无法贴靠炉石窗口时使用）。"""
-    x = screen.right - round(screen.width * SIDE_MARGIN) - width
-    y = screen.y + round(screen.height * CORNER_TOP)
-    return _keep_on_screen(x, y, width, height, screen)
+def grip_size(layout: Layout) -> tuple[int, int]:
+    """拖动标签的宽、高：约 4.5 个字宽、1.4 个字高。"""
+    return round(layout.font_px * GRIP_CHARS), round(layout.font_px * GRIP_HEIGHT)
+
+
+def split_box(
+    x: int, y: int, width: int, panel_height: int, grip_w: int, grip_h: int
+) -> tuple[Rect, Rect]:
+    """(面板, 拖动标签)：标签贴在箱子右上角，面板在标签正下方，两者不重叠。"""
+    panel = Rect(x, y + grip_h, width, panel_height)
+    grip = Rect(x + width - grip_w, y, grip_w, grip_h)
+    return panel, grip
+
+
+@dataclass(frozen=True)
+class Drag:
+    """按下拖动标签时鼠标和箱子左上角的位置（屏幕坐标）。"""
+
+    mouse_x: int
+    mouse_y: int
+    box_x: int
+    box_y: int
+
+    def moved_to(self, mouse_x: int, mouse_y: int) -> tuple[int, int]:
+        """鼠标移到 (mouse_x, mouse_y) 时箱子左上角的位置（还没夹进区域）。"""
+        return self.box_x + mouse_x - self.mouse_x, self.box_y + mouse_y - self.mouse_y
+
+    def far_enough(self, mouse_x: int, mouse_y: int) -> bool:
+        dx, dy = abs(mouse_x - self.mouse_x), abs(mouse_y - self.mouse_y)
+        return max(dx, dy) >= DRAG_THRESHOLD
 
 
 # 连续的可见 ASCII 字符（如 3/4、#12）算一个词，不在中间断开；其余每个字符单独一段

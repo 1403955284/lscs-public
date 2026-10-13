@@ -32,9 +32,11 @@ class FakeWin32Api:
         self.styles: dict[int, int] = {}
         self.alpha: dict[int, int] = {}
         self.layered_ok = True
-        self.ancestor = 0xABC
+        self.ancestor = 0xABC  # GetAncestor 对所有窗口都返回它；None 表示返回传入的句柄本身
         self.foreground = None
         self.focus_calls: list[int] = []
+        self.keys: dict[int, int] = {}  # 虚拟键码 → GetAsyncKeyState 的返回值
+        self.swapped_buttons = 0  # GetSystemMetrics(SM_SWAPBUTTON)
         self.dpi_calls: list[str] = []
         self._dpi_result = dpi_result
         self._dpi_aware = dpi_aware
@@ -95,10 +97,13 @@ class FakeWin32Api:
         return 1
 
     def GetAncestor(self, hwnd, flags):
-        return self.ancestor
+        return hwnd if self.ancestor is None else self.ancestor
 
     def GetSystemMetrics(self, index):
-        return {76: -1920, 77: 0, 78: 3840, 79: 1080}[index]
+        return {23: self.swapped_buttons, 76: -1920, 77: 0, 78: 3840, 79: 1080}[index]
+
+    def GetAsyncKeyState(self, vk):
+        return self.keys.get(vk, 0)
 
     # ---- 进程 ----
 

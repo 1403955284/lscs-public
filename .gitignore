@@ -7,3 +7,4 @@ __pycache__/
 /reviews/
 *.tmp
 config.toml
+/overlay-position.json

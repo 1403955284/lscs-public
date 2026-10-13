@@ -237,3 +237,25 @@ def test_half_built_window_is_released_on_the_main_thread_before_fallback():
     run_with_overlay(work, model(), CFG, create_window=broken, out=lambda _l: None)
     main = threading.main_thread()
     assert events == [("released", main), ("work", main)]
+
+
+def test_watch_window_remembers_its_position_in_the_project_file(monkeypatch):
+    """lscs watch 的面板把拖到的位置记在 position.DEFAULT_PATH（运行时才取，所以测试里是
+    conftest 换好的临时文件，不会写进项目文件夹）。"""
+    import pytest
+
+    pytest.importorskip("tkinter")
+    from lscs.config import HighlightConfig
+    from lscs.overlay import app, position, window
+
+    created = []
+
+    class FakeOverlayWindow:
+        def __init__(self, cfg, **kwargs):
+            created.append((cfg, kwargs))
+
+    monkeypatch.setattr(window, "OverlayWindow", FakeOverlayWindow)
+    cfg, highlight = OverlayConfig(), HighlightConfig()
+    app.create_tk_window(cfg, highlight=highlight)
+    assert created == [(cfg, {"highlight": highlight, "position_path": position.DEFAULT_PATH})]
+    assert position.DEFAULT_PATH.name == "overlay-position.json"

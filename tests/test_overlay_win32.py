@@ -33,6 +33,7 @@ def test_non_windows_functions_do_nothing():
     assert win32.is_minimized(1) is False
     assert win32.client_rect(1) is None
     assert win32.virtual_screen() is None
+    assert win32.primary_button_down() is None  # 不知道：拖动时不检查
 
 
 def test_hearthstone_path_matching():
@@ -71,6 +72,10 @@ def test_should_show_only_when_hearthstone_or_panel_is_foreground():
     # 画面高亮窗口在前台（比如刚创建时）也算
     assert should_show(hearthstone=10, foreground=40, panel=20, minimized=False, highlight=40)
     assert not should_show(hearthstone=10, foreground=40, panel=20, minimized=False, highlight=None)
+    # 拖动标签万一成了前台窗口也算：面板不隐藏
+    assert should_show(hearthstone=10, foreground=50, panel=20, minimized=False, grip=50)
+    assert not should_show(hearthstone=10, foreground=50, panel=20, minimized=False, grip=None)
+    assert not should_show(hearthstone=10, foreground=50, panel=20, minimized=True, grip=50)
 
 
 class FakeWindows:
@@ -174,6 +179,44 @@ def test_make_overlay_sets_style_and_alpha(monkeypatch):
     assert win32.has_overlay_style(9, click_through=True)
     assert api.alpha[9] == 217
     assert win32.set_opacity(9, 0.0) is True and api.alpha[9] == 0
+
+
+def test_style_without_click_through_must_drop_the_transparent_bit(monkeypatch):
+    """拖动标签（以及 click_through = false 的面板）：带着穿透位就收不到鼠标，要能发现并重设。"""
+    api = FakeWin32Api().install(monkeypatch)
+    grip_bits = WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
+    api.styles[9] = 0x100 | grip_bits | WS_EX_TRANSPARENT
+    assert win32.has_overlay_style(9, click_through=True)
+    assert not win32.has_overlay_style(9, click_through=False)
+    assert win32.make_overlay(9, 0.85, click_through=False) is True
+    assert api.styles[9] == 0x100 | grip_bits  # 穿透位清掉了，其余不动
+    assert win32.has_overlay_style(9, click_through=False)
+    assert not win32.has_overlay_style(9, click_through=True)
+    assert api.alpha[9] == 217
+
+
+def test_fake_ancestor_can_give_each_window_its_own_handle(monkeypatch):
+    api = FakeWin32Api().install(monkeypatch)
+    assert win32.root_window(0x77) == 0xABC  # 默认：所有窗口同一个句柄
+    api.ancestor = None
+    assert win32.root_window(0x77) == 0x77
+    assert win32.root_window(0x88) == 0x88
+
+
+def test_primary_button_down_reads_the_async_key_state(monkeypatch):
+    api = FakeWin32Api().install(monkeypatch)
+    assert win32.primary_button_down() is False
+    api.keys[win32.VK_LBUTTON] = -32768  # 最高位：现在按着（SHORT，有符号）
+    assert win32.primary_button_down() is True
+    api.keys[win32.VK_LBUTTON] = 0x8001
+    assert win32.primary_button_down() is True
+    api.keys[win32.VK_LBUTTON] = 1  # 只有最低位：上次查询后按过，现在没按
+    assert win32.primary_button_down() is False
+    # 左右键对调（左撇子）：Tk 的 Button-1 是物理右键
+    api.swapped_buttons = 1
+    assert win32.primary_button_down() is False
+    api.keys[win32.VK_RBUTTON] = 0x8000
+    assert win32.primary_button_down() is True
 
 
 def test_make_overlay_failure_names_the_step_and_restores_style(monkeypatch):

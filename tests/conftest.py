@@ -8,13 +8,15 @@ from lscs.state.tracker import StateTracker
 
 @pytest.fixture(autouse=True)
 def _keep_cli_away_from_real_files(tmp_path_factory, monkeypatch):
-    """命令行默认读项目目录下的 config.toml、把复盘写进 reviews/：测试里都换成临时目录
-    （需要配置文件的测试自己再换成写好的临时文件）。"""
+    """命令行默认读项目目录下的 config.toml、把复盘写进 reviews/、把面板拖到的位置写进
+    overlay-position.json：测试里都换成临时目录（需要配置文件的测试自己再换成写好的临时文件）。"""
     import lscs.cli
+    from lscs.overlay import position
 
     home = tmp_path_factory.mktemp("lscs-home")
     monkeypatch.setattr(lscs.cli, "DEFAULT_CONFIG", home / "config.toml")
     monkeypatch.setattr(lscs.cli, "REVIEW_BASE", home)
+    monkeypatch.setattr(position, "DEFAULT_PATH", home / "overlay-position.json")
 
 
 @pytest.fixture

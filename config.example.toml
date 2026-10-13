@@ -23,10 +23,11 @@ deep_timeout_seconds = 75
 
 [overlay]
 enabled = true                 # 游戏上的悬浮面板；false 只用终端（也可以用 lscs watch --no-overlay）
-position = "right"             # 贴在炉石窗口的 right（右侧）、left（左侧）或 top（顶部）
+position = "right"             # 贴在炉石窗口的 right（右下角）、left（左下角）或 top（顶部）；拖过面板后以拖到的位置为准
 opacity = 0.85                 # 不透明度，0.3~1.0
 font_size = 0                  # 字号（像素）：0 表示按炉石窗口大小自动，或填 10~40
 click_through = true           # 鼠标点击穿透面板，不影响游戏操作（只在 Windows 上有效）
+drag_handle = true             # 面板右上角的"≡ 拖动"标签；点它时炉石被切到后台就改成 false（面板留在默认或上次拖到的位置）
 opponents = true               # 面板上显示对手一览：招募时两行（下一个、最强），战斗中列出全部
 
 [review]

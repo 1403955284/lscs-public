@@ -63,6 +63,7 @@ def test_example_file_matches_defaults():
     assert "\nhero_advice = true " in text
     assert "\nchoice_advice = true " in text
     assert "\nrepair_invalid = true " in text
+    assert "\ndrag_handle = true " in text
 
 
 def test_values_are_read(tmp_path):
@@ -156,6 +157,7 @@ def test_overlay_defaults():
         0,
         True,
     )
+    assert cfg.drag_handle is True  # 面板右上角的拖动标签
 
 
 def test_overlay_values_are_read(tmp_path):
@@ -164,6 +166,10 @@ def test_overlay_values_are_read(tmp_path):
     )
     cfg = load_config(path).overlay
     assert (cfg.enabled, cfg.position, cfg.opacity, cfg.font_size) == (False, "top", 0.5, 18)
+    assert (
+        load_config(write(tmp_path, "[overlay]\ndrag_handle = false\n")).overlay.drag_handle
+        is False
+    )
 
 
 @pytest.mark.parametrize(

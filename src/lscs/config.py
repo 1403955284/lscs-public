@@ -62,6 +62,7 @@ class OverlayConfig(BaseModel):
     opacity: float = Field(default=0.85, ge=0.3, le=1.0)
     font_size: int = 0  # 像素；0 表示按炉石窗口高度自动
     click_through: bool = True
+    drag_handle: bool = True  # 面板右上角的"≡ 拖动"标签；false 不开（面板留在预设或上次拖到的位置）
     opponents: bool = True  # 对手一览：招募时两行（下一个、最强），战斗中列出全部
 
     @field_validator("font_size")

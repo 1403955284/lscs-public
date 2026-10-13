@@ -47,10 +47,12 @@ def _print(line: str) -> None:
 def create_tk_window(
     cfg: OverlayConfig, highlight: HighlightConfig | None = None
 ) -> OverlayWindowLike:
-    """highlight：config.toml 的 [highlight]（画面高亮）；None 时不画。"""
+    """highlight：config.toml 的 [highlight]（画面高亮）；None 时不画。拖到的位置记在项目文件夹的
+    overlay-position.json（运行时才取 position.DEFAULT_PATH，测试里换成了临时目录）。"""
+    from lscs.overlay import position
     from lscs.overlay.window import OverlayWindow  # 没有 tkinter 时在这里抛出 ImportError
 
-    return OverlayWindow(cfg, highlight=highlight)
+    return OverlayWindow(cfg, highlight=highlight, position_path=position.DEFAULT_PATH)
 
 
 class Controller:

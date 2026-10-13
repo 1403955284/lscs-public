@@ -297,13 +297,14 @@ def test_windows_path_with_fake_win32(monkeypatch):
     api = FakeWin32Api(
         windows=[FakeWindow(1, pid=10, size=(1600, 900), origin=(100, 50))], paths={10: hs}
     ).install(monkeypatch)
+    api.ancestor = None  # 面板、标签各有各的句柄
     api.foreground = 1  # 炉石在前台
     out = []
     try:
         window = OverlayWindow(OverlayConfig(), out=out.append)
     except tk.TclError as exc:
         pytest.skip(f"没有图形界面：{exc}")
-    assert window.status.startswith("悬浮面板已打开：炉石在前台时显示在游戏窗口右侧")
+    assert window.status.startswith("悬浮面板已打开：炉石在前台时显示在游戏窗口右下角")
     model = OverlayModel(lambda c: c)
     model.on_update(STATE, [Event(type=EventType.RECRUIT_STARTED, turn=3)])
     seen = {}
@@ -315,14 +316,14 @@ def test_windows_path_with_fake_win32(monkeypatch):
         if "docked" not in seen and window._geometry is not None:
             seen["docked"] = window._geometry
             api.foreground = 999  # 切到别的程序
-        elif "docked" in seen and "hidden" not in seen and api.alpha.get(0xABC) == 0:
+        elif "docked" in seen and "hidden" not in seen and api.alpha.get(window._hwnd) == 0:
             seen["hidden"] = True
             api.GetForegroundWindow = broken
         return not out
 
     window.run(model, keep_running)
-    width, _height, x, y = seen["docked"]
-    assert (x, y) == (100 + 1600 - 32 - width, 50 + 162)  # 客户区右侧 2%、顶部 18%
+    width, height, x, y = seen["docked"]
+    assert (x, y) == (100 + 1600 - 32 - width, 50 + 882 - height)  # 客户区右下角，各留 2%
     assert width == 412  # 900 高 → 16 像素字 → 22 个字宽
     assert seen.get("hidden")
     assert out == [
@@ -901,3 +902,621 @@ def test_highlight_preview_draws_the_move_badge():
         window.destroy()
     finally:
         root.destroy()
+
+
+# ---- 拖动标签 ----
+
+HS_EXE = r"C:\Program Files (x86)\Hearthstone\Hearthstone.exe"
+CLIENT = (100, 50, 1600, 900)  # 假炉石的客户区：x, y, 宽, 高
+FOCUS_LOST = (
+    "注意：炉石失去了焦点（前台是 lscs 的面板）；"
+    "如果反复出现，请把 [overlay] drag_handle 设为 false 并告诉开发者"
+)
+
+
+def _fake_hearthstone(monkeypatch):
+    """假的 Win32：炉石在前台；面板、高亮、标签各有各的句柄（ancestor=None）。"""
+    from fake_win32 import FakeWin32Api, FakeWindow
+
+    x, y, width, height = CLIENT
+    api = FakeWin32Api(
+        windows=[FakeWindow(1, pid=10, size=(width, height), origin=(x, y))], paths={10: HS_EXE}
+    ).install(monkeypatch)
+    api.ancestor = None
+    api.foreground = 1
+    return api
+
+
+def _open_window(tk, **kwargs):
+    from lscs.overlay.window import OverlayWindow
+
+    try:
+        return OverlayWindow(OverlayConfig(), **kwargs)
+    except tk.TclError as exc:
+        pytest.skip(f"没有图形界面：{exc}")
+
+
+def _once_placed(window, scenario):
+    """面板第一次定位好以后，在 Tk 的回调里运行一次 scenario，然后关闭窗口。定时器会吞掉回调里
+    的异常，所以先存起来，回来再抛出。"""
+    model = OverlayModel(lambda c: NAMES.get(c, c))
+    model.on_update(STATE, [Event(type=EventType.RECRUIT_STARTED, turn=3)])
+    result = {"polls": 0}
+
+    def keep_running():
+        if "done" in result:
+            return False
+        result["polls"] += 1
+        if window._placed is None and result["polls"] < 40:
+            return True
+        try:
+            result["value"] = scenario()
+        except Exception as exc:
+            result["error"] = exc
+        result["done"] = True
+        return False
+
+    window.run(model, keep_running)
+    if "error" in result:
+        raise result["error"]
+    return result.get("value")
+
+
+def _grip_centre(window):
+    rect = window._grip.geometry
+    return rect.x + rect.width // 2, rect.y + rect.height // 2
+
+
+def test_grip_sits_above_the_panel_and_hides_with_it(monkeypatch, tmp_path):
+    """假 Win32 贴靠：标签不穿透、不抢焦点，面板穿透；默认在右下角，标签在面板正上方、右对齐；
+    切到别的程序时两个都透明；标签偶尔在前台时面板不隐藏。"""
+    tk = pytest.importorskip("tkinter")
+    from lscs.overlay.geometry import Rect
+    from lscs.overlay.win32 import (
+        WS_EX_LAYERED,
+        WS_EX_NOACTIVATE,
+        WS_EX_TOOLWINDOW,
+        WS_EX_TRANSPARENT,
+    )
+
+    api = _fake_hearthstone(monkeypatch)
+    out = []
+    window = _open_window(tk, out=out.append, position_path=tmp_path / "p.json")
+    assert window.status.startswith("悬浮面板已打开：炉石在前台时显示在游戏窗口右下角")
+    assert window._grip is not None and window._grip.text() == "≡ 拖动"
+    grip_hwnd = window._grip.hwnd
+    assert grip_hwnd not in (None, window._hwnd)
+    wanted = WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
+    assert api.styles[grip_hwnd] & wanted == wanted
+    assert not api.styles[grip_hwnd] & WS_EX_TRANSPARENT  # 标签收得到鼠标
+    assert api.styles[window._hwnd] & WS_EX_TRANSPARENT  # 面板照样穿透
+
+    def scenario():
+        seen = {"placed": window._placed, "grip": window._grip.geometry}
+        seen["panel"] = window._geometry
+        api.foreground = grip_hwnd  # 标签成了前台窗口：面板不隐藏
+        window._place()
+        window._place()  # 只提醒一次
+        seen["grip_foreground"] = (window._visible, api.alpha[window._hwnd])
+        api.foreground = 999  # 切到别的程序
+        window._place()
+        seen["hidden"] = (api.alpha[window._hwnd], api.alpha[grip_hwnd], window._placed)
+        api.foreground = 1
+        window._place()
+        seen["shown"] = (api.alpha[window._hwnd], api.alpha[grip_hwnd])
+        return seen
+
+    seen = _once_placed(window, scenario)
+    x, y, width, height = CLIENT
+    area, docked, box = seen["placed"]
+    assert (area, docked) == (Rect(*CLIENT), True)
+    panel_w, panel_h, panel_x, panel_y = seen["panel"]
+    grip = seen["grip"]
+    assert panel_y + panel_h == y + 882  # 面板底边 = 客户区底边 − 2%
+    assert panel_x + panel_w == x + 1600 - 32  # 右边 − 2%
+    assert grip.bottom == panel_y and grip.right == panel_x + panel_w  # 标签在面板正上方、右对齐
+    assert (grip.width, grip.height) == (72, 22)  # 900 高 → 16 像素字 → 4.5 × 1.4 个字
+    assert box == Rect(panel_x, grip.y, panel_w, panel_h + grip.height)
+    assert seen["grip_foreground"] == (True, 217)
+    assert seen["hidden"] == (0, 0, None)
+    assert seen["shown"] == (217, 217)
+    assert out == [FOCUS_LOST]  # 标签成了前台：提醒一次
+    assert list(tmp_path.iterdir()) == []  # 没拖过：不写文件
+
+
+def test_hidden_grip_moves_offscreen_and_is_placed_before_it_shows(monkeypatch, tmp_path):
+    """隐藏时标签不只是透明，还移到屏幕外（不靠透明度 0 让鼠标穿过去）；再显示时先放回原位、
+    再恢复不透明度，不会在屏幕外闪一下也不会在旧位置闪一下。"""
+    tk = pytest.importorskip("tkinter")
+
+    api = _fake_hearthstone(monkeypatch)
+    window = _open_window(tk, out=lambda _l: None, position_path=tmp_path / "p.json")
+
+    def scenario():
+        grip = window._grip
+        shown_at = grip.geometry
+        api.foreground = 999  # 切到别的程序
+        window._place()
+        hidden = (grip.geometry, grip._top.geometry(), api.alpha[grip.hwnd])
+        calls = []
+        place, set_visible = grip.place, grip.set_visible
+        grip.place = lambda rect: (calls.append(("place", rect)), place(rect))
+        grip.set_visible = lambda v: (calls.append(("visible", v)), set_visible(v))
+        api.foreground = 1
+        window._place()
+        return shown_at, hidden, calls, grip.geometry, api.alpha[grip.hwnd]
+
+    shown_at, hidden, calls, back_at, alpha = _once_placed(window, scenario)
+    geometry, tk_geometry, hidden_alpha = hidden
+    assert geometry is None and tk_geometry.endswith("+-32000+-32000") and hidden_alpha == 0
+    assert calls == [("place", shown_at), ("visible", True)]  # 先放回去，再显示
+    assert back_at == shown_at and alpha == 217
+
+
+def test_grip_style_is_checked_while_hidden(monkeypatch, tmp_path):
+    """炉石不在前台时也检查标签的样式：掉了马上补上，而且标签留在屏幕外、透明。"""
+    tk = pytest.importorskip("tkinter")
+    from lscs.overlay.win32 import WS_EX_TRANSPARENT
+
+    api = _fake_hearthstone(monkeypatch)
+    window = _open_window(tk, out=lambda _l: None, position_path=tmp_path / "p.json")
+
+    def scenario():
+        grip = window._grip
+        api.foreground = 999
+        window._place()  # 隐藏
+        api.styles[grip.hwnd] |= WS_EX_TRANSPARENT  # 样式被改了（比如 Tk 改了扩展样式）
+        window._place()  # 还隐藏着
+        return (
+            api.styles[grip.hwnd] & WS_EX_TRANSPARENT,
+            api.alpha[grip.hwnd],
+            grip.geometry,
+            grip._top.geometry().endswith("+-32000+-32000"),
+            window._grip is grip,
+        )
+
+    assert _once_placed(window, scenario) == (0, 0, None, True, True)
+
+
+def test_dragging_the_grip_moves_and_remembers_the_panel(monkeypatch, tmp_path):
+    tk = pytest.importorskip("tkinter")
+    from lscs.overlay import position
+    from lscs.overlay.geometry import Anchor, Rect, anchor_from_rect
+
+    _fake_hearthstone(monkeypatch)
+    path = tmp_path / "p.json"
+    out = []
+    window = _open_window(tk, out=out.append, position_path=path)
+
+    def drag(dx, dy):
+        gx, gy = _grip_centre(window)
+        window._grip_press(gx, gy)
+        window._grip_motion(gx + dx // 2, gy + dy // 2)
+        window._grip_motion(gx + dx, gy + dy)
+        moved = window._placed[2]
+        window._grip_release(gx + dx, gy + dy)
+        return moved
+
+    def scenario():
+        seen = {"start": window._placed[2]}
+        seen["tiny"] = (drag(2, -2), window._placed[2], path.exists())  # 手抖：不算拖
+        seen["moved"] = drag(-200, -100)
+        window._place()  # 之后的定位不弹回
+        seen["after"] = window._placed[2]
+        seen["file"] = position.load(path)
+        seen["outside"] = drag(5000, 5000)  # 拖出客户区：夹回来
+        seen["outside_file"] = position.load(path)
+        window._grip_reset()  # 双击：回到预设
+        seen["reset"] = (window._placed[2], path.exists())
+        return seen
+
+    seen = _once_placed(window, scenario)
+    start = seen["start"]
+    tiny, after_tiny, written = seen["tiny"]
+    assert after_tiny == start and not written
+    moved = seen["moved"]
+    assert (moved.x, moved.y) == (start.x - 200, start.y - 100)
+    assert seen["after"] == moved
+    client = Rect(*CLIENT)
+    assert seen["file"] == anchor_from_rect(moved, client)
+    assert seen["file"].h == "right" and seen["file"].v == "bottom"
+    outside = seen["outside"]
+    assert (outside.right, outside.bottom) == (client.right, client.bottom)
+    assert seen["outside_file"] == Anchor(1.0, 1.0, "right", "bottom")
+    assert seen["reset"] == (start, False)
+    assert out == [
+        '面板位置已记住（p.json）；双击"≡ 拖动"恢复默认位置',  # 只在第一次保存时说
+        "面板位置已恢复默认",
+    ]
+
+
+def test_drag_released_while_hearthstone_is_away_is_not_saved(monkeypatch, tmp_path):
+    tk = pytest.importorskip("tkinter")
+
+    api = _fake_hearthstone(monkeypatch)
+    path = tmp_path / "p.json"
+    window = _open_window(tk, out=lambda _l: None, position_path=path)
+
+    def scenario():
+        start = window._placed[2]
+        gx, gy = _grip_centre(window)
+        window._grip_press(gx, gy)
+        window._grip_motion(gx - 300, gy - 300)
+        api.foreground = 999  # 拖到一半切到了别的程序
+        window._grip_motion(gx - 310, gy - 310)
+        hidden = (window._visible, window._placed)
+        window._grip_release(gx - 310, gy - 310)
+        api.foreground = 1
+        window._place()
+        return start, hidden, window._drag, window._placed[2], path.exists()
+
+    start, hidden, drag, box, written = _once_placed(window, scenario)
+    assert hidden == (False, None)
+    assert drag is None and box == start and not written
+
+
+def test_drag_whose_release_was_lost_ends_on_the_place_tick(monkeypatch, tmp_path):
+    """拖动中松手的消息没收到（比如弹出了系统对话框抢走了鼠标）：定位的定时器看到鼠标键已经
+    松开、而且上次检查以来没有移动事件，就当作在最后的位置松手（照常保存）。"""
+    tk = pytest.importorskip("tkinter")
+    from lscs.overlay import position
+    from lscs.overlay.geometry import Rect, anchor_from_rect
+    from lscs.overlay.win32 import VK_LBUTTON
+
+    api = _fake_hearthstone(monkeypatch)
+    path = tmp_path / "p.json"
+    window = _open_window(tk, out=lambda _l: None, position_path=path)
+
+    def scenario():
+        gx, gy = _grip_centre(window)
+        api.keys[VK_LBUTTON] = 0x8000  # 按着
+        window._grip_press(gx, gy)
+        window._grip_motion(gx - 200, gy - 100)
+        moved = window._placed[2]
+        window._place_tick()
+        window._place_tick()  # 还按着：继续拖
+        still = (window._drag is not None, path.exists())
+        window._grip_motion(gx - 210, gy - 110)
+        api.keys[VK_LBUTTON] = 0  # 松开了，但 ButtonRelease 没来
+        window._place_tick()  # 上次检查以来有移动：先不算
+        waiting = window._drag is not None
+        window._place_tick()
+        return moved, still, waiting, window._drag, window._placed[2], position.load(path)
+
+    moved, still, waiting, drag, box, saved = _once_placed(window, scenario)
+    assert still == (True, False) and waiting
+    assert drag is None
+    assert (box.x, box.y) == (moved.x - 10, moved.y - 10)
+    assert saved == anchor_from_rect(box, Rect(*CLIENT))
+
+
+def test_lost_release_is_not_guessed_off_windows(monkeypatch, tmp_path):
+    tk = pytest.importorskip("tkinter")
+    import sys
+
+    from lscs.overlay import win32
+
+    if sys.platform == "win32":
+        pytest.skip("只检查非 Windows")
+    monkeypatch.setattr(win32, "IS_WINDOWS", False)
+    window = _open_window(tk, out=lambda _l: None, position_path=tmp_path / "p.json")
+
+    def scenario():
+        gx, gy = _grip_centre(window)
+        window._grip_press(gx, gy)
+        window._grip_motion(gx - 50, gy + 50)
+        window._place_tick()
+        window._place_tick()
+        dragging = window._drag is not None  # 不知道鼠标键的状态：等真的松手
+        window._grip_release(gx - 50, gy + 50)
+        return dragging, window._drag
+
+    assert _once_placed(window, scenario) == (True, None)
+
+
+def test_panel_starts_where_it_was_dragged_last_time(monkeypatch, tmp_path):
+    tk = pytest.importorskip("tkinter")
+    from lscs.overlay import position
+    from lscs.overlay.geometry import Anchor
+
+    _fake_hearthstone(monkeypatch)
+    path = tmp_path / "p.json"
+    position.save(path, Anchor(0.0625, 0.0556, "left", "top"))
+    window = _open_window(tk, out=lambda _l: None, position_path=path)
+    assert "显示在上次拖到的位置" in window.status
+    box = _once_placed(window, lambda: window._placed[2])
+    assert (box.x, box.y) == (100 + 100, 50 + 50)  # 客户区的 6.25% 宽、5.56% 高
+
+
+def test_grip_on_mac_drags_through_tk_events_without_a_file(monkeypatch, tmp_path):
+    """非 Windows：标签是普通置顶窗口，Tk 的绑定照样能拖；位置只在这次有效，不写文件。"""
+    tk = pytest.importorskip("tkinter")
+    import sys
+
+    from lscs.overlay import win32
+
+    if sys.platform == "win32":
+        pytest.skip("只检查非 Windows")
+    monkeypatch.setattr(win32, "IS_WINDOWS", False)
+    out = []
+    window = _open_window(tk, out=out.append, position_path=tmp_path / "p.json")
+    assert '可以用右上角的"≡ 拖动"标签拖，位置不保存' in window.status
+    assert window._grip is not None and window._grip.hwnd is None
+
+    def scenario():
+        start = window._placed[2]
+        label = window._grip.label
+        gx, gy = _grip_centre(window)
+        label.event_generate("<ButtonPress-1>", x=5, y=5, rootx=gx, rooty=gy)
+        label.event_generate("<B1-Motion>", x=5, y=5, rootx=gx - 150, rooty=gy + 80)
+        label.event_generate("<ButtonRelease-1>", x=5, y=5, rootx=gx - 150, rooty=gy + 80)
+        window._place()
+        return start, window._placed, window._anchors[False], window._drag
+
+    start, (_area, docked, box), anchor, drag = _once_placed(window, scenario)
+    assert not docked and drag is None
+    assert (box.x, box.y) == (start.x - 150, start.y + 80)
+    assert anchor is not None
+    assert list(tmp_path.iterdir()) == []
+    assert out == []
+
+
+def test_grip_that_cannot_be_styled_leaves_the_panel_alone(monkeypatch, tmp_path):
+    tk = pytest.importorskip("tkinter")
+
+    api = _fake_hearthstone(monkeypatch)
+    real = api.SetLayeredWindowAttributes
+    panel = []
+
+    def only_the_panel(hwnd, key, alpha, flags):
+        panel[:] = panel or [hwnd]  # 面板最先设置
+        return real(hwnd, key, alpha, flags) if hwnd == panel[0] else 0
+
+    api.SetLayeredWindowAttributes = only_the_panel
+    window = _open_window(tk, out=lambda _l: None, position_path=tmp_path / "p.json")
+    assert window.status.startswith("悬浮面板已打开：炉石在前台时显示在游戏窗口右下角")
+    assert "面板不能拖动（SetLayeredWindowAttributes 失败（错误码 5））" in window.status
+    assert window._grip is None
+    width, height, x, y = _once_placed(window, lambda: window._geometry)
+    assert (x + width, y + height) == (100 + 1568, 50 + 882)  # 面板照常贴在右下角
+    assert window._native
+
+
+def test_drag_handle_can_be_switched_off(monkeypatch, tmp_path):
+    """[overlay] drag_handle = false：不开标签（万一点它会把炉石切到后台），面板照样用预设或
+    上次拖到的位置。"""
+    tk = pytest.importorskip("tkinter")
+    from lscs.overlay import position
+    from lscs.overlay.geometry import Anchor
+
+    _fake_hearthstone(monkeypatch)
+    path = tmp_path / "p.json"
+    position.save(path, Anchor(0.0625, 0.0556, "left", "top"))
+    try:
+        window = _window_with(OverlayConfig(drag_handle=False), path)
+    except tk.TclError as exc:
+        pytest.skip(f"没有图形界面：{exc}")
+    assert window._grip is None
+    assert (
+        "显示在上次拖到的位置（删掉项目文件夹里的 overlay-position.json 恢复默认）" in window.status
+    )
+    assert "≡ 拖动" not in window.status and "不能拖动" not in window.status
+    width, height, x, y = _once_placed(window, lambda: window._geometry)
+    assert (x, y) == (100 + 100, 50 + 50)  # 没有标签：面板自己贴在记住的位置
+    assert path.exists()
+
+
+def test_drag_handle_off_on_mac_says_nothing_about_dragging(monkeypatch, tmp_path):
+    tk = pytest.importorskip("tkinter")
+    import sys
+
+    from lscs.overlay import win32
+
+    if sys.platform == "win32":
+        pytest.skip("只检查非 Windows")
+    monkeypatch.setattr(win32, "IS_WINDOWS", False)
+    try:
+        window = _window_with(OverlayConfig(drag_handle=False), tmp_path / "p.json")
+    except tk.TclError as exc:
+        pytest.skip(f"没有图形界面：{exc}")
+    try:
+        assert window._grip is None
+        assert window.status == "悬浮面板已打开（不是 Windows，放在屏幕右上角，不穿透鼠标）。"
+    finally:
+        window._release()
+
+
+def _window_with(cfg, path):
+    from lscs.overlay.window import OverlayWindow
+
+    return OverlayWindow(cfg, out=lambda _l: None, position_path=path)
+
+
+def test_grip_failure_while_running_only_stops_dragging(monkeypatch, tmp_path):
+    tk = pytest.importorskip("tkinter")
+
+    api = _fake_hearthstone(monkeypatch)
+    out = []
+    window = _open_window(tk, out=out.append, position_path=tmp_path / "p.json")
+
+    def scenario():
+        grip_hwnd = window._grip.hwnd
+        real = api.SetLayeredWindowAttributes
+        api.SetLayeredWindowAttributes = lambda h, k, a, f: (
+            0 if h == grip_hwnd else real(h, k, a, f)
+        )
+        api.foreground = 999
+        window._place()  # 隐藏：标签设不了透明度
+        api.foreground = 1
+        window._place()
+        return window._grip, window._visible, api.alpha[window._hwnd]
+
+    grip, visible, alpha = _once_placed(window, scenario)
+    assert grip is None and visible and alpha == 217
+    assert out == [
+        "拖动标签出错（SetLayeredWindowAttributes 失败（错误码 5）），面板不能拖动了，其余照常。"
+    ]
+
+
+def test_focus_taken_by_the_grip_is_given_back(monkeypatch):
+    tk = pytest.importorskip("tkinter")
+    from lscs.overlay import grip as grip_module
+
+    api = _fake_hearthstone(monkeypatch)
+    api.foreground = 0x555  # 运行 watch 的 PowerShell
+    real_init = grip_module.GripWindow.__init__
+
+    def stealing(self, *args, **kwargs):
+        real_init(self, *args, **kwargs)
+        api.foreground = self.hwnd  # 第一次显示时抢走了焦点
+
+    monkeypatch.setattr(grip_module.GripWindow, "__init__", stealing)
+    window = _open_window(tk)
+    try:
+        assert api.focus_calls == [0x555]
+    finally:
+        window._release()
+
+
+def test_pressing_the_grip_gives_focus_back_to_hearthstone(monkeypatch, tmp_path):
+    """万一按标签时炉石被切到了后台（前台成了标签或面板）：按下和松开时都马上还给炉石，并在
+    终端提醒一次（反复出现就关掉 drag_handle）。炉石本来就在前台时什么都不做。"""
+    tk = pytest.importorskip("tkinter")
+
+    api = _fake_hearthstone(monkeypatch)
+    out = []
+    window = _open_window(tk, out=out.append, position_path=tmp_path / "p.json")
+
+    def scenario():
+        gx, gy = _grip_centre(window)
+        window._grip_press(gx, gy)  # 炉石在前台：不动焦点
+        window._grip_release(gx, gy)
+        quiet = (list(api.focus_calls), list(out))
+        api.foreground = window._grip.hwnd
+        window._grip_press(gx, gy)
+        after_press = (api.foreground, list(api.focus_calls))
+        api.foreground = window._hwnd
+        window._grip_release(gx, gy)
+        return quiet, after_press, api.foreground, list(api.focus_calls)
+
+    quiet, after_press, foreground, calls = _once_placed(window, scenario)
+    assert quiet == ([], [])
+    assert after_press == (1, [1])  # 炉石的句柄是 1
+    assert foreground == 1 and calls == [1, 1]
+    assert out == [FOCUS_LOST]
+
+
+def test_grip_reports_a_rebuilt_window(monkeypatch):
+    """Tk 重建了标签的顶层窗口（新的句柄）：重新加上样式，并告诉面板要把它放回高亮上面。"""
+    tk = pytest.importorskip("tkinter")
+    from fake_win32 import FakeWin32Api
+
+    from lscs.overlay.geometry import Rect
+    from lscs.overlay.grip import GripWindow
+    from lscs.overlay.win32 import WS_EX_NOACTIVATE, WS_EX_TRANSPARENT
+
+    try:
+        root = tk.Tk()
+    except tk.TclError as exc:
+        pytest.skip(f"没有图形界面：{exc}")
+    try:
+        root.withdraw()
+        api = FakeWin32Api().install(monkeypatch)
+
+        def nothing(*_args):
+            pass
+
+        grip = GripWindow(root, "TkDefaultFont", 0.85, True, nothing, nothing, nothing, nothing)
+        assert grip.hwnd == 0xABC and api.alpha[0xABC] == 217
+        assert grip.apply_style() is False
+        api.styles[0xABC] |= WS_EX_TRANSPARENT  # 样式被别人改了：重设，但不算重建
+        assert grip.apply_style() is False
+        assert not api.styles[0xABC] & WS_EX_TRANSPARENT
+        api.ancestor = 0xDEF  # Tk 重建了顶层窗口
+        assert grip.apply_style() is True
+        assert grip.hwnd == 0xDEF and api.styles[0xDEF] & WS_EX_NOACTIVATE
+        grip.place(Rect(10, 20, 72, 22))
+        grip.set_visible(False)
+        assert api.alpha[0xDEF] == 0
+        assert grip.geometry is None and grip._top.geometry().endswith("+-32000+-32000")
+        grip.destroy()
+    finally:
+        root.destroy()
+
+
+def test_position_that_cannot_be_saved_is_still_used(monkeypatch, tmp_path):
+    tk = pytest.importorskip("tkinter")
+
+    _fake_hearthstone(monkeypatch)
+    out = []
+    path = tmp_path / "missing" / "overlay-position.json"  # 文件夹不存在：写不进去
+    window = _open_window(tk, out=out.append, position_path=path)
+
+    def scenario():
+        gx, gy = _grip_centre(window)
+        window._grip_press(gx, gy)
+        window._grip_motion(gx - 300, gy - 300)
+        window._grip_release(gx - 300, gy - 300)
+        moved = window._placed[2]
+        window._place()
+        return moved, window._placed[2]
+
+    moved, after = _once_placed(window, scenario)
+    assert after == moved  # 这次照样有效
+    assert len(out) == 1 and out[0].startswith("面板位置无法保存：")
+    assert not path.parent.exists()
+
+
+def test_dragging_after_falling_back_to_a_plain_window_is_not_saved(monkeypatch, tmp_path):
+    """贴靠炉石连续失败、退回普通置顶窗口：标签也变成普通窗口，拖动相对屏幕、不写文件。"""
+    tk = pytest.importorskip("tkinter")
+
+    api = _fake_hearthstone(monkeypatch)
+    out = []
+    path = tmp_path / "p.json"
+    window = _open_window(tk, out=out.append, position_path=path)
+
+    def broken():
+        raise OSError("GetForegroundWindow 坏了")
+
+    def scenario():
+        api.GetForegroundWindow = broken
+        for _ in range(5):
+            window._place()
+        grip = window._grip
+        area, docked, start = window._placed
+        gx, gy = _grip_centre(window)
+        window._grip_press(gx, gy)
+        window._grip_motion(gx - 100, gy + 100)
+        window._grip_release(gx - 100, gy + 100)
+        screen = window._screen()
+        return grip, grip._native, docked, area == screen, start, window._placed[2], window._anchors
+
+    grip, native, docked, on_screen, start, moved, anchors = _once_placed(window, scenario)
+    assert grip is not None and not native and not docked
+    assert on_screen  # 参照区域换成了屏幕
+    assert (moved.x, moved.y) == (start.x - 100, start.y + 100)
+    assert anchors[True] is None and anchors[False] is not None
+    assert not path.exists()
+    assert len(out) == 1 and out[0].startswith("贴靠炉石窗口连续 5 次失败")
+
+
+@pytest.mark.parametrize(
+    ("drag_handle", "expected"),
+    [(True, "drag_handle 设为 false"), (False, "请告诉开发者")],
+)
+def test_focus_warning_only_mentions_drag_handle_when_the_grip_is_on(drag_handle, expected):
+    """拖动标签已经关掉时，提醒里不再叫用户去关它。"""
+    from types import SimpleNamespace
+
+    from lscs.config import OverlayConfig
+    from lscs.overlay.window import FOCUS_LOST_NO_GRIP, OverlayWindow
+
+    out: list[str] = []
+    fake = SimpleNamespace(
+        _focus_warned=False, _out=out.append, _cfg=OverlayConfig(drag_handle=drag_handle)
+    )
+    OverlayWindow._note_focus_lost(fake)
+    OverlayWindow._note_focus_lost(fake)  # 只提醒一次
+    assert len(out) == 1 and expected in out[0]
+    assert (out[0] == FOCUS_LOST_NO_GRIP) is (not drag_handle)

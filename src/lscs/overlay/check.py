@@ -1,6 +1,7 @@
 """lscs overlay-check：逐项检查悬浮面板在这台 Windows 电脑上能不能贴靠炉石、穿透鼠标。
 
 每一步打印一行"√/× 步骤：说明"（"!" 表示要注意、但不影响面板）。关键步骤都通过时返回 True。
+最后一步检查面板右上角的拖动标签（不穿透、不抢焦点），它失败时面板照常，只是不能拖。
 这些符号在中文 Windows 控制台（GBK、默认字体）里都能显示。
 """
 
@@ -17,7 +18,15 @@ from lscs.overlay.geometry import Rect
 log = logging.getLogger(__name__)
 
 Output = Callable[[str], None]
-PANEL_STEPS = ("取得面板窗口句柄", "设置鼠标穿透和半透明", "检查窗口样式", "隐藏和重新显示")
+GRIP_STEP = "拖动标签"  # 不是关键步骤：失败时面板照常，只是不能拖
+PANEL_STEPS = (
+    "取得面板窗口句柄",
+    "设置鼠标穿透和半透明",
+    "检查窗口样式",
+    "隐藏和重新显示",
+    GRIP_STEP,
+)
+OFFSCREEN = "1x1+-32000+-32000"  # 放在屏幕外，检查时看不到
 
 
 def _print(line: str) -> None:
@@ -31,12 +40,28 @@ def _tk_root() -> Any:
     try:
         root.overrideredirect(True)
         root.attributes("-topmost", True)
-        root.geometry("1x1+-32000+-32000")  # 放在屏幕外，检查时看不到
+        root.geometry(OFFSCREEN)
         root.update()  # 让 Tk 创建顶层窗口
     except BaseException:
         root.destroy()
         raise
     return root
+
+
+def _tk_grip(root: Any) -> Any:
+    """和面板的拖动标签一样：同一个 Tk 的第二个顶层窗口。"""
+    import tkinter as tk
+
+    top = tk.Toplevel(root)
+    try:
+        top.overrideredirect(True)
+        top.attributes("-topmost", True)
+        top.geometry(OFFSCREEN)
+        top.update()
+    except BaseException:
+        top.destroy()
+        raise
+    return top
 
 
 def _reason(exc: BaseException) -> str:
@@ -190,3 +215,22 @@ def _check_panel(check: _Checker, cfg: OverlayConfig, root: Any, out: Output) ->
     check.step(PANEL_STEPS[1], True, style)
     check.step(PANEL_STEPS[2], True, verify)
     check.step(PANEL_STEPS[3], True, opacity)
+    check.step(GRIP_STEP, False, lambda: _check_grip(cfg, root))
+
+
+def _check_grip(cfg: OverlayConfig, root: Any) -> str:
+    """拖动标签：分层、不进任务栏、不抢焦点，但不穿透（不然按不住它）。"""
+    try:
+        top = _tk_grip(root)
+        try:
+            hwnd = win32.root_window(top.winfo_id())
+            if hwnd is None:
+                raise RuntimeError("GetAncestor 返回空")
+            win32.make_overlay(hwnd, cfg.opacity, False)
+            if not win32.has_overlay_style(hwnd, False):
+                raise RuntimeError("设置后读回的扩展样式不完整")
+        finally:
+            top.destroy()
+    except Exception as exc:
+        raise RuntimeError(f"{_reason(exc)}；面板能用，只是不能拖") from exc
+    return "不穿透、不抢焦点、不进任务栏"
