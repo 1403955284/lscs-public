@@ -109,6 +109,7 @@ def test_step_frames_draw_only_the_current_target():
     assert step_frames(LAYOUT, button, FULL_HD) == [
         Frame(button_rect(LAYOUT, "refresh", FULL_HD), round=True, label="1", badge=True)
     ]
+    assert not any(f.calibration for f in step_frames(LAYOUT, button, FULL_HD))
     assert step_frames(LAYOUT, NextStep("▶ 等建议…", tone="muted"), FULL_HD) == []
     assert step_frames(LAYOUT, None, FULL_HD) == []
     empty_row = NextStep("▶ 买", Target(row="shop", index=0, count=0))
@@ -145,6 +146,7 @@ def test_calibration_frames_cover_every_slot_and_button():
     ]
     assert [f.round for f in frames].count(True) == 4
     assert not any(f.badge for f in frames)  # 标签写在框里，不画成徽章（"升本"也是两个字）
+    assert all(f.calibration for f in frames)  # 校准框画完整的框，不画四角括号、不呼吸
     assert len(frames) == 29
 
 

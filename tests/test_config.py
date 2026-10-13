@@ -187,7 +187,8 @@ def test_highlight_defaults_and_values():
 
     cfg = AppConfig().highlight
     assert cfg == HighlightConfig()
-    assert (cfg.enabled, cfg.color, cfg.aspect) == (True, "#ffd34d", 16 / 9)
+    assert (cfg.enabled, cfg.color, cfg.aspect) == (True, "#f2d98a", 16 / 9)  # 浅金
+    assert (cfg.style, cfg.pulse) == ("corners", True)  # 四角括号，新目标出现时呼吸
     assert (cfg.shop_y, cfg.shop_pitch, cfg.board_y) == (0.367, 0.128, 0.55)
     assert (cfg.upgrade, cfg.refresh) == ((0.412, 0.175, 0.05), (0.588, 0.175, 0.05))
     assert (cfg.freeze, cfg.hero_power) == ((0.646, 0.175, 0.05), (0.593, 0.78, 0.055))
@@ -201,6 +202,7 @@ def test_highlight_defaults_and_values():
         ("upgrade = [0.2, 0.3, 0.6]", "highlight.upgrade"),
         ("upgrade = [0.2, 0.3]", "highlight.upgrade"),
         ('color = "gold"', "highlight.color"),
+        ('style = "glow"', "highlight.style"),
         ("aspect = 0", "highlight.aspect"),
         ("shop_size = 3", "highlight.shop_size"),
     ],
@@ -214,6 +216,63 @@ def test_highlight_values_are_read(tmp_path):
     text = "[highlight]\nenabled = false\nshop_y = 0.3\nhero_power = [0.6, 0.8, 0.05]\n"
     cfg = load_config(write(tmp_path, text)).highlight
     assert (cfg.enabled, cfg.shop_y, cfg.hero_power) == (False, 0.3, (0.6, 0.8, 0.05))
+
+
+def test_highlight_style_values_are_read(tmp_path):
+    text = '[highlight]\nstyle = "frame"\npulse = false\ncolor = "#ffd34d"\n'
+    cfg = load_config(write(tmp_path, text)).highlight
+    assert (cfg.style, cfg.pulse, cfg.color) == ("frame", False, "#ffd34d")
+    example = EXAMPLE.read_text(encoding="utf-8")
+    assert '\ncolor = "#f2d98a" ' in example
+    assert '\nstyle = "corners" ' in example and "\npulse = true " in example
+
+
+# 老版本 config.example.toml 的 [highlight]（校准、换样式之前）里和现在不一样的行
+OLD_HIGHLIGHT_LINES = [
+    'color = "#ffd34d"',
+    "shop_y = 0.31",
+    "shop_pitch = 0.143",
+    "shop_width = 0.125",
+    "shop_height = 0.175",
+    "board_y = 0.585",
+    "board_pitch = 0.143",
+    "board_width = 0.125",
+    "board_height = 0.175",
+    "upgrade = [0.19, 0.3, 0.05]",
+    "refresh = [0.19, 0.43, 0.045]",
+    "freeze = [0.81, 0.43, 0.045]",
+    "hero_power = [0.585, 0.82, 0.06]",
+]
+
+
+def test_old_highlight_template_values_are_found(tmp_path):
+    from lscs.config import HighlightConfig, old_highlight_values
+
+    assert old_highlight_values(HighlightConfig()) == []
+    assert old_highlight_values(load_config(EXAMPLE).highlight) == []
+    text = "[highlight]\n" + "\n".join(OLD_HIGHLIGHT_LINES) + "\nchoice_y = 0.5\n"
+    assert old_highlight_values(load_config(write(tmp_path, text)).highlight) == OLD_HIGHLIGHT_LINES
+
+
+@pytest.mark.parametrize(
+    ("values", "found"),
+    [
+        ({"color": "#FFD34D"}, ['color = "#ffd34d"']),  # 颜色不分大小写
+        ({"color": "#ffd34e"}, []),
+        ({"shop_y": 0.3100000001}, ["shop_y = 0.31"]),  # 小数允许一点误差
+        ({"shop_y": 0.311}, []),
+        ({"upgrade": (0.19, 0.30000001, 0.05)}, ["upgrade = [0.19, 0.3, 0.05]"]),
+        ({"upgrade": (0.19, 0.30, 0.0)}, []),  # 三个数都一样才算
+        (
+            {"refresh": (0.19, 0.43, 0.045), "shop_y": 0.31},
+            ["shop_y = 0.31", "refresh = [0.19, 0.43, 0.045]"],
+        ),
+    ],
+)
+def test_old_highlight_values_compare_with_a_tolerance(values, found):
+    from lscs.config import HighlightConfig, old_highlight_values
+
+    assert old_highlight_values(HighlightConfig(**values)) == found
 
 
 def test_all_opponents_defaults_on_and_can_be_switched_off(tmp_path):

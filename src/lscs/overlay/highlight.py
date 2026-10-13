@@ -1,12 +1,15 @@
 """画面高亮窗口（tkinter）：盖在炉石客户区上的置顶窗口，只给"下一步"指的那张牌或那个按钮
-画一个发光的框和步骤编号（选项建议设计文档第 8 节）。
+画四个角的括号和步骤编号（选项建议设计文档第 8 节；样式见文末"高亮样式"一节）。
 
 - Windows：画布背景是色键 KEY，-transparentcolor 让没画东西的地方完全透明；make_passthrough
   再加上鼠标穿透、不进任务栏、不抢焦点的样式（只改扩展样式）。每次定位时检查样式还在不在；
 - 预览（preview=True，非 Windows 上的 lscs highlight-test）：深色背景的普通置顶窗口；
-- 隐藏时只清空画布（整窗透明，鼠标也穿过去），不 withdraw；不做闪烁和动画。
+- 隐藏时只清空画布（整窗透明，鼠标也穿过去），不 withdraw；
+- 换到新目标时"呼吸"约 1.2 秒（style.Breathing，用 after 定时器、只改线条颜色、不重建图形）；
+  换目标、隐藏、销毁时取消定时器，回调里的异常只记日志。
 
-只在主线程使用。出错时抛出异常，由调用方（OverlayWindow、highlight-test）决定怎么处理。
+几何和呼吸的状态机都在 overlay.style（纯函数），这里只管画。只在主线程使用。出错时抛出异常，
+由调用方（OverlayWindow、highlight-test）决定怎么处理。
 """
 
 from __future__ import annotations
@@ -14,48 +17,68 @@ from __future__ import annotations
 import sys
 import tkinter as tk
 import tkinter.font as tkfont
+from functools import partial
 
 from lscs.config import HighlightConfig
 from lscs.overlay import win32
 from lscs.overlay.geometry import Rect
 from lscs.overlay.layout import Frame, HighlightLayout, content_rect, step_frames
 from lscs.overlay.model import NextStep
+from lscs.overlay.style import (
+    BADGE_FILL,
+    BADGE_RING,
+    CORNER,
+    DARK,
+    PULSE_MS,
+    Breathing,
+    Strokes,
+    badge_circle,
+    badge_font_px,
+    corner_brackets,
+    dimmed,
+    rounded_points,
+    stroke_widths,
+)
 
 KEY = "#010203"  # 色键：画布上这个颜色的地方完全透明
 PREVIEW_BG = "#1e1e24"
-OUTER = "#8a6a1a"  # 外层描边：暗金
-INNER = "#fff6cc"  # 内层描边：浅黄（中层用 [highlight] color）
-BADGE_TEXT = "#1e1e24"
-OUTER_WIDTH, MIDDLE_WIDTH, INNER_WIDTH = 0.012, 0.007, 0.003  # 内容区高度的比例
-BADGE_RADIUS = 0.022
-CORNER = 0.015  # 圆角半径
 LABEL_FONT = 0.022  # highlight-test 标签的字号
 OFFSCREEN = "1x1+-32000+-32000"
 FAMILIES = {"win32": "Microsoft YaHei UI", "darwin": "PingFang SC"}
+# 呼吸时要换颜色的图形：线（fill）和圆、多边形的边（outline）
+PULSE_FILL, PULSE_OUTLINE = "pulse_fill", "pulse_outline"
 
 
-def _rounded(x0: float, y0: float, x1: float, y1: float, r: float) -> list[float]:
-    """圆角矩形的多边形顶点（配合 smooth=True）。"""
-    r = max(0.0, min(r, (x1 - x0) / 2, (y1 - y0) / 2))
-    return [
-        *(x0 + r, y0, x1 - r, y0, x1, y0, x1, y0 + r),
-        *(x1, y1 - r, x1, y1, x1 - r, y1, x0 + r, y1),
-        *(x0, y1, x0, y1 - r, x0, y0 + r, x0, y0),
-    ]
+def _recolor(canvas: tk.Canvas, color: str, dim_color: str, dim: bool) -> None:
+    """呼吸：只改颜色线和徽章外圈的颜色（不删掉重画，色键窗口不会闪）。"""
+    now = dim_color if dim else color
+    canvas.itemconfigure(PULSE_FILL, fill=now)
+    canvas.itemconfigure(PULSE_OUTLINE, outline=now)
 
 
 class HighlightWindow:
     def __init__(self, root: tk.Misc, cfg: HighlightConfig, preview: bool = False) -> None:
         self._layout = HighlightLayout.from_config(cfg)
         self._color = cfg.color
+        self._dim_color = dimmed(cfg.color)
+        self._style = cfg.style
         self._preview = preview
         self._hwnd: int | None = None
         self._client: Rect | None = None  # 窗口现在的位置（炉石客户区）
         self._drawn: tuple | None = None  # 画布上现在画的 (框, 位置)
         self._fonts: dict[int, tkfont.Font] = {}
         self._top = tk.Toplevel(root)
+        self._breathing: Breathing | None = None
         try:
             self._setup()
+            # 不引用 self：HighlightWindow 和定时器之间没有引用环
+            self._breathing = Breathing(
+                self._top.after,
+                self._top.after_cancel,
+                partial(_recolor, self._canvas, self._color, self._dim_color),
+                enabled=cfg.pulse,
+                interval_ms=PULSE_MS,
+            )
         except BaseException:
             self.destroy()
             raise
@@ -123,6 +146,9 @@ class HighlightWindow:
         if key == self._drawn:
             return rebuilt
         self._drawn = key
+        if self._breathing is not None:  # 先定下这次用原色还是暗色；校准框不呼吸
+            steps = tuple(f for f in frames if not f.calibration) if client is not None else ()
+            self._breathing.show(steps)
         self._canvas.delete("all")
         if client is not None:
             height = content_rect(client, self._layout.aspect).height
@@ -138,36 +164,39 @@ class HighlightWindow:
         return self._fonts[px]
 
     def _draw_frame(self, frame: Frame, client: Rect, height: int) -> None:
-        rect = frame.rect
-        x0, y0 = rect.x - client.x, rect.y - client.y
-        x1, y1 = x0 + rect.width, y0 + rect.height
-        canvas = self._canvas
-        # 三层描边模拟发光：外层宽、暗金；中层金黄；内层细、浅黄
-        layers = (
-            (OUTER, max(3, round(OUTER_WIDTH * height))),
-            (self._color, max(2, round(MIDDLE_WIDTH * height))),
-            (INNER, max(1, round(INNER_WIDTH * height))),
+        rect = Rect(
+            frame.rect.x - client.x, frame.rect.y - client.y, frame.rect.width, frame.rect.height
         )
-        for color, width in layers:
-            if frame.round:
-                canvas.create_oval(x0, y0, x1, y1, outline=color, width=width)
-            else:
-                points = _rounded(x0, y0, x1, y1, CORNER * height)
-                canvas.create_polygon(points, smooth=True, outline=color, fill="", width=width)
+        widths = stroke_widths(height)
+        dim = self._breathing is not None and self._breathing.dim
+        color = self._dim_color if dim else self._color
+        if frame.calibration or self._style == "frame":
+            self._draw_outline(rect, frame.round, widths, color, height)
+        else:
+            self._draw_corners(rect, widths, color, height)
         if not frame.label:
             return
-        if frame.badge:  # 步骤编号或"选"：框左上角一个实心圆徽章
-            r = max(8, round(BADGE_RADIUS * height))
+        canvas = self._canvas
+        if frame.badge:  # 步骤编号或"选"：框右上角上方一个深色小圆，外圈和字用高亮颜色
+            circle = badge_circle(rect, height)
+            cx, cy, r = circle.cx, circle.cy, circle.r
             canvas.create_oval(
-                x0 - r, y0 - r, x0 + r, y0 + r, fill=self._color, outline=OUTER, width=2
+                cx - r,
+                cy - r,
+                cx + r,
+                cy + r,
+                fill=BADGE_FILL,
+                outline=color,
+                width=BADGE_RING,
+                tags=PULSE_OUTLINE,
             )
-            canvas.create_text(x0, y0, text=frame.label, fill=BADGE_TEXT, font=self._font(r))
+            font = self._font(badge_font_px(circle))
+            canvas.create_text(cx, cy, text=frame.label, fill=self._color, font=font)
         else:  # highlight-test 的标签（"商店1""升本"）：写在框的正中间
             px = max(10, round(LABEL_FONT * height))
-            cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
             canvas.create_text(
-                cx,
-                cy,
+                rect.x + rect.width / 2,
+                rect.y + rect.height / 2,
                 text=frame.label,
                 fill=self._color,
                 font=self._font(px),
@@ -175,7 +204,38 @@ class HighlightWindow:
                 justify="center",
             )
 
+    def _draw_corners(self, rect: Rect, widths: Strokes, color: str, height: int) -> None:
+        """四个角的括号：先画四条深色衬底，再在上面画颜色线（方头、尖角，看起来是实心的 L）。"""
+        brackets = corner_brackets(rect, height)
+        for width, fill, tags in ((widths.under, DARK, ()), (widths.line, color, PULSE_FILL)):
+            for bracket in brackets:
+                self._canvas.create_line(
+                    *(c for point in bracket for c in point),
+                    fill=fill,
+                    width=width,
+                    capstyle="projecting",
+                    joinstyle="miter",
+                    tags=tags,
+                )
+
+    def _draw_outline(
+        self, rect: Rect, round_: bool, widths: Strokes, color: str, height: int
+    ) -> None:
+        """整圈细线框（style = "frame"、highlight-test 的校准框）：深色衬底上一条颜色线；
+        按钮画圆，槽位画圆角矩形。"""
+        x0, y0, x1, y1 = rect.x, rect.y, rect.right, rect.bottom
+        for width, outline, tags in ((widths.under, DARK, ()), (widths.line, color, PULSE_OUTLINE)):
+            if round_:
+                self._canvas.create_oval(x0, y0, x1, y1, outline=outline, width=width, tags=tags)
+            else:
+                points = rounded_points(x0, y0, x1, y1, CORNER * height)
+                self._canvas.create_polygon(
+                    points, smooth=True, outline=outline, fill="", width=width, tags=tags
+                )
+
     def destroy(self) -> None:
+        if self._breathing is not None:
+            self._breathing.stop()  # 先取消定时器：窗口没了它再触发就会出错
         self._fonts.clear()
         try:
             self._top.destroy()

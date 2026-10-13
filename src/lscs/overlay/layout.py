@@ -84,12 +84,14 @@ class HighlightLayout:
 
 @dataclass(frozen=True)
 class Frame:
-    """高亮要画的一个框：round 为 True 时是圆（按钮），否则是圆角矩形（槽位）。"""
+    """高亮要画的一个框：round 为 True 时是按钮（外接正方形），否则是槽位。"下一步"的框画成
+    四角括号（[highlight] style = "frame" 时是整圈细线框）；校准框画完整的圆或圆角矩形。"""
 
     rect: Rect
     round: bool = False
     label: str = ""  # 徽章上的字（第几步、"选"），或 highlight-test 写在框里的标签（"商店1"）
-    badge: bool = False  # True：label 画成框左上角的圆形徽章；False：写在框的正中间
+    badge: bool = False  # True：label 画成框右上角上方的小圆徽章；False：写在框的正中间
+    calibration: bool = False  # highlight-test 的校准框：完整的框，不呼吸
 
 
 def content_rect(client: Rect, aspect: float) -> Rect:
@@ -166,7 +168,12 @@ def calibration_frames(
     for row in rows:
         if row == "buttons":
             frames += [
-                Frame(button_rect(layout, b, client), round=True, label=CALIBRATION_LABELS[b])
+                Frame(
+                    button_rect(layout, b, client),
+                    round=True,
+                    label=CALIBRATION_LABELS[b],
+                    calibration=True,
+                )
                 for b in BUTTONS
                 if button_calibrated(layout, b)
             ]
@@ -175,7 +182,11 @@ def calibration_frames(
         base = "choice" if row == "choice4" else row
         label = CALIBRATION_LABELS[row]
         frames += [
-            Frame(slot_rect(layout, base, i, count, client), label=f"{label}{i + 1}")
+            Frame(
+                slot_rect(layout, base, i, count, client),
+                label=f"{label}{i + 1}",
+                calibration=True,
+            )
             for i in range(count)
         ]
     return frames

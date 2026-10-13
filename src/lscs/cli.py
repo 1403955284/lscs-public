@@ -19,8 +19,10 @@ from lscs.config import (
     DEFAULT_CONFIG,
     AppConfig,
     ConfigError,
+    HighlightConfig,
     load_config,
     mask_key,
+    old_highlight_values,
 )
 from lscs.dump import Namer, describe
 from lscs.logwatch.logconfig import (
@@ -241,14 +243,30 @@ def _build_scheduler(cards, sync: bool):
     )
 
 
+def _warn_old_highlight(cfg: HighlightConfig) -> None:
+    """老版本的 config.toml 模板写死了高亮的颜色和校准之前的位置，会盖掉新的默认值。"""
+    old = old_highlight_values(cfg)
+    if old:
+        print(
+            "注意：config.toml 的 [highlight] 里还留着旧版的颜色、位置或尺寸（"
+            + "、".join(old)
+            + "），"
+            "会盖掉新校准的值；删掉这些行（或整个 [highlight] 段）就会用新的默认值。",
+            flush=True,
+        )
+
+
 def _overlay_config(explicit: bool) -> AppConfig | None:
     """读取 config.toml（没有文件时用默认值），面板要用其中的 [overlay] 和 [highlight]；
     有误时抛出 ConfigError。explicit 表示命令行明确要求打开（replay --overlay），此时不看
-    [overlay] enabled。面板关闭时返回 None（也就没有画面高亮）。"""
+    [overlay] enabled。面板关闭时返回 None（也就没有画面高亮）。用到画面高亮时，[highlight]
+    里还有旧模板的值就提示一次。"""
     cfg = load_config(DEFAULT_CONFIG)
     if not cfg.overlay.enabled and not explicit:
         print("悬浮面板已在 config.toml 中关闭，只在终端显示建议。")
         return None
+    if cfg.highlight.enabled:
+        _warn_old_highlight(cfg.highlight)
     return cfg
 
 
@@ -479,6 +497,7 @@ def _cmd_highlight_test(args: argparse.Namespace) -> int:
     except ConfigError as exc:
         print(exc)
         return 1
+    _warn_old_highlight(cfg)  # 不看 enabled：highlight-test 照样用这些位置画框
     try:
         rows = args.rows or DEFAULT_CALIBRATION_ROWS
         return 0 if calibrate.run_highlight_test(cfg, args.seconds, rows) else 1

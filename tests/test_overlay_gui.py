@@ -360,7 +360,7 @@ def test_highlight_preview_draws_only_the_current_step():
         root.update()
         assert window.geometry == client
         assert window.texts() == ["2"]  # 徽章上写第几步
-        assert window.shapes() == 3 + 2  # 三层描边 + 徽章的圆和字
+        assert window.shapes() == 4 * 2 + 2  # 四个角各两笔（深色衬底 + 颜色线）+ 徽章的圆和字
         window.show(NextStep("▶ 刷新商店", Target(button="refresh"), badge="1"), client)
         assert window.texts() == ["1"]
         window.show(NextStep("▶ 等建议…", tone="muted"), client)  # 没有目标：什么都不画
@@ -541,38 +541,140 @@ def test_focus_taken_by_the_highlight_is_given_back(monkeypatch):
         window._release()
 
 
-def test_highlight_badges_and_calibration_labels_are_drawn_differently():
-    tk = pytest.importorskip("tkinter")
-    from lscs.config import HighlightConfig
-    from lscs.overlay.geometry import Rect
+def _highlight_window(tk, cfg):
     from lscs.overlay.highlight import HighlightWindow
-    from lscs.overlay.layout import Frame
 
     try:
         root = tk.Tk()
     except tk.TclError as exc:
         pytest.skip(f"没有图形界面：{exc}")
+    root.withdraw()
+    return root, HighlightWindow(root, cfg, preview=True)
+
+
+def _drawn(window, frame, client):
+    """画一个框，返回 (第一个字的位置, 各种图形的个数)。"""
+    from collections import Counter
+
+    window.draw([frame], client)
+    canvas = window._canvas
+    items = canvas.find_all()
+    texts = [i for i in items if canvas.type(i) == "text"]
+    where = canvas.coords(texts[0]) if texts else None
+    return where, dict(Counter(canvas.type(i) for i in items))
+
+
+def test_highlight_badges_and_calibration_labels_are_drawn_differently():
+    tk = pytest.importorskip("tkinter")
+    from lscs.config import HighlightConfig
+    from lscs.overlay.geometry import Rect
+    from lscs.overlay.layout import Frame
+    from lscs.overlay.style import BADGE_FILL, DARK
+
+    root, window = _highlight_window(tk, HighlightConfig())
     try:
-        root.withdraw()
-        window = HighlightWindow(root, HighlightConfig(), preview=True)
-        client = Rect(0, 0, 640, 360)
+        client = Rect(0, 0, 640, 360)  # 内容区高 360：衬底 4、颜色线 2、徽章半径 9
         canvas = window._canvas
-
-        def drawn(frame):
-            window.draw([frame], client)
-            items = canvas.find_all()
-            texts = [i for i in items if canvas.type(i) == "text"]
-            ovals = [i for i in items if canvas.type(i) == "oval"]
-            return canvas.coords(texts[0]), len(ovals)
-
         button = Rect(100, 100, 60, 60)
-        # highlight-test 的两个字的按钮标签：写在圆的正中间，没有徽章
-        assert drawn(Frame(button, round=True, label="升本")) == ([130.0, 130.0], 3)
-        # "下一步"的徽章：框的左上角一个实心圆
-        assert drawn(Frame(button, round=True, label="1", badge=True)) == ([100.0, 100.0], 4)
+        # highlight-test 的按钮：完整的圆（衬底 + 颜色线），两个字的标签写在正中间
+        calibration = Frame(button, round=True, label="升本", calibration=True)
+        assert _drawn(window, calibration, client) == ([130.0, 130.0], {"oval": 2, "text": 1})
+        # "下一步"：四个角的括号，徽章在框右上角的正上方（半径 9 + 衬底 4）
+        step = Frame(button, round=True, label="1", badge=True)
+        assert _drawn(window, step, client) == ([160.0, 87.0], {"line": 8, "oval": 1, "text": 1})
+        lines = [i for i in canvas.find_all() if canvas.type(i) == "line"]
+        assert [canvas.itemcget(i, "fill") for i in lines] == [DARK] * 4 + ["#f2d98a"] * 4
+        assert [canvas.itemcget(i, "width") for i in lines] == ["4.0"] * 4 + ["2.0"] * 4
+        badge = next(i for i in canvas.find_all() if canvas.type(i) == "oval")
+        assert canvas.itemcget(badge, "fill") == BADGE_FILL
+        assert canvas.itemcget(badge, "outline") == "#f2d98a"
         slot = Rect(200, 50, 80, 100)
-        assert drawn(Frame(slot, label="商店1"))[0] == [240.0, 100.0]
+        calibration_slot = Frame(slot, label="商店1", calibration=True)
+        assert _drawn(window, calibration_slot, client) == (
+            [240.0, 100.0],
+            {"polygon": 2, "text": 1},
+        )
         window.destroy()
+    finally:
+        root.destroy()
+
+
+def test_highlight_frame_style_draws_a_thin_full_outline():
+    tk = pytest.importorskip("tkinter")
+    from lscs.config import HighlightConfig
+    from lscs.overlay.geometry import Rect
+    from lscs.overlay.layout import Frame
+
+    root, window = _highlight_window(tk, HighlightConfig(style="frame", color="#80c0ff"))
+    try:
+        client = Rect(0, 0, 640, 360)
+        button = Frame(Rect(100, 100, 60, 60), round=True, label="2", badge=True)
+        assert _drawn(window, button, client) == ([160.0, 87.0], {"oval": 3, "text": 1})
+        slot = Frame(Rect(200, 50, 80, 100))
+        assert _drawn(window, slot, client) == (None, {"polygon": 2})
+        canvas = window._canvas
+        outlines = [canvas.itemcget(i, "outline") for i in canvas.find_all()]
+        assert outlines == ["#281e0a", "#80c0ff"]  # 深色衬底 + 设置的颜色
+        window.destroy()
+    finally:
+        root.destroy()
+
+
+def test_highlight_breathes_once_per_new_target(monkeypatch):
+    """新目标出现时颜色线在原色和暗色之间切换几次，然后不动；同一个目标不再呼吸；隐藏、销毁时
+    取消定时器。用真的 Tk 定时器（间隔改成 10 毫秒）。"""
+    tk = pytest.importorskip("tkinter")
+    import time
+
+    from lscs.config import HighlightConfig
+    from lscs.overlay import highlight
+    from lscs.overlay.geometry import Rect
+    from lscs.overlay.model import NextStep, Target
+    from lscs.overlay.style import DARK
+
+    monkeypatch.setattr(highlight, "PULSE_MS", 10)
+    root, window = _highlight_window(tk, HighlightConfig())
+    try:
+        canvas = window._canvas
+        client = Rect(40, 60, 640, 360)
+        buy = NextStep("▶ 买", Target(row="shop", index=1, count=3), badge="1")
+        refresh = NextStep("▶ 刷新商店", Target(button="refresh"), badge="2")
+
+        def pending():
+            return root.tk.splitlist(root.tk.call("after", "info"))
+
+        def colours():
+            lines = [i for i in canvas.find_all() if canvas.type(i) == "line"]
+            return {canvas.itemcget(i, "fill") for i in lines}
+
+        def run(seconds):
+            seen = []
+            end = time.monotonic() + seconds
+            while time.monotonic() < end:
+                root.update()
+                seen.append(colours())
+                time.sleep(0.002)
+            return seen
+
+        window.show(buy, client)
+        assert colours() == {DARK, "#f2d98a"} and pending()  # 先按原色画
+        seen = run(0.5)
+        assert {DARK, "#978550"} in seen  # 呼吸：颜色线变暗
+        assert colours() == {DARK, "#f2d98a"} and not pending()  # 之后一直是原色
+        window.show(buy, client)  # 同一个目标：不再呼吸
+        assert not pending()
+        window.show(refresh, client)  # 换了目标：再呼吸一次
+        assert pending()
+        window.show(refresh, None)  # 面板隐藏：取消
+        assert not pending() and window.shapes() == 0
+        window.show(refresh, client)
+        assert pending()
+        window.destroy()  # 销毁：取消
+        assert not pending()
+        quiet = highlight.HighlightWindow(root, HighlightConfig(pulse=False), preview=True)
+        quiet.show(buy, client)
+        assert not pending() and quiet.shapes() == 10
+        quiet.destroy()
     finally:
         root.destroy()
 

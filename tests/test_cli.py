@@ -725,6 +725,75 @@ def test_watch_no_overlay_flag_keeps_terminal_only(monkeypatch, tmp_path, mini_l
     assert calls == [{"thread": "MainThread", "stop": None}]
 
 
+OLD_HIGHLIGHT_HINT = (
+    "注意：config.toml 的 [highlight] 里还留着旧版的颜色、位置或尺寸（{}），会盖掉新校准的值；"
+    "删掉这些行（或整个 [highlight] 段）就会用新的默认值。"
+)
+
+
+@pytest.mark.parametrize(
+    ("config_text", "listed"),
+    [
+        ('[highlight]\ncolor = "#ffd34d"\n', 'color = "#ffd34d"'),
+        ("[highlight]\nshop_y = 0.31\n", "shop_y = 0.31"),
+        (
+            '[highlight]\ncolor = "#ffd34d"\nshop_y = 0.31\nupgrade = [0.19, 0.30, 0.05]\n',
+            'color = "#ffd34d"、shop_y = 0.31、upgrade = [0.19, 0.3, 0.05]',
+        ),
+    ],
+)
+def test_watch_warns_about_old_highlight_values(
+    monkeypatch, tmp_path, mini_lines, capsys, config_text, listed
+):
+    import lscs.overlay.app
+
+    def no_tk(_cfg, highlight=None):
+        raise ImportError("No module named '_tkinter'")
+
+    monkeypatch.setattr(lscs.overlay.app, "create_tk_window", no_tk)
+    argv, _calls = _watch_setup(monkeypatch, tmp_path, mini_lines, config_text)
+    assert main(argv) == 0
+    out = capsys.readouterr().out
+    assert OLD_HIGHLIGHT_HINT.format(listed) in out
+    assert out.count("旧版的颜色、位置或尺寸") == 1  # 启动时只说一次
+
+
+@pytest.mark.parametrize(
+    ("config_text", "flags"),
+    [
+        (None, []),  # 默认值
+        ('[highlight]\ncolor = "#f2d98a"\nshop_y = 0.367\n', []),  # 新模板
+        ('[overlay]\nenabled = false\n[highlight]\ncolor = "#ffd34d"\n', []),  # 面板关了
+        ('[highlight]\nenabled = false\ncolor = "#ffd34d"\n', []),  # 高亮关了
+        ('[highlight]\ncolor = "#ffd34d"\n', ["--no-overlay"]),
+    ],
+)
+def test_watch_without_old_highlight_values_or_highlight_prints_no_warning(
+    monkeypatch, tmp_path, mini_lines, capsys, config_text, flags
+):
+    import lscs.overlay.app
+
+    def no_tk(_cfg, highlight=None):
+        raise ImportError("No module named '_tkinter'")
+
+    monkeypatch.setattr(lscs.overlay.app, "create_tk_window", no_tk)
+    argv, _calls = _watch_setup(monkeypatch, tmp_path, mini_lines, config_text)
+    assert main([*argv, *flags]) == 0
+    assert "旧版的颜色、位置或尺寸" not in capsys.readouterr().out
+
+
+def test_replay_overlay_warns_about_old_highlight_values(monkeypatch, tmp_path, capsys):
+    import lscs.cli
+
+    config = tmp_path / "config.toml"
+    config.write_text("[overlay]\nenabled = false\n[highlight]\nshop_y = 0.31\n", encoding="utf-8")
+    monkeypatch.setattr(lscs.cli, "DEFAULT_CONFIG", config)
+    assert lscs.cli._overlay_config(explicit=True) is not None  # replay --overlay：不看 enabled
+    assert OLD_HIGHLIGHT_HINT.format("shop_y = 0.31") in capsys.readouterr().out
+    assert lscs.cli._overlay_config(explicit=False) is None
+    assert "旧版的颜色、位置或尺寸" not in capsys.readouterr().out
+
+
 def test_watch_overlay_disabled_in_config(monkeypatch, tmp_path, mini_lines, capsys):
     import lscs.overlay.app
 
@@ -916,6 +985,21 @@ def test_highlight_test_command(monkeypatch, tmp_path, capsys):
     assert calls[-1] == (0.3, 10.0, ["choice4"])
     monkeypatch.setattr(lscs.overlay.calibrate, "run_highlight_test", lambda *_: False)
     assert main(["highlight-test"]) == 1
+
+
+def test_highlight_test_warns_about_old_highlight_values(monkeypatch, tmp_path, capsys):
+    import lscs.cli
+    import lscs.overlay.calibrate
+
+    config = tmp_path / "config.toml"
+    monkeypatch.setattr(lscs.cli, "DEFAULT_CONFIG", config)
+    monkeypatch.setattr(lscs.overlay.calibrate, "run_highlight_test", lambda *_: True)
+    assert main(["highlight-test"]) == 0  # 没有 config.toml：默认值
+    assert "旧版的颜色、位置或尺寸" not in capsys.readouterr().out
+    # highlight-test 不看 enabled：照样用这些位置画框
+    config.write_text("[highlight]\nenabled = false\nshop_y = 0.31\n", encoding="utf-8")
+    assert main(["highlight-test"]) == 0
+    assert OLD_HIGHLIGHT_HINT.format("shop_y = 0.31") in capsys.readouterr().out
 
 
 def test_highlight_test_rejects_bad_arguments_and_config(monkeypatch, tmp_path, capsys):

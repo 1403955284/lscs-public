@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import tomllib
 from pathlib import Path
 from typing import Annotated, Literal
@@ -84,7 +85,10 @@ class HighlightConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     enabled: bool = True
-    color: str = Field(default="#ffd34d", pattern=r"^#[0-9a-fA-F]{6}$")
+    color: str = Field(default="#f2d98a", pattern=r"^#[0-9a-fA-F]{6}$")  # 浅金
+    # "corners"：只画四个角的括号；"frame"：整圈细线框（看不惯括号时的退路）
+    style: Literal["corners", "frame"] = "corners"
+    pulse: bool = True  # 换到新的目标时框闪 3 下（约 1.2 秒），之后不动
     aspect: float = Field(default=16 / 9, gt=0.5, le=4)
     shop_y: Ratio = 0.367
     shop_pitch: Ratio = 0.128
@@ -111,6 +115,50 @@ class HighlightConfig(BaseModel):
     refresh: ButtonPlace = (0.588, 0.175, 0.05)
     freeze: ButtonPlace = (0.646, 0.175, 0.05)
     hero_power: ButtonPlace = (0.593, 0.78, 0.055)
+
+
+# 老版本 config.example.toml 的 [highlight]（2026-10-12 校准之前、10-13 换样式之前）里和现在
+# 不一样的值。照抄旧模板的 config.toml 会用它们盖掉新的默认值，启动时提示删掉
+OLD_HIGHLIGHT_TEMPLATE: dict[str, str | float | tuple[float, float, float]] = {
+    "color": "#ffd34d",
+    "shop_y": 0.31,
+    "shop_pitch": 0.143,
+    "shop_width": 0.125,
+    "shop_height": 0.175,
+    "board_y": 0.585,
+    "board_pitch": 0.143,
+    "board_width": 0.125,
+    "board_height": 0.175,
+    "upgrade": (0.19, 0.30, 0.05),
+    "refresh": (0.19, 0.43, 0.045),
+    "freeze": (0.81, 0.43, 0.045),
+    "hero_power": (0.585, 0.82, 0.06),
+}
+
+
+def old_highlight_values(cfg: HighlightConfig) -> list[str]:
+    """cfg 里还是旧模板的值的项，按 config.toml 的写法（`shop_y = 0.31`），顺序同旧模板。
+    颜色不分大小写；小数允许 1e-6 的误差，按钮的三个数都一样才算。"""
+
+    def same(value: object, old: object) -> bool:
+        if isinstance(old, str):
+            return isinstance(value, str) and value.lower() == old
+        if isinstance(old, tuple):
+            return isinstance(value, tuple) and all(map(same, value, old))
+        return isinstance(value, float | int) and math.isclose(value, old, abs_tol=1e-6)
+
+    def toml(old: object) -> str:
+        if isinstance(old, str):
+            return f'"{old}"'
+        if isinstance(old, tuple):
+            return "[" + ", ".join(f"{v:g}" for v in old) + "]"
+        return f"{old:g}"
+
+    return [
+        f"{name} = {toml(old)}"
+        for name, old in OLD_HIGHLIGHT_TEMPLATE.items()
+        if same(getattr(cfg, name), old)
+    ]
 
 
 class AppConfig(BaseModel):
