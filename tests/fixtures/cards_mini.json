@@ -12,7 +12,10 @@
   "race": "DEMON",
   "attack": 1,
   "health": 1,
-  "cost": 0
+  "cost": 0,
+  "mechanics": [
+   "DEATHRATTLE"
+  ]
  },
  {
   "id": "BG21_029_G",
@@ -27,7 +30,10 @@
   "race": "DEMON",
   "attack": 2,
   "health": 2,
-  "cost": 0
+  "cost": 0,
+  "mechanics": [
+   "DEATHRATTLE"
+  ]
  },
  {
   "id": "BGS_061",
@@ -177,7 +183,30 @@
   "attack": 2,
   "health": 2,
   "isBattlegroundsPoolMinion": true,
-  "battlegroundsPremiumDbfId": 133105
+  "battlegroundsPremiumDbfId": 133105,
+  "text": "<b>亡语：</b>召唤一个0/2并具有<b>嘲讽</b>的触手。使你的随从获得+1攻击力。",
+  "mechanics": [
+   "DEATHRATTLE"
+  ]
+ },
+ {
+  "id": "BG36_116_G",
+  "dbfId": 133105,
+  "name": "孢林卵怪",
+  "text": "<b>亡语：</b>召唤两个0/2并具有<b>嘲讽</b>的触手。使你的随从获得+2攻击力。",
+  "type": "MINION",
+  "techLevel": 2,
+  "races": [
+   "ABERRATION"
+  ],
+  "race": "ABERRATION",
+  "attack": 4,
+  "health": 4,
+  "cost": 0,
+  "mechanics": [
+   "DEATHRATTLE"
+  ],
+  "battlegroundsNormalDbfId": 133104
  },
  {
   "id": "BG36_098",
@@ -259,5 +288,278 @@
   "health": 1,
   "isBattlegroundsPoolMinion": true,
   "battlegroundsPremiumDbfId": 64055
+ },
+ {
+  "id": "BG36_103",
+  "dbfId": 131704,
+  "name": "恩拉其工兵",
+  "text": "<b>战吼，亡语：</b>获取一张供能腔。",
+  "type": "MINION",
+  "techLevel": 5,
+  "races": [
+   "ABERRATION"
+  ],
+  "race": "ABERRATION",
+  "attack": 6,
+  "health": 3,
+  "cost": 0,
+  "mechanics": [
+   "BATTLECRY",
+   "DEATHRATTLE"
+  ],
+  "isBattlegroundsPoolMinion": true,
+  "battlegroundsPremiumDbfId": 131705
+ },
+ {
+  "id": "BG36_103_G",
+  "dbfId": 131705,
+  "name": "恩拉其工兵",
+  "text": "<b>战吼，亡语：</b>获取2张供能腔。",
+  "type": "MINION",
+  "techLevel": 5,
+  "races": [
+   "ABERRATION"
+  ],
+  "race": "ABERRATION",
+  "attack": 12,
+  "health": 6,
+  "cost": 0,
+  "mechanics": [
+   "BATTLECRY",
+   "DEATHRATTLE"
+  ],
+  "battlegroundsNormalDbfId": 131704
+ },
+ {
+  "id": "OG_221",
+  "dbfId": 38740,
+  "name": "无私的英雄",
+  "text": "<b>亡语：</b>随机使一个友方随从获得<b>圣盾</b>。",
+  "type": "MINION",
+  "races": [
+   "DRAENEI"
+  ],
+  "race": "DRAENEI",
+  "attack": 2,
+  "health": 1,
+  "cost": 1,
+  "mechanics": [
+   "DEATHRATTLE"
+  ]
+ },
+ {
+  "id": "BG_FP1_024",
+  "dbfId": 97581,
+  "name": "蹒跚的食尸鬼",
+  "text": "<b>嘲讽</b>，<b>亡语：</b>对所有随从造成1点伤害。",
+  "type": "MINION",
+  "techLevel": 2,
+  "attack": 1,
+  "health": 3,
+  "cost": 2,
+  "mechanics": [
+   "DEATHRATTLE",
+   "TAUNT"
+  ],
+  "battlegroundsPremiumDbfId": 61077
+ },
+ {
+  "id": "FP1_024",
+  "dbfId": 1808,
+  "name": "蹒跚的食尸鬼",
+  "text": "<b>嘲讽，亡语：</b>对所有随从造成1点伤害。",
+  "type": "MINION",
+  "races": [
+   "UNDEAD"
+  ],
+  "race": "UNDEAD",
+  "attack": 1,
+  "health": 3,
+  "cost": 2,
+  "mechanics": [
+   "DEATHRATTLE",
+   "TAUNT"
+  ]
+ },
+ {
+  "id": "BG21_017",
+  "dbfId": 72071,
+  "name": "海上走私贩",
+  "text": "<b>亡语：</b>获取\n一张酒馆币。",
+  "type": "MINION",
+  "techLevel": 3,
+  "races": [
+   "PIRATE"
+  ],
+  "race": "PIRATE",
+  "attack": 4,
+  "health": 2,
+  "cost": 0,
+  "mechanics": [
+   "DEATHRATTLE"
+  ],
+  "battlegroundsPremiumDbfId": 73951
+ },
+ {
+  "id": "BG29_888",
+  "dbfId": 113346,
+  "name": "微光护卫者",
+  "text": "<b>进击：</b>获得\n+2攻击力。",
+  "type": "MINION",
+  "techLevel": 1,
+  "races": [
+   "DRAGON"
+  ],
+  "race": "DRAGON",
+  "attack": 1,
+  "health": 4,
+  "cost": 0,
+  "mechanics": [
+   "BACON_RALLY"
+  ],
+  "isBattlegroundsPoolMinion": true,
+  "battlegroundsPremiumDbfId": 113347
+ },
+ {
+  "id": "BG26_817",
+  "dbfId": 99035,
+  "name": "刀剑收藏家",
+  "text": "同时对其攻击目标相邻的敌人造成伤害。",
+  "type": "MINION",
+  "techLevel": 4,
+  "races": [
+   "PIRATE"
+  ],
+  "race": "PIRATE",
+  "attack": 3,
+  "health": 2,
+  "cost": 0,
+  "isBattlegroundsPoolMinion": true,
+  "battlegroundsPremiumDbfId": 99036
+ },
+ {
+  "id": "BG34_405",
+  "dbfId": 129269,
+  "name": "铁血防御机",
+  "text": "当本随从拥有<b>圣盾</b>时，拥有<b>嘲讽</b>。<b>复仇（3）：</b>获得<b>圣盾</b>。",
+  "type": "MINION",
+  "techLevel": 3,
+  "races": [
+   "MECHANICAL"
+  ],
+  "race": "MECHANICAL",
+  "attack": 5,
+  "health": 4,
+  "cost": 0,
+  "mechanics": [
+   "AURA",
+   "AVENGE"
+  ],
+  "isBattlegroundsPoolMinion": true,
+  "battlegroundsPremiumDbfId": 129270
+ },
+ {
+  "id": "BG36_849",
+  "dbfId": 134494,
+  "name": "英勇的巢母",
+  "text": "<b>进击：</b>获得<b>圣盾</b>。<b>战斗开始时：</b>立即发起攻击。",
+  "type": "MINION",
+  "techLevel": 6,
+  "races": [
+   "DRAGON"
+  ],
+  "race": "DRAGON",
+  "attack": 7,
+  "health": 7,
+  "cost": 0,
+  "mechanics": [
+   "BACON_RALLY",
+   "START_OF_COMBAT",
+   "TRIGGER_VISUAL"
+  ],
+  "isBattlegroundsPoolMinion": true,
+  "battlegroundsPremiumDbfId": 134495
+ },
+ {
+  "id": "BG28_300",
+  "dbfId": 104551,
+  "name": "无害的骨颅",
+  "text": "<b>亡语：</b>召唤两个1/1的骷髅。",
+  "type": "MINION",
+  "techLevel": 1,
+  "races": [
+   "UNDEAD"
+  ],
+  "race": "UNDEAD",
+  "attack": 1,
+  "health": 1,
+  "cost": 0,
+  "mechanics": [
+   "DEATHRATTLE"
+  ],
+  "isBattlegroundsPoolMinion": true,
+  "battlegroundsPremiumDbfId": 104554
+ },
+ {
+  "id": "BGS_126",
+  "dbfId": 64189,
+  "name": "野火元素",
+  "text": "在本随从攻击并消灭一个随从后，对一个相邻的敌人造成超过目标生命值的伤害。",
+  "type": "MINION",
+  "techLevel": 3,
+  "races": [
+   "ELEMENTAL"
+  ],
+  "race": "ELEMENTAL",
+  "attack": 6,
+  "health": 3,
+  "cost": 0,
+  "mechanics": [
+   "TRIGGER_VISUAL"
+  ],
+  "isBattlegroundsPoolMinion": true,
+  "battlegroundsPremiumDbfId": 64190
+ },
+ {
+  "id": "BG31_999",
+  "dbfId": 119666,
+  "name": "缝合回收者",
+  "text": "<b>战斗开始时：</b>消灭本随从左边的随从。<b>亡语：</b>召唤被消灭随从的完全相同的复制。<i>（缝合回收者除外。）</i>",
+  "type": "MINION",
+  "techLevel": 7,
+  "races": [
+   "UNDEAD"
+  ],
+  "race": "UNDEAD",
+  "attack": 16,
+  "health": 4,
+  "cost": 0,
+  "mechanics": [
+   "DEATHRATTLE",
+   "START_OF_COMBAT",
+   "TRIGGER_VISUAL"
+  ],
+  "isBattlegroundsPoolMinion": true,
+  "battlegroundsPremiumDbfId": 119669
+ },
+ {
+  "id": "BG36_318",
+  "dbfId": 132331,
+  "name": "无面转化者",
+  "text": "<b>亡语：</b>使你的<b>神明</b>获得+2/+1。<i>（在本局对战中你每施放一个酒馆法术都会提升！）</i>",
+  "type": "MINION",
+  "techLevel": 5,
+  "races": [
+   "ABERRATION"
+  ],
+  "race": "ABERRATION",
+  "attack": 5,
+  "health": 5,
+  "cost": 0,
+  "mechanics": [
+   "DEATHRATTLE"
+  ],
+  "isBattlegroundsPoolMinion": true,
+  "battlegroundsPremiumDbfId": 132332
  }
 ]

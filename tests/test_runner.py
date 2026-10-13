@@ -208,7 +208,16 @@ def test_opponents_overview_once_per_turn_before_the_rules():
     # 重连：没有招募开始事件，第一次看到这个回合也列一次
     runner.on_update(state(3, 4), _events(EventType.SHOP_CHANGED, turn=3))
     methods = [name for name, _ in display.calls]
-    assert methods == ["show_opponents", "show_rules", "show_rules", "show_opponents", "show_rules"]
+    assert methods == [
+        "show_opponents",
+        "show_rules",
+        "show_position",  # 每次算完规则都告诉显示端站位（这里没有卡牌数据：None）
+        "show_rules",
+        "show_position",
+        "show_opponents",
+        "show_rules",
+        "show_position",
+    ]
     _, (shown, overview) = display.calls[0]
     assert shown.seq == 1 and overview.turn == 2
     assert [s.player_id for s in overview.opponents] == [3]
@@ -218,4 +227,140 @@ def test_no_overview_without_opponents():
     display = RecordingDisplay()
     runner = AdviceRunner(RULES, lambda c: c, display)
     runner.on_update(make_state(turn=2, gold=4), _events(EventType.RECRUIT_STARTED))
-    assert [name for name, _ in display.calls] == ["show_rules"]
+    assert [name for name, _ in display.calls] == ["show_rules", "show_position"]
+
+
+# ---- 站位（站位建议设计文档第 5.1 节） ----
+
+from helpers import FIXTURES  # noqa: E402
+
+from lscs.advisor.display import DisplayGroup  # noqa: E402
+from lscs.cards.db import CardDB  # noqa: E402
+
+CARDS = CardDB.from_json_file(FIXTURES / "cards_mini.json")
+SPAWN = "BG36_116"  # 孢林卵怪：战斗型亡语
+
+
+def positions(display):
+    return [args[1] for method, args in display.calls if method == "show_position"]
+
+
+def pos_state(*order, gold=0, seq=1, turn=3, shop=(), phase=Phase.RECRUIT):
+    """场上：101 蚀脑怪、102 虚悯者、103 孢林卵怪，按 order 给出的顺序摆。"""
+    cards = {101: "BG36_099", 102: "BG36_098", 103: SPAWN}
+    from factory import minion
+
+    board = [minion(e, cards[e], 2, 2) for e in order]
+    return make_state(turn=turn, gold=gold, seq=seq, board=board, shop=shop, phase=phase)
+
+
+def pos_runner(display, **kwargs):
+    return AdviceRunner(RULES, CARDS.name, display, cards=CARDS, **kwargs)
+
+
+def test_position_only_after_buying_and_done_after_dragging():
+    display = RecordingDisplay()
+    runner = pos_runner(display)
+    shop = [shop_minion(20, "BGS_061", 3, 1)]
+    runner.on_update(
+        pos_state(101, 102, 103, gold=2, shop=shop), _events(EventType.RECRUIT_STARTED)
+    )
+    runner.on_update(pos_state(101, 102, 103, seq=2), _events(EventType.GOLD_CHANGED))
+    runner.on_update(pos_state(103, 101, 102, seq=3), _events(EventType.BOARD_CHANGED))
+    first, bought, dragged = positions(display)
+    assert first is None  # 规则方案里还有买：不打断买牌
+    assert [(m.entity_id, m.index) for m in bought.moves] == [(103, 0)]
+    assert (bought.state_seq, bought.turn, bought.intro) == (2, 3, True)
+    assert dragged.moves == () and not dragged.intro
+    # 显示端的顺序：规则在前，站位在后
+    methods = [m for m, _ in display.calls]
+    assert methods.index("show_rules") < methods.index("show_position")
+
+
+def test_refresh_or_hero_power_left_in_the_plan_still_counts_as_bought():
+    from factory import power
+
+    display = RecordingDisplay()
+    runner = pos_runner(display)
+    board = pos_state(101, 102, 103).me.board
+    # 1 金：买不起（米尔豪斯 2 金一张），还能刷新、能用免费技能
+    state = make_state(turn=3, gold=1, board=board, hero_power_state=power())
+    runner.on_update(state, _events(EventType.RECRUIT_STARTED))
+    assert [a.type for a in runner.last_rules.plan.actions] == ["hero_power", "refresh"]
+    (advice,) = positions(display)
+    assert advice is not None and advice.moves
+
+
+def test_no_position_without_card_data_or_when_switched_off():
+    for kwargs in ({"cards": None}, {"cards": CARDS, "positioning": False}):
+        display = RecordingDisplay()
+        runner = AdviceRunner(RULES, CARDS.name, display, **kwargs)
+        runner.on_update(pos_state(101, 102, 103), _events(EventType.RECRUIT_STARTED))
+        runner.on_update(pos_state(101, 103, 102, seq=2), _events(EventType.BOARD_CHANGED))
+        assert positions(display) == [None, None]
+
+
+def test_position_intro_once_per_game():
+    display = RecordingDisplay()
+    runner = pos_runner(display)
+    runner.on_update(pos_state(101, 102, 103), _events(EventType.RECRUIT_STARTED))
+    runner.on_update(pos_state(101, 103, 102, seq=2), _events(EventType.BOARD_CHANGED))
+    runner.on_update(pos_state(101, 102, 103, seq=3, turn=4), _events(EventType.RECRUIT_STARTED))
+    new_game = make_state(turn=0, seq=4, phase=Phase.HERO_SELECT)
+    runner.on_update(new_game, [Event(type=EventType.GAME_STARTED, turn=0)])
+    runner.on_update(pos_state(101, 102, 103, seq=5), _events(EventType.RECRUIT_STARTED))
+    assert [a.intro for a in positions(display)] == [True, False, False, True]
+
+
+def test_rules_error_falls_back_to_gold(monkeypatch):
+    import lscs.advisor.runner
+
+    def boom(*_args):
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr(lscs.advisor.runner, "rule_plans", boom)
+    display = RecordingDisplay()
+    runner = pos_runner(display)
+    runner.on_update(pos_state(101, 102, 103, gold=2), _events(EventType.RECRUIT_STARTED))
+    runner.on_update(pos_state(101, 102, 103, gold=1, seq=2), _events(EventType.GOLD_CHANGED))
+    first, second = positions(display)
+    assert first is None  # 米尔豪斯买一张 2 金：还买得起
+    assert second.moves
+
+
+def test_invalid_or_failing_position_is_only_logged(monkeypatch, caplog):
+    import lscs.advisor.runner
+
+    monkeypatch.setattr(lscs.advisor.runner, "validate_position", lambda *_args: "坏了")
+    display = RecordingDisplay()
+    runner = pos_runner(display)
+    with caplog.at_level("WARNING"):
+        runner.on_update(pos_state(101, 102, 103), _events(EventType.RECRUIT_STARTED))
+    assert positions(display) == [None]
+    assert "站位建议不合法（坏了）" in caplog.text
+
+    def boom(*_args):
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr(lscs.advisor.runner, "plan_positions", boom)
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        for seq in (2, 3):
+            runner.on_update(pos_state(101, 102, 103, seq=seq), _events(EventType.GOLD_CHANGED))
+    assert positions(display) == [None, None, None]
+    assert caplog.text.count("计算站位建议时出错") == 1  # 完整堆栈只记一次
+    assert "rules_error" not in [m for m, _ in display.calls]  # 规则建议照常
+
+
+def test_position_lines_in_the_terminal():
+    out = []
+    runner = pos_runner(DisplayGroup(AdviceDisplay(CARDS.name, out.append)))
+    runner.on_update(pos_state(101, 102, 103), _events(EventType.RECRUIT_STARTED))
+    runner.on_update(pos_state(103, 101, 102, seq=2), _events(EventType.BOARD_CHANGED))
+    assert [line for line in out if "🧭" in line] == [
+        "  🧭 站位规则：战斗时随从从最左边开始依次出手；亡语召唤的随从出现在原位；"
+        "嘲讽会被优先攻击。本局只提示这一次",
+        "  🧭 站位：把 左数第 3 个 孢林卵怪 拖到最左边"
+        "（亡语随从先出手、先倒下，亡语最早生效，后面的随从都能用上）",
+        "  🧭 站位已调好",
+    ]

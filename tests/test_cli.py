@@ -1352,3 +1352,87 @@ def test_review_ai_follows_the_schedulers_ai_switch(tmp_path):
     assert r.ai_enabled and r._ai_blocked() is None
     scheduler.disabled_reason = "API Key 连续 3 次无效，已关闭 AI"
     assert r._ai_blocked() == scheduler.disabled_reason
+
+
+# ---- 站位建议的开关（站位建议设计文档第 9 节） ----
+
+
+def _spy_runner(monkeypatch):
+    import lscs.cli
+    from lscs.advisor.runner import AdviceRunner
+
+    made = []
+
+    def spy(*args, **kwargs):
+        made.append(kwargs)
+        return AdviceRunner(*args, **kwargs)
+
+    monkeypatch.setattr(lscs.cli, "AdviceRunner", spy)
+    return made
+
+
+def _mini_cards(monkeypatch):
+    from helpers import FIXTURES
+
+    import lscs.cli
+    from lscs.cards.db import CardDB
+
+    cards = CardDB.from_json_file(FIXTURES / "cards_mini.json")
+    monkeypatch.setattr(lscs.cli, "_load_cards", lambda: cards)
+    return cards
+
+
+def test_replay_positioning_needs_card_data(monkeypatch, capsys):
+    from helpers import MINI_LOG
+
+    made = _spy_runner(monkeypatch)
+    cards = _mini_cards(monkeypatch)
+    assert main(["replay", str(MINI_LOG), "--advice", "--names"]) == 0
+    out = capsys.readouterr().out
+    assert made[-1]["cards"] is cards and made[-1]["positioning"] is True
+    assert "站位建议" not in out  # 开着时不多打一行
+    assert main(["replay", str(MINI_LOG), "--advice"]) == 0  # 不加载卡牌数据
+    assert "站位建议：需要卡牌数据，本次关闭" in capsys.readouterr().out
+    assert made[-1]["cards"] is None and made[-1]["positioning"] is False
+
+
+@pytest.mark.parametrize(
+    ("text", "said"),
+    [
+        ("[positioning]\nenabled = false\n", "站位建议：关闭"),
+        ("[positioning]\nmoves = 3\n", "（这次不提示站位）"),
+    ],
+)
+def test_replay_positioning_switched_off_or_broken_config(
+    monkeypatch, tmp_path, capsys, text, said
+):
+    from helpers import MINI_LOG
+
+    import lscs.cli
+
+    config = tmp_path / "config.toml"
+    config.write_text(text, encoding="utf-8")
+    monkeypatch.setattr(lscs.cli, "DEFAULT_CONFIG", config)
+    made = _spy_runner(monkeypatch)
+    _mini_cards(monkeypatch)
+    assert main(["replay", str(MINI_LOG), "--advice", "--names"]) == 0
+    out = capsys.readouterr().out
+    assert said in out and "  📋 规则：" in out
+    assert made[-1]["positioning"] is False
+
+
+def test_watch_passes_cards_and_the_positioning_switch(monkeypatch, tmp_path, mini_lines, capsys):
+    import lscs.cli
+
+    made = _spy_runner(monkeypatch)
+    cards = _mini_cards(monkeypatch)
+    install = tmp_path / "hs"
+    (install / "Logs").mkdir(parents=True)
+    monkeypatch.setattr(lscs.cli, "_install_dir", lambda args: install)
+    monkeypatch.setattr(lscs.cli, "watch", lambda *args, **kwargs: None)
+    assert main(["watch", "--no-ai", "--no-overlay"]) == 0
+    assert made[-1]["cards"] is cards and made[-1]["positioning"] is True
+    monkeypatch.setattr(lscs.cli, "_load_cards", lambda: None)
+    assert main(["watch", "--no-ai", "--no-overlay"]) == 0
+    assert "站位建议：需要卡牌数据，本次关闭" in capsys.readouterr().out
+    assert made[-1]["positioning"] is False

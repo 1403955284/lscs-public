@@ -16,6 +16,10 @@
 对局结束后（对局复盘设计文档第 7.3 节）：标题下面多一个"复盘"区，列出关键时刻、下局重点和
 文件路径；AI 复盘到了就换成 AI 的标题和重点；下一局开始时清空。
 
+站位（站位建议设计文档第 6.2 节）：规则区多一行"站位：把 X 拖到最左边 · 为什么"；方案的步骤
+都做完后"下一步"是站位的第一步，高亮框住要拖的随从、徽章写"拖"。每次重画都按当前场面重新定位，
+拖完的那一步自然消失；场上的随从换了（又买了、卖了）整条不显示，等运行器的新结果。
+
 对手一览（对手一览与卡池估计设计文档第 7 节）：招募时最下面的"对手"区两行（▶ 下一个对手、
 ★ 最强威胁），面板超高时最先去掉；战斗中整个面板列出所有对手。规则区多一行"对子"，
 要找的牌后面写池里还剩约几张。
@@ -30,10 +34,20 @@ from dataclasses import dataclass, replace
 from typing import Literal
 
 from lscs.advisor.display import format_plan, hero_comment_lines, hero_name
-from lscs.advisor.models import Action, Advice, ChoiceAdvice, HeroAdvice, Lane, Plan
+from lscs.advisor.models import (
+    Action,
+    Advice,
+    ChoiceAdvice,
+    HeroAdvice,
+    Lane,
+    Move,
+    Plan,
+    PositionAdvice,
+)
 from lscs.advisor.names import armor_zh, choice_title, tribe_zh
 from lscs.advisor.opponents import OpponentOverview, OpponentSummary, summarize_opponents
 from lscs.advisor.pool import PoolNote, note_for
+from lscs.advisor.positioning import where_text
 from lscs.advisor.runner import remaining_plan
 from lscs.llm.notices import AUTH_DISABLED, BUDGET_EXHAUSTED
 from lscs.llm.parse import MAX_ACTIONS  # 每个方案最多显示几步：和 AI 回答的上限一致
@@ -82,6 +96,7 @@ WAIT = POINT + "等建议…"
 WAIT_NEW = POINT + "等新的建议…"
 ALL_DONE = "✓ 建议的步骤都做完了"
 CHOICE_BADGE = "选"  # 选项、选英雄的高亮框上写的字（方案的步骤写第几步）
+BADGE_MOVE = "拖"  # 站位：高亮框住要拖的随从
 ROW_LABELS: dict[str, str] = {"shop": "商店", "board": "场面", "choice": "选项", "hero": "英雄"}
 GOOD_CHARS = 12  # "做得好："后面只写事实的第一句，最多这么多个字
 
@@ -257,6 +272,21 @@ def _entity_card(state: GameState, entity_id: int | None) -> str | None:
     return next((c.card_id for c in cards if c.entity_id == entity_id), None)
 
 
+def _move_done(move: Move, index: int, order: list[int]) -> bool:
+    """这一步已经做完：它在目标槽位上，而且右边紧挨着的还是那个随从（最左、最右边不看邻居）。"""
+    if index != move.index:
+        return False
+    return move.before_id is None or order[index + 1 : index + 2] == [move.before_id]
+
+
+def _refresh_out_of_reach(plan: Plan, state: GameState) -> bool:
+    """方案只剩最后的刷新、铸币已经不够刷新了（花在了别处）；不知道刷新多少钱时不下结论。"""
+    me = state.me
+    if me is None or [a.type for a in plan.actions] != ["refresh"]:
+        return False
+    return me.refresh_cost is not None and me.gold < me.refresh_cost
+
+
 def _choosing(state: GameState | None) -> bool:
     """正在选英雄：手牌区里有备选英雄。"""
     return state is not None and state.phase == Phase.HERO_SELECT and state.hero_select is not None
@@ -409,6 +439,7 @@ class OverlayModel:
         self._message: str | None = None
         self._overview_failed = False  # 整理对手一览出过错（只记一次警告）
         self._review: tuple[Line, ...] = ()  # 对局结束后的复盘区
+        self._position: PositionAdvice | None = None  # 本回合最近一次站位建议
 
     # ---- 界面线程 ----
 
@@ -522,6 +553,14 @@ class OverlayModel:
     def ai_summary(self, calls: int, input_tokens: int, output_tokens: int) -> None:
         """本局 AI 用量只在终端显示。"""
 
+    def show_position(self, state: GameState, advice: PositionAdvice | None) -> None:
+        """站位建议；None 表示现在不提示（还没买完、功能关闭），清掉旧的那一行。"""
+        with self._lock:
+            if advice is not None:
+                self._enter_turn(advice.turn)
+            self._position = advice
+            self._commit()
+
     # ---- 复盘 ----
 
     def show_review(self, state: GameState, review: GameReview) -> None:
@@ -566,6 +605,7 @@ class OverlayModel:
             self._hero_rules = None
             self._hero_ai = ()
             self._choice_ai = ()
+            self._position = None
 
     def _remaining(self, entry: _PlanEntry, state: GameState) -> Plan:
         if state is entry.base or state.turn != entry.base.turn:
@@ -591,7 +631,7 @@ class OverlayModel:
         refreshed = _shop_refreshed(entry.base, state)
         if refreshed and is_ai:
             # 旧方案里的牌已经不在商店了；AI 还开着的话很快会有新建议，否则不显示
-            ai_on = self._ai_enabled and self._ai_off is None
+            ai_on = self._ai_coming()
             return (Line(AI_REFRESHED, "muted"),) if ai_on else ()
         plan = self._remaining(entry, state)
         if not plan.actions:
@@ -656,10 +696,14 @@ class OverlayModel:
             ai = (Line("AI 未开启", "muted"),)
         if self._deep_pending:
             ai = (*ai, Line(DEEP_PENDING, "muted"))
+        rules = self._render(self._rules, state, is_ai=False)
+        position = self._position_line(state)
+        if position is not None:  # 方案那一行之后、"对子"之前
+            rules = (*rules[:1], position, *rules[1:])
         return OverlayView(
             title=_recruit_title(state),
             compact=False,
-            rules=self._render(self._rules, state, is_ai=False),
+            rules=rules,
             ai=ai,
             ai_title=ai_title,
             warning=UNCERTAIN if state.uncertain else None,
@@ -744,6 +788,10 @@ class OverlayModel:
 
     # ---- 招募 ----
 
+    def _ai_coming(self) -> bool:
+        """AI 还会给方案：开着、没有因为 Key 无效或次数用完而关掉。"""
+        return self._ai_enabled and self._ai_off is None
+
     def _current_plan(self, state: GameState) -> tuple[_PlanEntry | None, bool]:
         """面板上现在显示的方案：本回合的深度分析（没过期、商店没刷新）→ 快速建议 → 规则。
         第二个值为 True 表示快速建议的商店刷新了、正在等新的 AI 建议。"""
@@ -754,22 +802,93 @@ class OverlayModel:
         if isinstance(fast, _PlanEntry):
             if not _shop_refreshed(fast.base, state):
                 return fast, False
-            if self._ai_enabled and self._ai_off is None:
+            if self._ai_coming():
                 return None, True
         rules = self._rules
         return (rules if isinstance(rules, _PlanEntry) else None), False
 
+    # ---- 站位 ----
+
+    def _pending_moves(self, state: GameState) -> list[tuple[Move, int]]:
+        """站位建议里还没做完的步，和要拖的随从现在在第几个（0 起）。场上的随从和出建议时
+        不一样（又买了、卖了）时为空：等运行器的新结果。"""
+        advice, me = self._position, state.me
+        if advice is None or me is None or advice.turn != state.turn:
+            return []
+        order = [m.entity_id for m in me.board]
+        if sorted(order) != sorted(advice.board):
+            return []
+        pending = []
+        for move in advice.moves:
+            if move.entity_id not in order:
+                continue
+            index = order.index(move.entity_id)
+            if not _move_done(move, index, order):
+                pending.append((move, index))
+        return pending
+
+    def _card_of(self, state: GameState) -> dict[int, str]:
+        me = state.me
+        return {m.entity_id: m.card_id for m in me.board} if me is not None else {}
+
+    def _position_line(self, state: GameState) -> Line | None:
+        """规则区的"站位：把 X 拖到最左边 · 为什么"；两步时编号。没有要拖的时为 None。"""
+        pending = self._pending_moves(state)
+        if not pending:
+            return None
+        card_of = self._card_of(state)
+        parts = [
+            f"把 {self._name(card_of[m.entity_id])} {where_text(m, card_of, self._name)}"
+            f" · {m.short}"
+            for m, _ in pending
+        ]
+        if len(parts) > 1:
+            parts = [f"{REVIEW_NUMBERS[i]} {part}" for i, part in enumerate(parts)]
+        return Line("站位：" + STEP_SEP.join(parts))
+
+    def _position_step(self, state: GameState) -> NextStep | None:
+        """站位的第一步：框住要拖的随从，小圆点后面写拖到哪。"""
+        pending = self._pending_moves(state)
+        if not pending:
+            return None
+        move, index = pending[0]
+        card_of = self._card_of(state)
+        where = where_text(move, card_of, self._name)
+        count = len(card_of)
+        return NextStep(
+            text=f"{POINT}把 左数第 {index + 1} 个 {self._name(card_of[move.entity_id])} {where}",
+            target=Target(row="board", index=index, count=count),
+            slots=f"{slots_text('board', index, count)}   {where}",
+            reason=move.short,
+            badge=BADGE_MOVE,
+        )
+
+    def _outdated(self, entry: _PlanEntry, plan: Plan, state: GameState) -> bool:
+        """面板上留着的步骤已经做不了、不挡站位那一步。运行器回合中途不再发"无需操作"，所以
+        铸币花在了别处时旧方案会一直留着：
+        - 规则方案里还有买、卖：运行器只在现在的规则方案里没有买、卖时才给站位，留着的是旧的；
+        - 只剩最后的刷新、铸币已经不够刷新了。
+        AI 的方案不算前一种（规则不买的牌 AI 可能会买，比如酒馆法术）。"""
+        if entry is self._rules and any(a.type in ("buy", "sell") for a in entry.plan.actions):
+            return True
+        return _refresh_out_of_reach(plan, state)
+
     def _recruit_step(self, state: GameState) -> NextStep:
+        """方案剩下的第一步 → 站位的第一步 → 做完了 / 无需操作；等建议时站位不插队。"""
         entry, waiting = self._current_plan(state)
         if waiting:
             return NextStep(WAIT_NEW, tone="muted")
         if entry is None:
-            return NextStep(WAIT, tone="muted")
-        if not entry.plan.actions:
-            return NextStep(NOTHING_TO_DO, tone="muted")
+            # 规则出错、AI 又不会来（没开、Key 无效、次数用完）：不会再有方案，直接是站位
+            position = None if self._ai_coming() else self._position_step(state)
+            return position if position is not None else NextStep(WAIT, tone="muted")
         plan = self._remaining(entry, state)
+        if not plan.actions or self._outdated(entry, plan, state):
+            position = self._position_step(state)
+            if position is not None:
+                return position
         if not plan.actions:
-            return NextStep(ALL_DONE, tone="muted")
+            return NextStep(ALL_DONE if entry.plan.actions else NOTHING_TO_DO, tone="muted")
         first = plan.actions[0]
         # 高亮框上的编号是它在完整方案里的序号（和面板、终端里的 ①② 对应）
         number = next((i for i, a in enumerate(entry.plan.actions) if a is first), None)

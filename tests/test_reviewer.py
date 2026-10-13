@@ -189,6 +189,7 @@ def test_tap_collects_ai_advice_hero_and_choice_picks(tmp_path):
     tap.ai_summary(1, 2, 3)
     tap.show_opponents(state, None)
     tap.show_review(state, None)
+    tap.show_position(state, None)
     # 新对局清空
     r.on_update(make_state(phase=Phase.HERO_SELECT, turn=0), [ev(EventType.GAME_STARTED, 0)])
     assert (tap.logs, tap.hero_ai_pick, tap.ai_choices) == ({}, None, {})

@@ -27,7 +27,9 @@ RULES = load_rules_config(ROOT / "strategy" / "current" / "rules.toml")
 POOL_TURN_2 = """【本局卡池（本局种族的随从和中立随从，按酒馆等级）】
 [1本] 爆裂飓风 2/1（元素）
 [2本] 熔岩潜伏者 2/5（纳迦）每回合从手牌对本随从使用的第一张塑造法术的法术牌永久有效。（还剩1张！）
+[3本] 野火元素 6/3（元素）在本随从攻击并消灭一个随从后，对一个相邻的敌人造成超过目标生命值的伤害。
 [4本] 刷新畸体 4/5（元素）战吼：获得2次免费的刷新。
+[4本] 刀剑收藏家 3/2（海盗）同时对其攻击目标相邻的敌人造成伤害。
 【酒馆法术】
 [5本 法术 3金] 护甲储备：将你的护甲值变为5点。"""
 
@@ -89,7 +91,7 @@ summary 用一句话（25 字以内）直接写本回合要做什么、为了什
 2. 每个动作都要填 gold_after（执行完这一步后剩多少铸币，不能小于 0）和 minions_after（场面 + 手牌随从一共几个，买 +1、卖 -1、凑成三连 -2），任何一步都不能超过随从上限。
 3. 最多 5 个动作；refresh 要放在最后（之后看不到新商店，所以 refresh 后面不要再冻结）；freeze 只能放在最后。
 4. 英雄技能：局面里写了"不要安排 hero_power"时绝对不要安排；可以用时考虑使用时机（买来的随从在手牌里，要先打出去，给场上随从加属性的技能才会作用到它）；需要目标时 entity_id 填目标编号。
-5. 不要建议发现选择、黑暗之赐或调整站位。
+5. 不要建议发现选择或黑暗之赐。站位由程序按战斗机制另行提示：不要在 actions 里安排站位，summary 里也不要写站位。
 
 只输出一个 json 对象，格式：
 {"analysis": "局势判断、本局方向、本回合目标（两三句）", "actions": [{"type": "buy", "entity_id": 1689, "gold_after": 4, "minions_after": 5, "reason": "一句话理由"}, {"type": "refresh", "gold_after": 3, "minions_after": 5, "reason": "..."}], "summary": "本回合目标，25 字以内，例如：补两张畸变铺场，下回合再升 4 本", "direction": "方向/流派", "look_for": ["接下来要找的牌名"], "confidence": 0.7}
@@ -558,7 +560,10 @@ def test_system_prompt_rules():
     assert "refresh 要放在最后（之后看不到新商店，所以 refresh 后面不要再冻结）" in system
     assert "2. 每个动作都要填 gold_after" in system
     assert "可以放心建议刷新" in system
-    assert "不要建议发现选择、黑暗之赐或调整站位" in system
+    assert "不要建议发现选择或黑暗之赐" in system and "调整站位" not in system
+    assert (
+        "站位由程序按战斗机制另行提示：不要在 actions 里安排站位，summary 里也不要写站位" in system
+    )
     assert "买来的随从在手牌里，要先打出去，给场上随从加属性的技能才会作用到它" in system
     assert "hero_power（英雄技能）" in system
     assert "需要目标时 entity_id 填目标编号" in system

@@ -318,3 +318,20 @@ def test_review_defaults_and_values(tmp_path):
 def test_review_invalid_values_are_rejected(tmp_path, line, field):
     with pytest.raises(ConfigError, match=field):
         load_config(write(tmp_path, f"[review]\n{line}\n"))
+
+
+def test_positioning_defaults_on_and_can_be_switched_off(tmp_path):
+    from lscs.config import PositioningConfig
+
+    assert AppConfig().positioning == PositioningConfig() and PositioningConfig().enabled is True
+    cfg = load_config(write(tmp_path, "[positioning]\nenabled = false\n"))
+    assert cfg.positioning.enabled is False
+    text = EXAMPLE.read_text(encoding="utf-8")
+    assert text.index("[review]") < text.index("[positioning]") < text.index("[highlight]")
+    section = text[text.index("[positioning]") : text.index("[highlight]")]
+    assert "\nenabled = true " in section and "不调用 AI" in section
+
+
+def test_positioning_unknown_key_is_rejected(tmp_path):
+    with pytest.raises(ConfigError, match="positioning.moves"):
+        load_config(write(tmp_path, "[positioning]\nmoves = 3\n"))

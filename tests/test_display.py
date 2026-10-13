@@ -584,3 +584,142 @@ def test_display_group_forwards_show_review():
     review = _review()
     DisplayGroup(Broken(), Panel()).show_review(STATE, review)
     assert seen == [review]
+
+
+# ---- 站位（站位建议设计文档第 6.1 节） ----
+
+from lscs.advisor.models import Move, PositionAdvice  # noqa: E402
+
+POS_NAMES = {"C": "蚀脑怪", "D": "虚悯者", "SP": "孢林卵怪", "SK": "无害的骨颅", "IR": "铁血防御机"}
+DEATHRATTLE = "亡语随从先出手、先倒下，亡语最早生效，后面的随从都能用上"
+AVENGE = "复仇要等友方先倒下几个才触发，放右边活到那时候"
+
+
+def pos_name(card_id):
+    return POS_NAMES.get(card_id, card_id)
+
+
+def pos_state(*cards, turn=3):
+    return make_state(turn=turn, board=[minion(i, c, 2, 2) for i, c in enumerate(cards, start=1)])
+
+
+def pos_move(entity_id, index, before_id=None, role="deathrattle", reason=DEATHRATTLE):
+    return Move(
+        entity_id=entity_id, index=index, before_id=before_id, role=role, reason=reason, short=""
+    )
+
+
+def position(board, moves=(), turn=3, intro=False, more=0):
+    return PositionAdvice(
+        state_seq=1,
+        turn=turn,
+        board=tuple(board),
+        target=tuple(board),
+        moves=tuple(moves),
+        more=more,
+        intro=intro,
+    )
+
+
+def test_position_step_intro_once_then_done():
+    out = []
+    display = AdviceDisplay(pos_name, out.append)
+    bought = pos_state("C", "D", "SP")
+    display.show_position(bought, None)  # 还没买完
+    display.show_position(bought, position((1, 2, 3), [pos_move(3, 0)], intro=True))
+    display.show_position(bought, position((1, 2, 3), [pos_move(3, 0)]))  # 铸币变了，同一步
+    dragged = pos_state("SP", "C", "D")
+    display.show_position(dragged, position((3, 1, 2)))
+    display.show_position(dragged, position((3, 1, 2)))
+    assert out == [
+        "  🧭 站位规则：战斗时随从从最左边开始依次出手；亡语召唤的随从出现在原位；"
+        "嘲讽会被优先攻击。本局只提示这一次",
+        f"  🧭 站位：把 左数第 3 个 孢林卵怪 拖到最左边（{DEATHRATTLE}）",
+        "  🧭 站位已调好",
+    ]
+
+
+def test_position_two_steps_are_numbered_and_more_says_do_these_first():
+    out = []
+    state = pos_state("C", "IR", "D", "SK", "C")
+    moves = [pos_move(4, 0), pos_move(2, 4, role="avenge", reason=AVENGE)]
+    AdviceDisplay(pos_name, out.append).show_position(state, position((1, 2, 3, 4, 5), moves))
+    assert out == [
+        f"  🧭 站位：① 把 左数第 4 个 无害的骨颅 拖到最左边（{DEATHRATTLE}）",
+        f"          ② 把 左数第 3 个 铁血防御机 拖到最右边（{AVENGE}）",
+    ]
+    out.clear()
+    state = pos_state("C", "D", "SP", "SK", "SP")
+    moves = [pos_move(3, 0), pos_move(4, 1, before_id=1)]
+    AdviceDisplay(pos_name, out.append).show_position(
+        state, position((1, 2, 3, 4, 5), moves, more=1)
+    )
+    assert out == [
+        f"  🧭 站位：① 把 左数第 3 个 孢林卵怪 拖到最左边（{DEATHRATTLE}）",
+        f"          ② 把 左数第 4 个 无害的骨颅 拖到 蚀脑怪 的左边（{DEATHRATTLE}）；先做这两步",
+    ]
+
+
+def test_position_done_only_when_the_same_minions_are_on_the_board():
+    out = []
+    display = AdviceDisplay(pos_name, out.append)
+    display.show_position(pos_state("C", "D", "SP"), position((1, 2, 3), [pos_move(3, 0)]))
+    # 卖掉了孢林卵怪：不是"调好了"
+    display.show_position(pos_state("C", "D"), position((1, 2)))
+    # 买了一个新的亡语随从：打新的一步
+    state = make_state(
+        turn=3, board=[minion(1, "C", 2, 2), minion(2, "D", 2, 2), minion(4, "SK", 1, 1)]
+    )
+    display.show_position(state, position((1, 2, 4), [pos_move(4, 0)]))
+    assert out == [
+        f"  🧭 站位：把 左数第 3 个 孢林卵怪 拖到最左边（{DEATHRATTLE}）",
+        f"  🧭 站位：把 左数第 3 个 无害的骨颅 拖到最左边（{DEATHRATTLE}）",
+    ]
+
+
+def test_position_each_turn_once_and_nothing_without_steps():
+    out = []
+    display = AdviceDisplay(pos_name, out.append)
+    display.show_position(pos_state("C", "D"), position((1, 2)))  # 没有要动的
+    state = pos_state("D", "SP", turn=9)
+    for turn in (9, 9, 10):
+        display.show_position(state, position((1, 2), [pos_move(2, 0)], turn=turn))
+    line = f"  🧭 站位：把 左数第 2 个 孢林卵怪 拖到最左边（{DEATHRATTLE}）"
+    assert out == [line, line]
+
+
+def test_display_group_forwards_show_position():
+    seen = []
+
+    class Panel:
+        def show_position(self, state, advice):
+            seen.append(advice)
+
+    class Broken:
+        def show_position(self, state, advice):
+            raise RuntimeError("坏了")
+
+    advice = position((1, 2))
+    DisplayGroup(Broken(), Panel()).show_position(STATE, advice)
+    DisplayGroup(Panel()).show_position(STATE, None)
+    assert seen == [advice, None]
+
+
+def test_position_memory_resets_for_a_new_game():
+    out = []
+    display = AdviceDisplay(pos_name, out.append)
+    state = pos_state("D", "SP", turn=9)
+    step = [pos_move(2, 0)]
+    line = f"  🧭 站位：把 左数第 2 个 孢林卵怪 拖到最左边（{DEATHRATTLE}）"
+    display.show_position(state, position((1, 2), step, turn=9))
+    # 下一局（回合数变小了）：同一回合、同样的步还要再打（实体编号在合成局面里正好相同）
+    display.show_position(pos_state("D", "SP", turn=3), position((1, 2), turn=3))
+    display.show_position(state, position((1, 2), step, turn=9))
+    # 下一局的第一条站位建议带着机制说明：即使回合和步都和上一局最后一条一样，也照常打
+    display.show_position(state, position((1, 2), step, turn=9, intro=True))
+    assert out == [line, line, out[2], line]
+    assert out[2].startswith("  🧭 站位规则：")
+    # 回合数变小时不会把上一局的步当成"已调好"
+    out.clear()
+    display.show_position(pos_state("D", "SP", turn=2), position((1, 2), turn=2))
+    assert out == []

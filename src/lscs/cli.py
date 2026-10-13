@@ -321,6 +321,23 @@ def _review_config(explicit: bool = False) -> ReviewConfig | None:
     return cfg if cfg.enabled or explicit else None
 
 
+def _positioning(cards) -> bool:
+    """站位建议开不开：config.toml 的 [positioning] enabled（没有文件时用默认值），而且要有卡牌
+    数据（亡语、进击、复仇都要看卡牌说明）。关掉、没有卡牌数据、config.toml 有误时打印一句。"""
+    try:
+        enabled = load_config(DEFAULT_CONFIG).positioning.enabled
+    except ConfigError as exc:
+        print(f"{exc}（这次不提示站位）", flush=True)
+        return False
+    if not enabled:
+        print("站位建议：关闭", flush=True)
+        return False
+    if cards is None:
+        print("站位建议：需要卡牌数据，本次关闭", flush=True)
+        return False
+    return True
+
+
 def _review_dir(cfg: ReviewConfig) -> Path:
     path = Path(cfg.dir)
     return path if path.is_absolute() else REVIEW_BASE / path
@@ -447,7 +464,15 @@ def _cmd_replay(args: argparse.Namespace) -> int:
         )
         if reviewer is not None:
             display = DisplayGroup(display, reviewer.tap)
-        runner = AdviceRunner(rules, name, display, scheduler, pool=_pool_estimator(cards, args))
+        runner = AdviceRunner(
+            rules,
+            name,
+            display,
+            scheduler,
+            pool=_pool_estimator(cards, args),
+            cards=cards,
+            positioning=_positioning(cards),
+        )
         if model is not None:
             handlers.append(model.on_update)  # 先更新面板的回合，再出建议
         handlers.append(runner.on_update)
@@ -551,7 +576,15 @@ def _cmd_watch(args: argparse.Namespace) -> int:
     reviewer = _reviewer(_review_config(), rules, name, display, cards, scheduler, sync=False)
     if reviewer is not None:
         display = DisplayGroup(display, reviewer.tap)
-    runner = AdviceRunner(rules, name, display, scheduler, pool=_pool_estimator(cards, args))
+    runner = AdviceRunner(
+        rules,
+        name,
+        display,
+        scheduler,
+        pool=_pool_estimator(cards, args),
+        cards=cards,
+        positioning=_positioning(cards),
+    )
     print(f"正在监听 {install / 'Logs'}，按 Ctrl+C 退出。")
     handlers = [_timeline(name, args.verbose)]
     if model is not None:

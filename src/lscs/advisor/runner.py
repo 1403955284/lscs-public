@@ -10,9 +10,10 @@ from typing import TYPE_CHECKING
 from lscs.advisor.context import MINION, TurnContext, build_context, hero_power_used
 from lscs.advisor.display import AdviceSink
 from lscs.advisor.hero_rules import rule_hero_pick
-from lscs.advisor.models import Action, Advice, HeroAdvice, Lane, Plan
+from lscs.advisor.models import Action, Advice, HeroAdvice, Lane, Plan, PositionAdvice
 from lscs.advisor.opponents import summarize_opponents
 from lscs.advisor.pool import PoolEstimator, PoolNote, PoolView, pool_notes
+from lscs.advisor.positioning import plan_positions, validate_position
 from lscs.advisor.rules import rule_plans
 from lscs.advisor.rules_config import RulesConfig
 from lscs.advisor.validate import validate_plan
@@ -20,6 +21,7 @@ from lscs.llm.notices import TIMEOUT
 from lscs.state.models import Event, EventType, GameState, Phase
 
 if TYPE_CHECKING:
+    from lscs.cards.db import CardDB
     from lscs.llm.scheduler import AIResult, LLMScheduler
 
 log = logging.getLogger(__name__)
@@ -61,6 +63,15 @@ def _still_pending(action: Action, old: GameState, new: GameState) -> bool:
             return not (new.shop and all(s.frozen for s in new.shop))
 
 
+def bought_everything(ctx: TurnContext, plans: list[Plan]) -> bool:
+    """规则方案里的买、卖都做完了（站位建议设计文档第 5.1 节）：最优方案里没有买也没有卖；
+    剩下刷新、英雄技能、升本不算，它们不改变场面。规则出错（没有方案）时看铸币还够不够买一张。
+    手牌里有没有随从不管：打出去后场面变了会重算。"""
+    if plans:
+        return not any(a.type in ("buy", "sell") for a in plans[0].actions)
+    return ctx.gold < ctx.buy_cost
+
+
 def remaining_plan(plan: Plan, old: GameState, new: GameState) -> Plan:
     """去掉在 old 之后已经执行的步骤。"""
     kept = tuple(a for a in plan.actions if _still_pending(a, old, new))
@@ -76,8 +87,12 @@ class AdviceRunner:
         scheduler: LLMScheduler | None = None,
         clock: Callable[[], float] = time.monotonic,
         pool: PoolEstimator | None = None,
+        cards: CardDB | None = None,
+        positioning: bool = True,
     ) -> None:
-        """pool：查过卡牌库的卡池估计；没有卡牌数据时为 None，"还剩约 N 张"都不显示。"""
+        """pool：查过卡牌库的卡池估计；没有卡牌数据时为 None，"还剩约 N 张"都不显示。
+        cards：卡牌数据，站位建议要看卡牌说明（亡语、进击、复仇、劈砍）；为 None 时不提示站位。
+        positioning：config.toml 的 [positioning] enabled。"""
         self._rules = rules
         self._name = name
         self._display = display
@@ -85,6 +100,9 @@ class AdviceRunner:
         self._clock = clock
         self._pool = pool
         self._pool_failed = False  # 卡池估计出过错（完整堆栈只记一次）
+        self._cards = cards if positioning else None  # 不提示站位时为 None
+        self._position_intro = False  # 本局已经打过站位的机制说明
+        self._position_failed = False  # 计算站位出过错（完整堆栈只记一次）
         self._state: GameState | None = None
         self._rules_error_turn: int | None = None  # 这个回合已经提示过规则出错
         self._opponents_turn: int | None = None  # 这个回合已经列过对手一览
@@ -97,6 +115,7 @@ class AdviceRunner:
         if EventType.GAME_STARTED in types:
             self._rules_error_turn = None
             self._opponents_turn = None
+            self._position_intro = False
             self.last_hero = None
             if self._scheduler is not None:
                 self._scheduler.reset_game()
@@ -196,6 +215,34 @@ class AdviceRunner:
                 self._display.show_rules(state, advice)
         if self._scheduler is not None:
             self._scheduler.observe(state, events, ctx)
+        settled = bought_everything(ctx, plans)
+        self._display.show_position(state, self._position(state) if settled else None)
+
+    def _position(self, state: GameState) -> PositionAdvice | None:
+        """买完牌后的站位建议（规则，不等 AI）；没有卡牌数据、功能关闭、少于 2 个随从时为 None。
+        算错、不合法只记日志，不显示。本局第一次有要拖的步时带上机制说明（intro）。"""
+        cards, me = self._cards, state.me
+        if cards is None or me is None:
+            return None
+        try:
+            advice = plan_positions(state, cards, self._name)
+            if advice is None:
+                return None
+            problem = validate_position(advice, tuple(m.entity_id for m in me.board))
+        except Exception:
+            if self._position_failed:
+                log.debug("计算站位建议时又出错", exc_info=True)
+            else:
+                self._position_failed = True
+                log.warning("计算站位建议时出错", exc_info=True)
+            return None
+        if problem is not None:
+            log.warning("站位建议不合法（%s），不显示", problem)
+            return None
+        if advice.moves and not self._position_intro:
+            self._position_intro = True
+            advice = advice.model_copy(update={"intro": True})
+        return advice
 
     def _advise_choice(self, state: GameState, types: set[EventType], events: list[Event]) -> None:
         """游戏弹出了一组新的选项：先交给显示端列出来（面板），AI 的推荐稍后由调度器给出；

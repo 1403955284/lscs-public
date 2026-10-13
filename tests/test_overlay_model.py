@@ -1378,3 +1378,248 @@ def test_review_is_cleared_by_the_next_game_and_ignored_outside_game_over():
     model.show_review(T3, _review())
     model.on_update(GAME_OVER.model_copy(update={"seq": 11}), [])
     assert model.snapshot().review == ()
+
+
+# ---- 站位（站位建议设计文档第 6.2 节） ----
+
+from lscs.advisor.models import Move, PositionAdvice  # noqa: E402
+
+POS_NAMES = {"T": "泰瑞尔", "SP": "孢林卵怪", "SK": "无害的骨颅", "IR": "铁血防御机", "V": "虚悯者"}
+
+
+def pos_name(card_id):
+    return POS_NAMES.get(card_id, name(card_id))
+
+
+def pos_board(*pairs):
+    """[(实体编号, 卡牌 ID)] 按顺序摆在场上。"""
+    return [minion(e, c, 2, 2) for e, c in pairs]
+
+
+# 用户录像第 9 回合买完：泰瑞尔打在最左，孢林卵怪在第 2 个
+T9_BOARD = [(1, "T"), (2, "SP"), (3, "C"), (4, "C"), (5, "A"), (6, "V")]
+T9_SHOP = [shop_minion(20, "B", 3, 2)]
+T9_START = make_state(
+    turn=9, gold=3, tier=6, upgrade_cost=None, shop=T9_SHOP, board=pos_board(*T9_BOARD)
+)
+T9 = make_state(turn=9, gold=0, tier=6, upgrade_cost=None, seq=2, board=pos_board(*T9_BOARD))
+
+
+def pos_move(entity_id, index, before_id=None, role="deathrattle", short="亡语最早触发"):
+    return Move(
+        entity_id=entity_id, index=index, before_id=before_id, role=role, reason="", short=short
+    )
+
+
+def pos_advice(board, *moves, turn=9):
+    ids = tuple(e for e, _ in board)
+    return PositionAdvice(state_seq=2, turn=turn, board=ids, target=ids, moves=tuple(moves))
+
+
+def t9_model():
+    model = OverlayModel(pos_name)
+    model.on_update(T9_START, started(9))
+    plan = Plan(source="rules", actions=(Action(type="buy", entity_id=20),))
+    model.show_rules(T9_START, Advice(state_seq=1, turn=9, plan=plan))
+    model.on_update(T9, [])
+    model.show_position(T9, pos_advice(T9_BOARD, pos_move(2, 0)))
+    return model
+
+
+SPAWN_STEP = NextStep(
+    "▶ 把 左数第 2 个 孢林卵怪 拖到最左边",
+    Target(row="board", index=1, count=6),
+    slots="场面 ○ ● ○ ○ ○ ○   拖到最左边",
+    reason="亡语最早触发",
+    badge="拖",
+)
+
+
+def test_position_after_the_plan_is_done():
+    model = t9_model()
+    view = model.snapshot()
+    assert view.title == "第 9 回合 · 铸币 0 · 6 本 · 已满本"
+    assert view.rules == (
+        Line("已按建议操作完", "muted"),
+        Line("站位：把 孢林卵怪 拖到最左边 · 亡语最早触发"),
+    )
+    assert view.next_step == SPAWN_STEP
+    # 拖完：这一步自然消失，不用等运行器
+    dragged = T9.model_copy(
+        update={
+            "seq": 3,
+            "me": T9.me.model_copy(
+                update={"board": tuple(pos_board((2, "SP"), (1, "T"), *T9_BOARD[2:]))}
+            ),
+        }
+    )
+    model.on_update(dragged, [])
+    view = model.snapshot()
+    assert view.rules == (Line("已按建议操作完", "muted"),)
+    assert view.next_step == NextStep("✓ 建议的步骤都做完了", tone="muted")
+    model.show_position(dragged, pos_advice([(2, "SP"), (1, "T"), *T9_BOARD[2:]]))
+    assert model.snapshot().rules == (Line("已按建议操作完", "muted"),)
+
+
+def test_position_waits_for_the_plan_steps_first():
+    model = OverlayModel(pos_name)
+    rich = T9.model_copy(update={"me": T9.me.model_copy(update={"gold": 1})})
+    model.on_update(rich, started(9))
+    plan = Plan(source="rules", actions=(Action(type="refresh"),))
+    model.show_rules(rich, Advice(state_seq=1, turn=9, plan=plan))
+    model.show_position(rich, pos_advice(T9_BOARD, pos_move(2, 0)))
+    assert step(model) == NextStep("▶ 刷新商店", Target(button="refresh"), badge="1")
+    assert model.snapshot().rules[1] == Line("站位：把 孢林卵怪 拖到最左边 · 亡语最早触发")
+    # 铸币花在了别处（用户录像第 3 回合：方案说刷新，玩家买了孢林卵怪）：刷新做不了，
+    # 运行器回合中途不再发"无需操作"，面板上的刷新留着，但不挡站位
+    model.on_update(T9, [])
+    assert step(model) == SPAWN_STEP
+    model.show_position(T9, None)
+    assert step(model) == NextStep("▶ 刷新商店", Target(button="refresh"), badge="1")
+    model.show_position(T9, pos_advice(T9_BOARD, pos_move(2, 0)))
+    # 方案本来就没有动作（铸币 0）：直接是站位
+    model.show_rules(T9, Advice(state_seq=1, turn=9, plan=Plan(source="rules")))
+    assert step(model) == SPAWN_STEP
+    assert model.snapshot().rules[0] == Line("无需操作", "muted")
+
+
+def test_outdated_rules_buy_does_not_hide_the_position_step():
+    # CC0 第 5 回合：规则方案说买，玩家把铸币花在了别处、只剩 1 金（米尔豪斯买一张 2 金）；
+    # 运行器只在现在的规则方案里没有买、卖时才给站位，所以面板上留着的买是旧方案的
+    model = OverlayModel(pos_name)
+    model.on_update(T9_START, started(9))
+    plan = Plan(source="rules", actions=(Action(type="buy", entity_id=20), Action(type="refresh")))
+    model.show_rules(T9_START, Advice(state_seq=1, turn=9, plan=plan))
+    poor = T9_START.model_copy(update={"seq": 2, "me": T9_START.me.model_copy(update={"gold": 1})})
+    model.on_update(poor, [])
+    assert step(model).text == "▶ 买 左数第 1 个 海盗"  # 还没有站位：照旧
+    model.show_position(poor, pos_advice(T9_BOARD, pos_move(2, 0)))
+    assert step(model) == SPAWN_STEP
+    # AI 的买照常排在前面（规则不买的牌 AI 可能会买，比如酒馆法术）
+    ai = Plan(source="llm", actions=(Action(type="buy", entity_id=20),))
+    model.show_ai(poor, Advice(state_seq=2, turn=9, plan=ai), False)
+    assert step(model).text == "▶ 买 左数第 1 个 海盗"
+
+
+def test_position_does_not_jump_the_queue_while_waiting_for_advice():
+    model = OverlayModel(pos_name)
+    model.on_update(T9, started(9))
+    model.show_position(T9, pos_advice(T9_BOARD, pos_move(2, 0)))
+    assert step(model) == NextStep("▶ 等建议…", tone="muted")  # 还没有任何方案
+
+
+def test_two_position_steps_one_after_the_other():
+    board = [(1, "C"), (2, "IR"), (3, "V"), (4, "SK"), (5, "C")]
+    state = make_state(turn=9, gold=0, board=pos_board(*board))
+    model = OverlayModel(pos_name)
+    model.on_update(state, started(9))
+    model.show_rules(state, Advice(state_seq=1, turn=9, plan=Plan(source="rules")))
+    avenge = pos_move(2, 4, role="avenge", short="复仇放右边等触发")
+    model.show_position(state, pos_advice(board, pos_move(4, 0), avenge))
+    assert model.snapshot().rules[1] == Line(
+        "站位：① 把 无害的骨颅 拖到最左边 · 亡语最早触发  ② 把 铁血防御机 拖到最右边 · 复仇放右边等触发"
+    )
+    assert step(model).text == "▶ 把 左数第 4 个 无害的骨颅 拖到最左边"
+    first = [board[3], board[0], board[1], board[2], board[4]]
+    model.on_update(
+        state.model_copy(
+            update={"seq": 2, "me": state.me.model_copy(update={"board": tuple(pos_board(*first))})}
+        ),
+        [],
+    )
+    assert model.snapshot().rules[1] == Line("站位：把 铁血防御机 拖到最右边 · 复仇放右边等触发")
+    assert step(model) == NextStep(
+        "▶ 把 左数第 3 个 铁血防御机 拖到最右边",
+        Target(row="board", index=2, count=5),
+        slots="场面 ○ ○ ● ○ ○   拖到最右边",
+        reason="复仇放右边等触发",
+        badge="拖",
+    )
+    both = [board[3], board[0], board[2], board[4], board[1]]
+    model.on_update(
+        state.model_copy(
+            update={"seq": 3, "me": state.me.model_copy(update={"board": tuple(pos_board(*both))})}
+        ),
+        [],
+    )
+    assert model.snapshot().rules == (Line("无需操作", "muted"),)
+    assert step(model) == NextStep("无需操作", tone="muted")
+
+
+def test_position_step_left_of_a_minion():
+    board = [(1, "SP"), (2, "C"), (3, "V"), (4, "SK")]
+    state = make_state(turn=9, gold=0, board=pos_board(*board))
+    model = OverlayModel(pos_name)
+    model.on_update(state, started(9))
+    model.show_rules(state, Advice(state_seq=1, turn=9, plan=Plan(source="rules")))
+    model.show_position(state, pos_advice(board, pos_move(4, 1, before_id=2)))
+    assert model.snapshot().rules[1] == Line(
+        "站位：把 无害的骨颅 拖到 蚀脑怪 的左边 · 亡语最早触发"
+    )
+    assert step(model).slots == "场面 ○ ○ ○ ●   拖到 蚀脑怪 的左边"
+    done = [board[0], board[3], board[1], board[2]]
+    model.on_update(
+        state.model_copy(
+            update={"seq": 2, "me": state.me.model_copy(update={"board": tuple(pos_board(*done))})}
+        ),
+        [],
+    )
+    assert len(model.snapshot().rules) == 1
+
+
+def test_position_hidden_when_the_board_has_other_minions():
+    model = t9_model()
+    bought = T9.model_copy(
+        update={
+            "seq": 3,
+            "me": T9.me.model_copy(update={"board": tuple(pos_board(*T9_BOARD, (7, "B")))}),
+        }
+    )
+    model.on_update(bought, [])  # 又买了一个（运行器会给新的结果）：整条不显示
+    view = model.snapshot()
+    assert len(view.rules) == 1 and view.next_step.badge != "拖"
+    model.show_position(bought, None)
+    assert len(model.snapshot().rules) == 1
+
+
+def test_position_cleared_by_a_new_turn_and_kept_when_condensed():
+    model = t9_model()
+    assert condense(model.snapshot(), 2).rules[1].text.startswith("站位：")
+    t10 = make_state(turn=10, gold=10, tier=6, upgrade_cost=None, seq=5, board=pos_board(*T9_BOARD))
+    model.on_update(t10, started(10))
+    model.show_rules(t10, Advice(state_seq=5, turn=10, plan=Plan(source="rules")))
+    assert model.snapshot().rules == (Line("无需操作", "muted"),)
+    model.show_position(t10, None)
+    assert step(model) == NextStep("无需操作", tone="muted")
+
+
+def test_position_line_after_a_rules_error():
+    model = OverlayModel(pos_name, ai_enabled=False)
+    model.on_update(T9, started(9))
+    model.rules_error()
+    model.show_position(T9, pos_advice(T9_BOARD, pos_move(2, 0)))
+    assert model.snapshot().rules == (
+        Line("本回合规则建议出错", "muted"),
+        Line("站位：把 孢林卵怪 拖到最左边 · 亡语最早触发"),
+    )
+    # AI 没开：不会再有方案，"下一步"直接是站位
+    assert step(model) == SPAWN_STEP
+    # AI 开着：等它的方案，站位不插队
+    model = OverlayModel(pos_name)
+    model.on_update(T9, started(9))
+    model.rules_error()
+    model.show_position(T9, pos_advice(T9_BOARD, pos_move(2, 0)))
+    assert step(model) == NextStep("▶ 等建议…", tone="muted")
+    model.ai_text(BUDGET_EXHAUSTED)  # AI 不会再来了
+    assert step(model) == SPAWN_STEP
+
+
+def test_unknown_refresh_cost_still_blocks_the_position_step():
+    # 不知道刷新要多少钱（refresh_cost 为 None）时，不能说它做不了
+    unknown = T9.model_copy(update={"me": T9.me.model_copy(update={"refresh_cost": None})})
+    model = OverlayModel(pos_name)
+    model.on_update(unknown, started(9))
+    plan = Plan(source="rules", actions=(Action(type="refresh"),))
+    model.show_rules(unknown, Advice(state_seq=1, turn=9, plan=plan))
+    model.show_position(unknown, pos_advice(T9_BOARD, pos_move(2, 0)))
+    assert step(model) == NextStep("▶ 刷新商店", Target(button="refresh"), badge="1")

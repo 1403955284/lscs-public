@@ -48,3 +48,14 @@ def combat_at(updates, turn):
     from lscs.state.models import Phase
 
     return next(s for s, _ in updates if s.phase == Phase.COMBAT and s.turn == turn)
+
+
+def _real_cards_path():
+    from lscs.cards.fetch import CACHE_NAME, default_cache_dir
+
+    return default_cache_dir() / CACHE_NAME
+
+
+# 本机缓存的完整卡牌数据（lscs 第一次运行时下载）；没有时跳过依赖它的测试
+REAL_CARDS = _real_cards_path()
+NEEDS_REAL_CARDS = pytest.mark.skipif(not REAL_CARDS.exists(), reason="没有缓存的卡牌数据")

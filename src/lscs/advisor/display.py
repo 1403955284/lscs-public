@@ -6,7 +6,16 @@ import logging
 from collections.abc import Callable, Sequence
 from typing import Protocol
 
-from lscs.advisor.models import Action, Advice, ChoiceAdvice, Expired, HeroAdvice, Lane, Plan
+from lscs.advisor.models import (
+    Action,
+    Advice,
+    ChoiceAdvice,
+    Expired,
+    HeroAdvice,
+    Lane,
+    Plan,
+    PositionAdvice,
+)
 from lscs.advisor.names import minion_label, tribe_zh
 from lscs.advisor.opponents import (
     OpponentOverview,
@@ -15,6 +24,7 @@ from lscs.advisor.opponents import (
     eliminated_names,
 )
 from lscs.advisor.pool import PoolNote, note_for
+from lscs.advisor.positioning import INTRO, step_texts
 from lscs.review.report import GameReview, ai_terminal_lines, terminal_lines
 from lscs.state.models import GameState
 
@@ -178,6 +188,22 @@ def choice_pick_text(state: GameState, pick: int, name: Namer) -> str:
     return f"左数第 {option.index + 1} 个 {name(option.card_id)}"
 
 
+def position_lines(advice: PositionAdvice, state: GameState, name: Namer) -> list[str]:
+    """站位的每一步一行："把 左数第 N 个 X 拖到最左边（为什么）"；两步时编号，还有没显示的
+    步时最后一步后面加"；先做这两步"。"""
+    me = state.me
+    card_of = {m.entity_id: m.card_id for m in me.board} if me is not None else {}
+    texts = step_texts(advice, card_of, name)
+    lines = [
+        f"把 左数第 {t.number} 个 {name(t.card_id)} {t.where}（{t.move.reason}）" for t in texts
+    ]
+    if len(lines) > 1:
+        lines = [f"{CIRCLED[i]} {line}" for i, line in enumerate(lines)]
+    if advice.more and lines:
+        lines[-1] += "；先做这两步"
+    return lines
+
+
 def opponent_marks(summary: OpponentSummary) -> str:
     """▶ 下一个对手、★ 最强威胁；两个都是时 ▶★，都不是时为空。"""
     return ("▶" if summary.next else "") + ("★" if summary.strongest else "")
@@ -244,6 +270,7 @@ class AdviceSink(Protocol):
     def show_choice(self, state: GameState, advice: ChoiceAdvice | None) -> None: ...
     def ai_summary(self, calls: int, input_tokens: int, output_tokens: int) -> None: ...
     def show_review(self, state: GameState, review: GameReview) -> None: ...
+    def show_position(self, state: GameState, advice: PositionAdvice | None) -> None: ...
 
 
 class AdviceDisplay:
@@ -253,6 +280,8 @@ class AdviceDisplay:
         self._deep_pending = f"深度分析中…（{deep_wait_hint(deep_thinking)}）"
         self._review_pending = f"AI 复盘生成中…（{deep_wait_hint(deep_thinking)}）"
         self._last_rules: tuple | None = None
+        # 最近一次打印过的站位：(回合, 场上的实体集合, 每一步的 (实体, 槽位))
+        self._last_position: tuple[int, frozenset[int], tuple] | None = None
 
     def _block(self, label: str, lines: list[str]) -> None:
         self._out(f"  {label}{lines[0]}")
@@ -287,6 +316,30 @@ class AdviceDisplay:
         if state.uncertain:
             lines.append("⚠ 状态可能不准")
         self._block("📋 规则：", lines)
+
+    def show_position(self, state: GameState, advice: PositionAdvice | None) -> None:
+        """站位建议（站位建议设计文档第 6.1 节）：同一回合同样的几步只打一次；本局第一次先打
+        一行机制说明；照着拖完（场上还是那几个随从、没有要动的了）打一行"站位已调好"。
+        advice 为 None（还没买完、功能关闭）或没有步时不打印。新的一局（回合数变小了，或者
+        带着本局第一次的机制说明）先忘掉上一局打过的站位。"""
+        if advice is None:
+            return
+        entities = frozenset(advice.board)
+        steps = tuple((m.entity_id, m.index) for m in advice.moves)
+        last = self._last_position
+        if last is not None and (advice.intro or advice.turn < last[0]):
+            last = self._last_position = None
+        if not steps:
+            if last is not None and last[:2] == (advice.turn, entities) and last[2]:
+                self._last_position = (advice.turn, entities, ())
+                self._out("  🧭 站位已调好")
+            return
+        if last is not None and (last[0], last[2]) == (advice.turn, steps):
+            return
+        self._last_position = (advice.turn, entities, steps)
+        if advice.intro:
+            self._out(f"  🧭 {INTRO}")
+        self._block("🧭 站位：", position_lines(advice, state, self._name))
 
     def rules_error(self, hero: bool = False) -> None:
         """hero：选英雄的规则建议出错。"""
@@ -417,3 +470,6 @@ class DisplayGroup:
 
     def show_review(self, state: GameState, review: GameReview) -> None:
         self._each("show_review", state, review)
+
+    def show_position(self, state: GameState, advice: PositionAdvice | None) -> None:
+        self._each("show_position", state, advice)

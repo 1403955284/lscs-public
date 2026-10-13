@@ -822,3 +822,82 @@ def test_panel_stays_when_the_highlight_is_foreground_and_lifts_after_a_rebuild(
     window.run(model, keep_running)
     assert lifts == [()]  # 重建过一次：面板重新放到高亮上面
     assert all(polls)  # 高亮在前台时面板也不隐藏
+
+
+def test_overlay_window_renders_the_position_step():
+    tk = pytest.importorskip("tkinter")
+    from factory import minion
+
+    from lscs.advisor.models import Move, PositionAdvice
+    from lscs.overlay.window import OverlayWindow
+
+    try:
+        window = OverlayWindow(OverlayConfig(position="right", opacity=0.9))
+    except tk.TclError as exc:
+        pytest.skip(f"没有图形界面：{exc}")
+    names = {"T": "泰瑞尔", "SP": "孢林卵怪", **NAMES}
+    model = OverlayModel(lambda c: names.get(c, c))
+    board = [minion(1, "T", 34, 34), minion(2, "SP", 3, 3), minion(3, "C", 3, 4)]
+    state = make_state(turn=9, gold=0, tier=6, upgrade_cost=None, board=board)
+    move = Move(
+        entity_id=2, index=0, before_id=None, role="deathrattle", reason="", short="亡语最早触发"
+    )
+    position = PositionAdvice(state_seq=1, turn=9, board=(1, 2, 3), target=(2, 1, 3), moves=(move,))
+    steps = [
+        lambda: model.on_update(state, [Event(type=EventType.RECRUIT_STARTED, turn=9)]),
+        lambda: model.show_rules(state, Advice(state_seq=1, turn=9, plan=Plan(source="rules"))),
+        lambda: model.show_position(state, position),
+    ]
+    snapshots = []
+    polls = 0
+
+    def keep_running():
+        nonlocal polls
+        polls += 1
+        if polls % 3:
+            return True
+        snapshots.append(window.texts())
+        if not steps:
+            return False
+        steps.pop(0)()
+        return True
+
+    window.run(model, keep_running)
+    last = snapshots[-1]
+    assert last[1:4] == [
+        "▶ 把 左数第 2 个 孢林卵怪 拖到最左边",
+        "场面 ○ ● ○   拖到最左边",
+        "亡语最早触发",
+    ]
+    assert "站位：把 孢林卵怪 拖到最左边 · 亡语最早触发" in last
+
+
+def test_highlight_preview_draws_the_move_badge():
+    tk = pytest.importorskip("tkinter")
+    from lscs.config import HighlightConfig
+    from lscs.overlay.geometry import Rect
+    from lscs.overlay.highlight import HighlightWindow
+    from lscs.overlay.model import BADGE_MOVE, NextStep, Target
+
+    try:
+        root = tk.Tk()
+    except tk.TclError as exc:
+        pytest.skip(f"没有图形界面：{exc}")
+    try:
+        root.withdraw()
+        window = HighlightWindow(root, HighlightConfig(), preview=True)
+        client = Rect(40, 60, 640, 360)
+        drag = NextStep(
+            "▶ 把 左数第 2 个 孢林卵怪 拖到最左边",
+            Target(row="board", index=1, count=6),
+            slots="场面 ○ ● ○ ○ ○ ○   拖到最左边",
+            reason="亡语最早触发",
+            badge=BADGE_MOVE,
+        )
+        window.show(drag, client)
+        root.update()
+        assert window.texts() == ["拖"]  # 只框要拖的随从，不画目的地
+        assert window.shapes() == 4 * 2 + 2
+        window.destroy()
+    finally:
+        root.destroy()

@@ -48,6 +48,8 @@ def test_non_finite_confidence_is_ignored():
         ),
         ('{"actions": ["buy"]}', "第 1 个动作不是对象"),
         ('{"actions": [{"type": "discover"}]}', "第 1 个动作类型未知：discover"),
+        # 站位只由规则提示，AI 没有 position 动作（站位建议设计文档第 7 节）
+        ('{"actions": [{"type": "position", "order": [1, 2]}]}', "第 1 个动作类型未知：position"),
         ('{"actions": [{"type": "buy"}]}', "第 1 个动作缺少 entity_id"),
         ('{"actions": [{"type": "sell", "entity_id": true}]}', "第 1 个动作缺少 entity_id"),
     ],

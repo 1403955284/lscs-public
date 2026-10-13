@@ -116,6 +116,16 @@ def test_step_frames_draw_only_the_current_target():
     assert step_frames(LAYOUT, empty_row, FULL_HD) == []
 
 
+def test_position_step_frames_the_minion_to_drag():
+    from lscs.overlay.model import BADGE_MOVE
+
+    target = Target(row="board", index=1, count=6)
+    drag = NextStep("▶ 把 左数第 2 个 孢林卵怪 拖到最左边", target, badge=BADGE_MOVE)
+    assert step_frames(LAYOUT, drag, FULL_HD) == [
+        Frame(slot_rect(LAYOUT, "board", 1, 6, FULL_HD), label="拖", badge=True)
+    ]
+
+
 @pytest.mark.parametrize("button", BUTTONS)
 def test_uncalibrated_buttons_are_not_framed_until_given_a_radius(button):
     step = NextStep("▶ 按钮", Target(button=button), badge="1")

@@ -179,12 +179,21 @@ class ReviewConfig(BaseModel):
         return value.strip()
 
 
+class PositioningConfig(BaseModel):
+    """站位建议（站位建议设计文档第 9 节）：纯规则，不占 AI 调用。"""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    enabled: bool = True  # 买完牌后提示把哪个随从拖到最左 / 最右，附一句为什么
+
+
 class AppConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     llm: LLMConfig = LLMConfig()
     overlay: OverlayConfig = OverlayConfig()
     review: ReviewConfig = ReviewConfig()
+    positioning: PositioningConfig = PositioningConfig()
     highlight: HighlightConfig = HighlightConfig()
 
 

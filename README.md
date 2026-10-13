@@ -73,6 +73,11 @@ Windows 上双击项目文件夹里的 `启动.bat` 等于 `uv run lscs watch`�
   （Key 无效）时不调。`watch` 打完的对局记进 history（同一天指纹相同的局认作已经复盘过，`watch` 重启时不重复），
   `replay` 和 `lscs review` 回放录像时默认不记。
   `reviews/` 不进仓库，文件里没有玩家名字。
+- 站位建议（`advisor/positioning.py`，`[positioning]`）是纯规则，不占 AI 调用：规则方案里的买、卖都做完后，按卡牌数据
+  （`CardInfo.mechanics` 和说明）把战斗型亡语、进击放最左，复仇放最右，下一个对手上次的阵容里有劈砍、我方恰好一个嘲讽时
+  把嘲讽放最左；一回合最多 2 步，白板从不被点名。终端 `🧭`、面板规则区一行，方案做完后是"下一步"（高亮徽章"拖"）。
+  拖动随从在日志里是 `MOVE_MINION` 块里的 `ZONE_POSITION` 变化，状态层发 `BOARD_CHANGED` 后重算，拖完自动消失。
+  系统提示第 5 条告诉 AI 站位由程序提示、不要写站位；没有卡牌数据时不提示。
 - `thinking`（快速建议）请保持 `"disabled"`，思考交给深度分析。
 - 攻略要点在 `strategy/current/guide.md`，会原样发给 AI。
 - 英雄技能能不能用以日志里的选项列表（`GameState.DebugPrintOptions`）为准，选项比招募开始晚几十毫秒才到，

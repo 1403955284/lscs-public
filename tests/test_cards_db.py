@@ -160,3 +160,37 @@ def test_find_pool_minion_builds_its_name_index_once(monkeypatch):
     assert db.find_pool_minion("孢林卵怪").card_id == "BG36_116"
     assert db.find_pool_minion("没有这张") is None
     assert calls == [False]  # 第一次查时建索引，之后直接查
+
+
+def test_mechanics_are_read_as_a_sorted_tuple():
+    db = CardDB(
+        [
+            {"id": "X", "name": "甲", "mechanics": ["TAUNT", "DEATHRATTLE"]},
+            {"id": "Y", "name": "乙"},
+        ]
+    )
+    assert db.get("X").mechanics == ("DEATHRATTLE", "TAUNT")
+    assert db.get("Y").mechanics == ()  # 没有这个字段
+
+
+def test_mini_cards_have_mechanics_and_cleaned_text():
+    db = mini_db()
+    spawn = db.get("BG36_116")
+    assert spawn.mechanics == ("DEATHRATTLE",)
+    assert spawn.text == "亡语：召唤一个0/2并具有嘲讽的触手。使你的随从获得+1攻击力。"
+    assert db.get("BG36_116_G").text.startswith("亡语：召唤两个")
+    assert db.get("BG21_029").mechanics == ("DEATHRATTLE",)
+    assert db.get("BG36_103").mechanics == ("BATTLECRY", "DEATHRATTLE")
+    assert db.get("BG34_405").mechanics == ("AURA", "AVENGE")
+    assert db.get("BG21_017").text == "亡语：获取 一张酒馆币。"  # 原文里的换行变成空格
+    assert db.get("BG26_817").mechanics == ()  # 刀剑收藏家：劈砍没有标记，只看说明
+    for card_id in (
+        "BG36_103_G",
+        "OG_221",
+        "BG_FP1_024",
+        "BG29_888",
+        "BG36_849",
+        "BG28_300",
+        "BGS_126",
+    ):
+        assert db.get(card_id).card_id == card_id

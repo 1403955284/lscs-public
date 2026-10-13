@@ -16,6 +16,9 @@ Lane = Literal["fast", "deep", "hero", "choice", "review"]
 # changed 步骤已经做完、局面变化太大或已经进入战斗
 Expired = Literal["refreshed", "invalid", "changed"]
 ACTION_TYPES: tuple[str, ...] = ("buy", "sell", "upgrade", "hero_power", "refresh", "freeze")
+# 站位建议里一个随从为什么要挪（站位建议设计文档第 3 节）：战斗型亡语、进击放最左，复仇放最右，
+# 对面有劈砍时唯一的嘲讽靠边
+PositionRole = Literal["deathrattle", "rally", "avenge", "taunt_edge"]
 
 
 class _Frozen(BaseModel):
@@ -80,3 +83,27 @@ class ChoiceAdvice(_Frozen):
     reason: str
     elapsed: float | None = None  # AI 调用耗时（秒）
     confidence: float | None = None  # AI 的把握，只记录不显示
+
+
+class Move(_Frozen):
+    """站位建议的一步：把一个随从拖到某个槽位。"""
+
+    entity_id: int
+    index: int  # 目标槽位，0 起（按做完前面几步之后的顺序）
+    before_id: int | None  # 拖到谁的左边（拖完后紧挨在它右边的随从）；最左边 / 最右边时为 None
+    role: PositionRole
+    reason: str  # 终端的理由
+    short: str  # 面板的短语
+
+
+class PositionAdvice(_Frozen):
+    """站位建议（规则，没有 AI 版本）。"""
+
+    state_seq: int
+    turn: int
+    board: tuple[int, ...]  # 计算时我方场上的实体顺序（从左到右）
+    target: tuple[int, ...]  # 目标顺序：board 的一个排列
+    moves: tuple[Move, ...]  # 最多 MAX_MOVES 步；为空表示现在的顺序没问题
+    more: int = 0  # 没显示的剩余步数
+    cleave: str | None = None  # 下一个对手上次阵容里的劈砍随从（卡牌 ID）
+    intro: bool = False  # 本局第一次有站位建议：终端多打一行机制说明

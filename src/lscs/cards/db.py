@@ -53,6 +53,9 @@ class CardInfo:
     dbf_id: int | None = None
     cost: int | None = None  # 铸币费用（酒馆法术）
     normal_dbf_id: int | None = None  # battlegroundsNormalDbfId：金色卡对应的普通卡
+    # 原始的 mechanics（DEATHRATTLE、BACON_RALLY、AVENGE……），排好序；没有就是空。
+    # 不读 referencedTags：那是说明里提到的关键词（孢林卵怪的 TAUNT 是召唤出的触手的）
+    mechanics: tuple[str, ...] = ()
 
 
 class CardDB:
@@ -76,6 +79,7 @@ class CardDB:
                 dbf_id=raw.get("dbfId"),
                 cost=raw.get("cost"),
                 normal_dbf_id=raw.get("battlegroundsNormalDbfId"),
+                mechanics=tuple(sorted(raw.get("mechanics") or ())),
             )
             self._cards[info.card_id] = info
             if info.dbf_id is not None:
