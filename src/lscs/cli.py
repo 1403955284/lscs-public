@@ -46,6 +46,8 @@ DEFAULT_HEROES = PROJECT_ROOT / "strategy" / "current" / "heroes.md"  # 可选�
 RECORDINGS_DIR = PROJECT_ROOT / "recordings"
 POLL_INTERVAL = 0.2  # watch 默认的轮询间隔（秒）
 OVERLAY_REPLAY_SPEED = 20.0  # replay --overlay 没填 --speed 时的倍速（不等待的话面板一闪而过）
+RECOMMENDED_OUTPUT_TOKENS = 1500  # 快速建议要写分析和 JSON，800 容易截断
+RECOMMENDED_CALLS_PER_GAME = 100  # 一局大约 60~70 次调用
 log = logging.getLogger(__name__)
 
 
@@ -200,6 +202,22 @@ def _build_scheduler(cards, sync: bool):
         print(
             f"注意：快速建议开了思考模式 {llm.thinking}，会很慢（{deep_wait_hint(llm.thinking)}）；"
             "思考交给深度分析就好，thinking 建议改回 disabled。",
+            flush=True,
+        )
+    low = []
+    if llm.max_output_tokens < RECOMMENDED_OUTPUT_TOKENS:
+        low.append(
+            f"max_output_tokens = {llm.max_output_tokens}（推荐 {RECOMMENDED_OUTPUT_TOKENS}）"
+        )
+    if llm.max_calls_per_game < RECOMMENDED_CALLS_PER_GAME:
+        low.append(
+            f"max_calls_per_game = {llm.max_calls_per_game}（推荐 {RECOMMENDED_CALLS_PER_GAME}）"
+        )
+    if low:
+        # 老版本的 config.toml 模板写死了这两个值，会盖掉后来提高的默认值
+        print(
+            "注意：config.toml 里的 " + "、".join(low) + " 比推荐值小，"
+            "可能是旧模板留下的；删掉对应的行就会用推荐值。",
             flush=True,
         )
     if not llm.hero_advice:

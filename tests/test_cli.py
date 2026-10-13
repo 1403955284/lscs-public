@@ -476,6 +476,27 @@ def test_thinking_mode_prints_a_warning(monkeypatch, tmp_path, capsys):
     assert "建议改回 disabled" in out
 
 
+def test_old_template_values_print_a_warning(monkeypatch, tmp_path, capsys):
+    from helpers import MINI_LOG
+
+    _ai_cli_setup(
+        monkeypatch, tmp_path, [], extra="max_output_tokens = 800\nmax_calls_per_game = 60\n"
+    )
+    assert main(["replay", str(MINI_LOG), "--ai"]) == 0
+    out = capsys.readouterr().out
+    assert "max_output_tokens = 800（推荐 1500）" in out
+    assert "max_calls_per_game = 60（推荐 100）" in out
+    assert "删掉对应的行就会用推荐值" in out
+
+
+def test_default_values_print_no_old_template_warning(monkeypatch, tmp_path, capsys):
+    from helpers import MINI_LOG
+
+    _ai_cli_setup(monkeypatch, tmp_path, [])
+    assert main(["replay", str(MINI_LOG), "--ai"]) == 0
+    assert "比推荐值小" not in capsys.readouterr().out
+
+
 def test_combine_isolates_each_handler(caplog):
     from lscs.cli import _combine
 
