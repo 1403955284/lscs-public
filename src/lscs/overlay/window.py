@@ -18,7 +18,7 @@ import sys
 import time
 import tkinter as tk
 import tkinter.font as tkfont
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Protocol
 
@@ -27,24 +27,65 @@ from lscs.overlay import geometry, position, win32
 from lscs.overlay.banner import Banner
 from lscs.overlay.geometry import Anchor, Drag, Layout, Rect
 from lscs.overlay.grip import GripWindow
-from lscs.overlay.model import NextStep, OverlayModel, OverlayView, condense
-from lscs.overlay.theme import BG, MUTED, OFFSCREEN
+from lscs.overlay.model import (
+    DIRECTION,
+    GOAL,
+    REASON,
+    SOURCE_RULES,
+    STRONGEST,
+    WHY,
+    Block,
+    Line,
+    NextStep,
+    OverlayModel,
+    OverlayView,
+    condense,
+    reason_lines,
+)
+from lscs.overlay.theme import (
+    AI_TAG,
+    BG,
+    DIM,
+    DIVIDER,
+    MUTED,
+    NOW_BG,
+    OFFSCREEN,
+    OPP_TAG,
+    REVIEW_TAG,
+    RULES_TAG,
+    TEXT,
+    TITLE,
+    WARN,
+)
 
 log = logging.getLogger(__name__)
 
 RENDER_MS = 150  # 读取数据模型的间隔
-# 0 全部；1 去掉最强威胁那一行和"方向"；2 再去掉下一个对手（战斗中是其他对手）、"要找"、
-# "对子"、附注和点评，"目标"只留一行
-CONDENSE_LEVELS = 3
-NEXT_SCALE = 1.25  # "下一步"第一行的字比正文大这么多
+CONDENSE_LEVELS = 4  # 0 原样，1~3 逐级精简（见 model.condense）
+NEXT_SCALE = 1.4  # "下一步"的大字比正文大这么多
+SMALL_SCALE = 0.85  # 页眉、来源和小字块
+NOW_PAD = 0.3  # 详细模式"现在"块上下各留几个字高
+DIVIDER_PAD = 0.25  # 分隔线上下各留几个字高
 PLACE_MS = 500  # 重新定位、判断显示/隐藏的间隔
-TITLE = "#d4d4dc"
-RULES_TAG = "#e6b450"  # 金黄
-AI_TAG = "#4fc9e0"  # 青色
-OPP_TAG = "#c9a0dc"  # 淡紫
-REVIEW_TAG = "#9fd3a0"  # 淡绿
-TEXT = "#f0f0f4"
-WARN = "#ff9f43"  # 橙色
+TONES = {"text": TEXT, "dim": DIM, "muted": MUTED}
+# 精简模式行首标签的颜色；其余标签（然后、护甲、名次、选项标题）是灰色
+LABEL_COLORS = {
+    GOAL: AI_TAG,
+    REASON: AI_TAG,
+    DIRECTION: RULES_TAG,
+    WHY: RULES_TAG,
+    STRONGEST: OPP_TAG,
+}
+# 详细模式块标签的颜色
+BLOCK_COLORS = {
+    "plan": RULES_TAG,
+    "choice": RULES_TAG,
+    "heroes": RULES_TAG,
+    "aside": OPP_TAG,
+    "opponents": OPP_TAG,
+    "comments": AI_TAG,
+    "review": REVIEW_TAG,
+}
 FAMILIES = {"win32": "Microsoft YaHei UI", "darwin": "PingFang SC"}
 SIDES = {"right": "右下角", "left": "左下角", "top": "顶部"}
 DOCK_FAILURE_LIMIT = 5  # 贴靠炉石连续失败几次后改用普通置顶窗口
@@ -656,12 +697,14 @@ class OverlayWindow:
             )
         return self._fonts[key]
 
-    def _label(self, text: str, color: str, font: tkfont.Font) -> tk.Label:
+    def _label(
+        self, parent: tk.Misc, text: str, color: str, font: tkfont.Font, bg: str = BG
+    ) -> tk.Label:
         return tk.Label(
-            self._frame,
+            parent,
             text=text,
             fg=color,
-            bg=BG,
+            bg=bg,
             font=font,
             justify="left",
             anchor="w",
@@ -671,14 +714,13 @@ class OverlayWindow:
         )
 
     def _draw(self) -> None:
-        """画出当前内容；超过最大高度时逐级精简（先去掉最强威胁那一行和"方向"，再去掉下一个
-        对手、"要找"、附注和选项名，"目标"和选项的理由只留一行），最后仍然超高就截掉底部。"""
+        """画出当前内容；超过最大高度时逐级精简（见 model.condense），最后仍然超高就截掉底部。"""
         view, layout = self._view, self._layout
         if view is None or layout is None:
             return
         height = 0
         for level in range(CONDENSE_LEVELS):
-            height = self._draw_level(condense(view, level), layout, level)
+            height = self._draw_level(condense(view, level, self._cfg.detail), layout, level)
             if height <= layout.max_height or view.compact:
                 break
         width = layout.width
@@ -688,78 +730,202 @@ class OverlayWindow:
         self._size = (max(width, 1), max(min(height, layout.max_height), 1))
 
     def _draw_level(self, view: OverlayView, layout: Layout, level: int) -> int:
-        """重建所有标签，返回需要的高度。"""
+        """重建所有标签，返回需要的高度。从上到下：页眉（有"下一步"时是灰色小字，右边是来源）
+        或粗体标题、"下一步"（详细模式包在带底色的"现在"块里）、各块（详细模式每块前面一条
+        分隔线和块标签）、提示、警告。"""
         for child in self._frame.winfo_children():
             child.destroy()
-        text_font, bold = self._font(layout.font_px), self._font(layout.font_px, bold=True)
-        pad = layout.pad
-        inner = layout.width - 2 * pad
-        gap = max(4, layout.font_px // 2)
-        tag_width = max(bold.measure("规则"), bold.measure("AI")) + gap
-        self._frame.configure(padx=pad, pady=pad)
-        self._frame.grid_columnconfigure(0, minsize=tag_width if not view.compact else 0)
-
-        def wrapped(text: str, width: int, font: tkfont.Font, max_lines: int = 0) -> str:
-            lines = geometry.wrap(text, max(width, 1), font.measure)
-            if max_lines:
-                lines = geometry.clip(lines, max_lines, max(width, 1), font.measure)
-            return "\n".join(lines)
-
-        row = 0
-        title = self._label(wrapped(view.title, inner, bold), TITLE, bold)
-        title.grid(row=row, column=0, columnspan=2, sticky="w")
-        row += 1
-        step = view.next_step
-        if step is not None and not view.compact:
-            # "下一步"横跨两列：第一行大字，下面小圆点和理由各一行；等待之类的状态整块灰色
-            color = MUTED if step.tone == "muted" else TEXT
-            big = self._font(round(layout.font_px * NEXT_SCALE), bold=True)
-            label = self._label(wrapped(step.text, inner, big), color, big)
-            label.grid(row=row, column=0, columnspan=2, sticky="w", pady=(gap // 2, 0))
-            row += 1
-            for text, max_lines in ((step.slots, 0), (step.reason, 1 if level >= 2 else 0)):
-                if not text:
-                    continue
-                label = self._label(wrapped(text, inner, text_font, max_lines), color, text_font)
-                label.grid(row=row, column=0, columnspan=2, sticky="w")
-                row += 1
-        # "对手"在最下面：面板超高时最先被精简、截掉，不挤占"下一步"和建议
-        sections = (
-            ("选择", view.choice, RULES_TAG),
-            ("规则", view.rules, RULES_TAG),
-            (view.ai_title, view.ai, AI_TAG),
-            ("对手", view.opponents, OPP_TAG),
-            ("复盘", view.review, REVIEW_TAG),
-        )
-        for tag, lines, color in sections if not view.compact else ():
-            if not lines:
-                continue
-            first_pad = gap // 2
-            label = self._label(tag, color, bold)
-            if bold.measure(tag) + gap > tag_width:
-                # 放不进标签列的标题（"AI（深度）"）单独占一行，内容仍然从第二列开始
-                label.grid(row=row, column=0, columnspan=2, sticky="w", pady=(first_pad, 0))
-                row += 1
-                first_pad = 0
+        self._frame.configure(padx=layout.pad, pady=layout.pad)
+        detail = self._cfg.detail
+        draw = _Drawing(self, layout)
+        step = view.next_step if not view.compact else None
+        if step is None:
+            draw.text(self._frame, view.title, TITLE, draw.bold)
+        else:
+            draw.header(view)
+            if detail:
+                draw.now(step, reason_lines(level, detail=True))
             else:
-                label.grid(row=row, column=0, sticky="nw", pady=(first_pad, 0))
-            for i, line in enumerate(lines):
-                max_lines = 1 if level >= 2 and line.role == "reason" else 0
-                text = wrapped(line.text, inner - tag_width, text_font, max_lines)
-                label = self._label(text, MUTED if line.tone == "muted" else TEXT, text_font)
-                label.grid(row=row, column=1, sticky="w", pady=(first_pad if i == 0 else 0, 0))
-                row += 1
-        if view.warning and not view.compact:
-            warning = self._label(wrapped(view.warning, inner, text_font), WARN, text_font)
-            warning.grid(row=row, column=0, columnspan=2, sticky="w", pady=(gap // 2, 0))
+                draw.next_step(step, reason_lines(level))
+        if not view.compact:
+            for block in view.blocks:
+                if detail:
+                    draw.section(block)
+                else:
+                    draw.block(block)
+            if detail and (view.notice or view.warning):
+                draw.divider()
+            for text, color in ((view.notice, MUTED), (view.warning, WARN)):
+                if text:
+                    draw.text(self._frame, text, color, draw.regular, top=draw.gap // 2)
         self._root.update_idletasks()
         return self._frame.winfo_reqheight()
 
     # ---- 冒烟测试用 ----
 
     def texts(self) -> list[str]:
-        return [w.cget("text") for w in self._frame.winfo_children() if isinstance(w, tk.Label)]
+        """面板上所有文字标签的内容，从上到下、从左到右（分隔线、底色块不算）。"""
+
+        def walk(widget: tk.Misc) -> Iterator[str]:
+            for child in widget.winfo_children():
+                if isinstance(child, tk.Label):
+                    yield child.cget("text")
+                else:
+                    yield from walk(child)
+
+        return list(walk(self._frame))
 
     @property
     def size(self) -> tuple[int, int]:
         return self._size
+
+
+def _wrapped(text: str, width: int, font: tkfont.Font, max_lines: int = 0) -> str:
+    """按像素宽度折行；max_lines 不为 0 时只留这么多行，截掉的末尾加"…"。"""
+    lines = geometry.wrap(text, max(width, 1), font.measure)
+    if max_lines:
+        lines = geometry.clip(lines, max_lines, max(width, 1), font.measure)
+    return "\n".join(lines)
+
+
+class _Drawing:
+    """画一层内容（_draw_level 每试一级精简就画一次）：字体、宽度和各种行的画法。"""
+
+    def __init__(self, window: OverlayWindow, layout: Layout) -> None:
+        self._window = window
+        px = self.px = layout.font_px
+        small = round(px * SMALL_SCALE)
+        self.regular = window._font(px)
+        self.bold = window._font(px, bold=True)
+        self.small = window._font(small)
+        self.small_bold = window._font(small, bold=True)
+        self.big = window._font(round(px * NEXT_SCALE), bold=True)
+        self.inner = layout.width - 2 * layout.pad
+        self.gap = max(4, px // 2)
+        self.space = max(4, round(px * 0.4))  # 行首标签和正文之间
+
+    def label(
+        self, parent: tk.Misc, text: str, color: str, font: tkfont.Font, bg: str = BG
+    ) -> tk.Label:
+        return self._window._label(parent, text, color, font, bg)
+
+    def text(
+        self,
+        parent: tk.Misc,
+        text: str,
+        color: str,
+        font: tkfont.Font,
+        *,
+        width: int | None = None,
+        max_lines: int = 0,
+        top: int = 0,
+        bg: str = BG,
+    ) -> tk.Label:
+        """一段折好行的文字，占一整行。"""
+        wrapped = _wrapped(text, self.inner if width is None else width, font, max_lines)
+        label = self.label(parent, wrapped, color, font, bg)
+        label.pack(anchor="w", pady=(top, 0))
+        return label
+
+    def header(self, view: OverlayView) -> None:
+        """页眉：左边回合 · 铸币 · 本（灰色小字），右边来源（彩色粗体）和后面的灰字。"""
+        row = tk.Frame(self._window._frame, bg=BG)
+        row.pack(fill="x", anchor="w")
+        row.grid_columnconfigure(0, weight=1)
+        right = 0
+        if view.source:
+            right += self.small_bold.measure(view.source)
+        if view.source_note:
+            right += self.small.measure(" " + view.source_note)
+        width = self.inner - right - (self.gap if right else 0)
+        title = self.label(row, _wrapped(view.title, width, self.small), MUTED, self.small)
+        title.grid(row=0, column=0, sticky="nw")
+        if view.source:
+            color = RULES_TAG if view.source == SOURCE_RULES else AI_TAG
+            source = self.label(row, view.source, color, self.small_bold)
+            source.grid(row=0, column=1, sticky="ne")
+        if view.source_note:
+            note = self.label(row, view.source_note, MUTED, self.small)
+            note.grid(row=0, column=2, sticky="ne", padx=(self.space // 2 if view.source else 0, 0))
+
+    def next_step(self, step: NextStep, reason_max: int) -> None:
+        """画"下一步"：大字，下面小圆点；有理由时一行"理由 ……"（站位是"为何"）。等待之类的
+        状态是灰色大字。"""
+        color = MUTED if step.tone == "muted" else TEXT
+        parent = self._window._frame
+        self.text(parent, step.text, color, self.big, top=self.gap // 2)
+        if step.slots:
+            self.text(parent, step.slots, color, self.regular)
+        if step.reason:
+            line = Line(step.reason, label=step.reason_label, max_lines=reason_max)
+            self.labeled(parent, line, self.regular)
+
+    def labeled(self, parent: tk.Misc, line: Line, font: tkfont.Font, top: int = 0) -> None:
+        """精简模式的一行：粗体标签，后面是折好行的正文（折行时和正文第一行对齐）。"""
+        color = TONES[line.tone]
+        if not line.label:
+            self.text(parent, line.text, color, font, max_lines=line.max_lines, top=top)
+            return
+        row = tk.Frame(parent, bg=BG)
+        row.pack(fill="x", anchor="w", pady=(top, 0))
+        tag = self.label(row, line.label, LABEL_COLORS.get(line.label, MUTED), self.bold)
+        tag.pack(side="left", anchor="nw")
+        width = self.inner - self.bold.measure(line.label) - self.space
+        body = self.label(row, _wrapped(line.text, width, font, line.max_lines), color, font)
+        body.pack(side="left", anchor="nw", padx=(self.space, 0))
+
+    def block(self, block: Block) -> None:
+        font = self.small if block.small else self.regular
+        for i, line in enumerate(block.lines):
+            self.labeled(self._window._frame, line, font, top=self.gap // 2 if i == 0 else 0)
+
+    # ---- 详细模式 ----
+
+    def now(self, step: NextStep, reason_max: int) -> None:
+        """画"现在"块：带底色（直角），里面是"下一步"的大字、小圆点和灰色的理由（不带标签）。"""
+        pad_x, pad_y = self.space, round(self.px * NOW_PAD)
+        box = tk.Frame(self._window._frame, bg=NOW_BG, padx=pad_x, pady=pad_y)
+        box.pack(fill="x", anchor="w", pady=(self.gap // 2, 0))
+        width = self.inner - 2 * pad_x
+        color = MUTED if step.tone == "muted" else TEXT
+        self.text(box, step.text, color, self.big, width=width, bg=NOW_BG)
+        if step.slots:
+            self.text(box, step.slots, color, self.regular, width=width, bg=NOW_BG)
+        if step.reason:
+            self.text(
+                box, step.reason, DIM, self.regular, width=width, max_lines=reason_max, bg=NOW_BG
+            )
+
+    def divider(self) -> None:
+        """块与块之间一条 1 像素的分隔线。"""
+        pad = round(self.px * DIVIDER_PAD)
+        line = tk.Frame(self._window._frame, bg=DIVIDER, height=1)
+        line.pack(fill="x", pady=(pad + self.gap // 2, pad))
+
+    def section(self, block: Block) -> None:
+        """详细模式的一块：分隔线，块标签（旁边灰色小字的附注），块内每行缩进一个字宽；
+        有右列（统计、护甲）的行右边对齐一段灰色小字。"""
+        parent = self._window._frame
+        self.divider()
+        head = tk.Frame(parent, bg=BG)
+        head.pack(fill="x", anchor="w")
+        tag = self.label(head, block.label, BLOCK_COLORS.get(block.kind, MUTED), self.bold)
+        tag.pack(side="left", anchor="sw")
+        if block.note:
+            width = self.inner - self.bold.measure(block.label) - self.space
+            note = self.label(head, _wrapped(block.note, width, self.small), MUTED, self.small)
+            note.pack(side="left", anchor="sw", padx=(self.space, 0))
+        indent = self.px
+        for line in block.lines:
+            font = self.small if block.small or line.small else self.regular
+            color = TONES[line.tone]
+            row = tk.Frame(parent, bg=BG)
+            row.pack(fill="x", anchor="w", padx=(indent, 0))
+            width = self.inner - indent
+            if line.right:
+                width -= self.small.measure(line.right) + self.space
+            body = self.label(row, _wrapped(line.text, width, font, line.max_lines), color, font)
+            body.pack(side="left", anchor="nw")
+            if line.right:
+                right = self.label(row, line.right, MUTED, self.small)
+                right.pack(side="right", anchor="ne")

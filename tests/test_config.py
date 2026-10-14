@@ -296,6 +296,13 @@ def test_overlay_opponents_defaults_on_and_can_be_switched_off(tmp_path):
     assert "\nopponents = true " in EXAMPLE.read_text(encoding="utf-8")
 
 
+def test_overlay_detail_defaults_off_and_can_be_switched_on(tmp_path):
+    # 面板默认是精简模式；detail = true 改成分区的详细模式（面板精简设计文档第 7 节）
+    assert load_config(tmp_path / "config.toml").overlay.detail is False
+    assert load_config(write(tmp_path, "[overlay]\ndetail = true\n")).overlay.detail is True
+    assert "\ndetail = false " in EXAMPLE.read_text(encoding="utf-8")
+
+
 def test_review_defaults_and_values(tmp_path):
     from lscs.config import ReviewConfig
 

@@ -53,19 +53,23 @@ def _print(line: str) -> None:
     print(line, flush=True)
 
 
-def _describe_entity(entity_id: int, state: GameState, name: Namer) -> str:
-    """场面、商店、手牌里的实体：随从带身材；都找不到时用编号。"""
+def _describe_entity(entity_id: int, state: GameState, name: Namer, short: bool = False) -> str:
+    """场面、商店、手牌里的实体：随从带身材（short 时不带）；都找不到时用编号。"""
     me = state.me
     cards = [*(me.board if me else ()), *state.shop, *(me.hand if me else ())]
     card = next((c for c in cards if c.entity_id == entity_id), None)
     if card is None:
         return f"#{entity_id}"
-    if getattr(card, "card_type", "MINION") == "MINION" and card.atk is not None:
+    if not short and getattr(card, "card_type", "MINION") == "MINION" and card.atk is not None:
         return f"{name(card.card_id)} {card.atk}/{card.health}"
     return name(card.card_id)
 
 
-def describe_action(action: Action, state: GameState, name: Namer, reasons: bool = True) -> str:
+def describe_action(
+    action: Action, state: GameState, name: Namer, reasons: bool = True, short: bool = False
+) -> str:
+    """一步操作的写法。short：悬浮面板的短写（"然后"一行、"规则另议"），随从不带身材、
+    法术不写价格、"使用英雄技能"写成"用技能"；终端和面板的步骤列表用完整写法。"""
     me = state.me
     match action.type:
         case "buy":
@@ -73,24 +77,31 @@ def describe_action(action: Action, state: GameState, name: Namer, reasons: bool
             if item is None:
                 what = f"#{action.entity_id}"
             elif item.card_type == "MINION":
-                what = f"{name(item.card_id)} {item.atk}/{item.health}"
+                what = name(item.card_id)
+                if not short:
+                    what += f" {item.atk}/{item.health}"
             else:
-                price = f"，{item.cost} 金" if item.cost is not None else ""
+                price = f"，{item.cost} 金" if item.cost is not None and not short else ""
                 what = f"{name(item.card_id)}（法术{price}）"
             text = f"买 {what}"
         case "sell":
             board = me.board if me is not None else ()
             m = next((m for m in board if m.entity_id == action.entity_id), None)
-            what = f"{name(m.card_id)} {m.atk}/{m.health}" if m else f"#{action.entity_id}"
+            if m is None:
+                what = f"#{action.entity_id}"
+            else:
+                what = name(m.card_id) if short else f"{name(m.card_id)} {m.atk}/{m.health}"
             text = f"卖 {what}"
         case "upgrade":
             tier = me.tavern_tier + 1 if me is not None else "?"
             text = f"升本 → {tier} 本"
         case "hero_power":
             hp = me.hero_power if me is not None else None
-            text = "使用英雄技能" + (f" {name(hp.card_id)}" if hp is not None else "")
+            text = "用技能" if short else "使用英雄技能"
+            if hp is not None:
+                text += f" {name(hp.card_id)}"
             if hp is not None and hp.needs_target is not False and action.entity_id is not None:
-                text += f" → {_describe_entity(action.entity_id, state, name)}"
+                text += f" → {_describe_entity(action.entity_id, state, name, short)}"
         case "refresh":
             text = "刷新"
         case _:

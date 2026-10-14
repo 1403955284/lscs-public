@@ -313,9 +313,10 @@ def _overlay_config(explicit: bool) -> AppConfig | None:
 
 
 def _displays(
-    name: Namer, overlay: AppConfig | None, scheduler
+    name: Namer, overlay: AppConfig | None, scheduler, rules: RulesConfig | None = None
 ) -> tuple[OverlayModel | None, AdviceSink]:
-    """终端总是显示；打开悬浮面板时，建议同时发给面板的数据模型。"""
+    """终端总是显示；打开悬浮面板时，建议同时发给面板的数据模型。rules：面板按它的买牌价
+    判断方案的第一步做不做得起（没有时按默认的 3 金）。"""
     deep_thinking = scheduler.deep_thinking if scheduler is not None else "low"
     terminal = AdviceDisplay(name, deep_thinking=deep_thinking)
     if overlay is None:
@@ -327,6 +328,8 @@ def _displays(
         choice_ai=ai and scheduler.choice_advice,
         opponents=overlay.overlay.opponents,
         combat_result=overlay.combat_result.enabled,
+        detail=overlay.overlay.detail,
+        **({"buy_cost": rules.buy_cost_for} if rules is not None else {}),
     )
     return model, DisplayGroup(terminal, model)
 
@@ -488,7 +491,7 @@ def _cmd_replay(args: argparse.Namespace) -> int:
             except ConfigError as exc:
                 print(exc)
                 return 1
-        model, display = _displays(name, overlay, scheduler)
+        model, display = _displays(name, overlay, scheduler, rules)
         # 回放的是录像：复盘照出，但不记进 history.jsonl（免得同一份录像反复算进去）
         reviewer = _reviewer(
             _review_config(),
@@ -614,7 +617,7 @@ def _cmd_watch(args: argparse.Namespace) -> int:
         except ConfigError as exc:
             print(exc)
             return 1
-    model, display = _displays(name, overlay, scheduler)
+    model, display = _displays(name, overlay, scheduler, rules)
     reviewer = _reviewer(_review_config(), rules, name, display, cards, scheduler, sync=False)
     if reviewer is not None:
         display = DisplayGroup(display, reviewer.tap)

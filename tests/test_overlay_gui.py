@@ -99,20 +99,22 @@ def test_overlay_window_renders_states_and_closes():
 
     window.run(model, keep_running)
     texts = [t for shown, _ in snapshots for t in shown]
+    flat = [t.replace("\n", "") for t in texts]
+    # 页眉（灰色小字）+ 右侧来源；"下一步"；带标签的短句
     assert "第 3 回合 · 铸币 5 · 2 本 · 升本 6" in texts
-    assert "规则" in texts and "AI" in texts
-    assert any("① 买 海盗 3/2" in t for t in texts)
-    assert any(t.startswith("目标：") for t in texts)
-    assert "深度分析中…" in texts
-    assert "AI（深度）" in texts and "要找：神明、飘荡祭品" in texts
-    assert any(t.startswith("分析：畸变核心") for t in texts)
+    assert "规则" in texts and "· 分析中…" in texts and "AI 深度" in texts
+    assert "▶ 买 左数第 1 个 海盗" in texts and "商店 ●" in texts
+    assert "然后" in texts and "② 刷新" in texts and "方向" in texts and "海盗" in texts
+    assert "目标" in texts and any(t.startswith("畸变核心在 5 本") for t in flat)
+    # 不再有按来源分的区（规则 / AI（深度） / 对手）、要找、同意规则建议
+    assert "AI（深度）" not in texts and "对手" not in texts
+    assert not any("要找" in t or "① 买" in t for t in texts)
     assert "⚠ 状态可能不准" in texts
     assert "第 3 回合 · 战斗中" in texts
-    # 招募时最下面的"对手"区：下一个对手就是最强威胁，合成一行
-    assert "对手" in texts and any(t.startswith("▶★ 厄祖玛特 25+0") for t in texts)
+    # 战斗中：标题带正在打的对手，下面一行"最强"；招募时不写对手
     assert "第 3 回合 · 战斗中 · 对手 詹迪斯" in texts
-    assert any(t.startswith("▶ 第8名 詹迪斯 已淘汰（残影）") for t in texts)
-    assert "第8名 詹迪斯 已淘汰" not in texts
+    assert "最强" in texts and "厄祖玛特 · 畸变×1 身材 40" in texts
+    assert not any("▶★" in t or "残影" in t for t in texts)
     assert snapshots[-1][0] == ["监听已停止，请查看终端"]
     full = next(size for shown, size in snapshots if "⚠ 状态可能不准" in shown)
     compact = snapshots[-1][1]
@@ -173,11 +175,13 @@ def test_overlay_window_renders_hero_select():
 
     window.run(model, keep_running)
     texts = [t for shown, _ in snapshots for t in shown]
+    flat = [t.replace("\n", "") for t in texts]
     assert "选英雄 · 护甲越少越强" in texts
-    assert "★ 凯瑞尔·罗姆  护甲 10" in texts and "洛，在世传奇  护甲 19" in texts
-    assert "分析中…" in texts
-    assert any(t.startswith("✓ 也选 凯瑞尔·罗姆：") for t in texts)
-    assert "泰瑟兰·血望者：要靠对子才强，前期慢" in texts
+    assert "▶ 选 左数第 1 个 凯瑞尔·罗姆" in texts and "英雄 ● ○ ○ ○" in texts
+    assert "护甲" in texts and any(t.startswith("★凯瑞尔·罗姆 10 · ") for t in flat)
+    assert "规则" in texts and "· 分析中…" in texts and "AI" in texts
+    assert "理由" in texts and "0 费技能每回合白送属性，新手也能稳定用" in flat
+    assert not any("要靠对子才强" in t or "✓" in t for t in texts)  # 点评只在终端和详细模式
     assert snapshots[-1][0] == ["已选 凯瑞尔·罗姆 · 等待招募阶段"]
     assert all(h <= window._layout.max_height for _, (_w, h) in snapshots)
 
@@ -214,11 +218,155 @@ def test_overlay_window_condenses_when_too_tall():
     window.run(model, keep_running)
     texts, (_w, height) = seen[-1]
     assert height <= window._layout.max_height
-    assert texts[0].startswith("第 3 回合")  # 标题和警告总是保留（字大时标题可能换行）
-    assert "AI（深度）" in texts
-    if any(t.startswith("方向：") for t in texts):  # 精简时先去掉"方向"，再去掉"要找"
-        assert any(t.startswith("要找：") for t in texts)
+    assert texts[0].startswith("第 3 回合")  # 页眉、"下一步"和警告总是保留（字大时会换行）
+    assert any(t.startswith("▶") for t in texts)
+    if "然后" in texts:  # 精简时先去掉次要的"然后"，"目标"留着
+        assert "目标" in texts
     assert "⚠ 状态可能不准" in texts or height == window._layout.max_height
+
+
+def test_overlay_window_renders_detail_mode():
+    tk = pytest.importorskip("tkinter")
+    from lscs.overlay.window import OverlayWindow
+
+    try:
+        window = OverlayWindow(OverlayConfig(position="right", opacity=0.9, detail=True))
+    except tk.TclError as exc:
+        pytest.skip(f"没有图形界面：{exc}")
+    model = OverlayModel(lambda c: NAMES.get(c, c), detail=True)
+    rules = Plan(
+        source="rules",
+        actions=(Action(type="buy", entity_id=20), Action(type="refresh")),
+        direction="海盗",
+    )
+    deep = Plan(
+        source="llm",
+        actions=(Action(type="upgrade"), Action(type="refresh")),
+        summary="提前升本找畸变核心",
+        look_for=("神明",),
+    )
+    rich = STATE.model_copy(
+        update={
+            "me": STATE.me.model_copy(update={"gold": 9}),
+            "opponents": rivals(),
+            "next_opponent_id": 3,
+        }
+    )
+    steps = [
+        lambda: model.on_update(rich, [Event(type=EventType.RECRUIT_STARTED, turn=3)]),
+        lambda: model.show_rules(rich, Advice(state_seq=1, turn=3, plan=rules)),
+        lambda: model.show_ai(rich, Advice(state_seq=1, turn=3, plan=deep, lane="deep"), False),
+        lambda: model.on_update(COMBAT.model_copy(update={"seq": 5}), []),
+    ]
+    snapshots = []
+    polls = 0
+
+    def keep_running():
+        nonlocal polls
+        polls += 1
+        if polls % 3:
+            return True
+        snapshots.append((window.texts(), window.size))
+        if not steps:
+            return False
+        steps.pop(0)()
+        return True
+
+    window.run(model, keep_running)
+    recruit = next(shown for shown, _ in snapshots if "AI 深度" in shown)
+    # 页眉和来源、"现在"块、分区的块标签；分隔线和底色块不算文字
+    assert recruit[:2] == ["第 3 回合 · 铸币 9 · 2 本 · 升本 6", "AI 深度"]
+    assert recruit[2:3] == ["▶ 升本 → 3 本（6 金）"]
+    assert "本回合" in recruit and "留意" in recruit
+    assert "① 升本 → 3 本" in recruit and "② 刷新" in recruit
+    assert "目标：提前升本找畸变核心" in recruit
+    assert any(t.startswith("规则另议：买 海盗") for t in recruit)
+    assert any(t.startswith("要找 神明") for t in recruit)
+    assert any(t.startswith("下个对手 厄祖玛特") for t in recruit)
+    assert "" not in recruit
+    combat = snapshots[-1][0]
+    assert combat[:2] == ["第 3 回合 · 战斗中 · 对手 詹迪斯", "对手"]
+    assert any(t.startswith("对手 第8名 詹迪斯 已淘汰（残影）") for t in combat)
+    assert all(0 < h <= window._layout.max_height for _, (_w, h) in snapshots)
+
+
+def test_detail_mode_condenses_block_by_block():
+    tk = pytest.importorskip("tkinter")
+    from lscs.overlay.window import OverlayWindow
+
+    try:
+        window = OverlayWindow(OverlayConfig(font_size=40, detail=True))
+    except tk.TclError as exc:
+        pytest.skip(f"没有图形界面：{exc}")
+    model = OverlayModel(lambda c: NAMES.get(c, c), detail=True)
+    state = STATE.model_copy(
+        update={"uncertain": True, "opponents": rivals(), "next_opponent_id": 3}
+    )
+    model.on_update(state, [Event(type=EventType.RECRUIT_STARTED, turn=3)])
+    steps = tuple(Action(type="refresh") for _ in range(5))
+    plan = Plan(source="llm", actions=steps, summary="很长的思路" * 8, look_for=("神明",) * 6)
+    model.show_rules(
+        state,
+        Advice(state_seq=1, turn=3, plan=Plan(source="rules", actions=(Action(type="upgrade"),))),
+    )
+    model.show_ai(state, Advice(state_seq=1, turn=3, plan=plan), False)
+    seen = []
+    full = {}
+
+    def keep_running():
+        if len(seen) == 3:  # 不精简时要多高（量完再按正常的流程画回去）
+            full["height"] = window._draw_level(model.snapshot(), window._layout, 0)
+            window._draw()
+        seen.append((window.texts(), window.size))
+        return len(seen) < 4
+
+    window.run(model, keep_running)
+    texts, (_w, height) = seen[-1]
+    assert height <= window._layout.max_height
+    assert texts[0].startswith("第 3 回合")
+    assert "本回合" in texts and "① 刷新" in texts  # 本回合的步骤总是保留
+    if full["height"] > window._layout.max_height:  # 屏幕不够高（40 像素字）：先去掉"留意"块
+        assert "留意" not in texts
+
+
+def test_header_keeps_the_source_in_its_column_on_a_narrow_panel():
+    tk = pytest.importorskip("tkinter")
+    from lscs.overlay.model import NextStep, OverlayView
+    from lscs.overlay.window import OverlayWindow
+
+    try:
+        window = OverlayWindow(OverlayConfig(font_size=40, drag_handle=False))
+    except tk.TclError as exc:
+        pytest.skip(f"没有图形界面：{exc}")
+    view = OverlayView(
+        title="第 13 回合 · 铸币 10 · 6 本 · 已满本",
+        compact=False,
+        next_step=NextStep("▶ 刷新商店"),
+        source="AI 深度",
+        source_note="· 分析中…",
+    )
+
+    class Fixed:
+        def snapshot(self):
+            return view
+
+    seen = {}
+
+    def keep_running():
+        if window._layout is not None and "header" not in seen:
+            window._root.update_idletasks()
+            header = window._frame.winfo_children()[0]
+            labels = header.winfo_children()
+            seen["header"] = [(w.cget("text"), w.winfo_x(), w.winfo_width()) for w in labels]
+            seen["width"] = header.winfo_width()
+        return "header" not in seen
+
+    window.run(Fixed(), keep_running)
+    (title, title_x, title_w), (source, src_x, src_w), (note, note_x, note_w) = seen["header"]
+    assert (source, note) == ("AI 深度", "· 分析中…")
+    assert "\n" in title  # 字大、面板窄：标题折行
+    assert title_x + title_w <= src_x < note_x  # 来源和灰字留在右边自己的一列，不压标题
+    assert note_x + note_w <= seen["width"]  # 也不出面板
 
 
 def test_overlay_window_renders_the_review_after_the_game():
@@ -276,11 +424,10 @@ def test_overlay_window_renders_the_review_after_the_game():
 
     window.run(model, keep_running)
     texts = snapshots[-1][0]
-    assert texts[:2] == ["对局结束 · 第 3 名", "复盘"]
-    assert "① 第 7、8 回合 升本不补场面 → 连掉 30 血" in texts
+    assert texts[:2] == ["对局结束 · 第 3 名", "① 第 7、8 回合 升本不补场面 → 连掉 30 血"]
     assert "② 第 11 回合 做得好：凑出金色蚀脑怪" in texts
-    assert "下局重点：升本的回合也要买一张随从" in texts
-    assert any(t.startswith("已保存 reviews/") for t in texts)
+    assert "下局重点：升本的回合也要买一张随从" in [t.replace("\n", "") for t in texts]
+    assert not any(t.startswith("已保存") for t in texts)  # 文件路径只在终端和详细模式
     compact = next(size for shown, size in snapshots if shown == ["对局结束 · 第 3 名"])
     assert snapshots[-1][1][1] > compact[1]  # 有复盘时面板变高
     assert all(h <= window._layout.max_height for _, (_w, h) in snapshots)
@@ -324,7 +471,7 @@ def test_windows_path_with_fake_win32(monkeypatch):
     window.run(model, keep_running)
     width, height, x, y = seen["docked"]
     assert (x, y) == (100 + 1600 - 32 - width, 50 + 882 - height)  # 客户区右下角，各留 2%
-    assert width == 412  # 900 高 → 16 像素字 → 22 个字宽
+    assert width == 359  # 900 高 → 14 像素字（900 / 70 ≈ 13，下限 14）→ 24.5 个字宽 + 内边距
     assert seen.get("hidden")
     assert out == [
         "贴靠炉石窗口连续 5 次失败（GetForegroundWindow 坏了），"
@@ -396,13 +543,16 @@ def test_overlay_window_renders_next_step_and_choice():
 
     window.run(model, keep_running)
     texts = [t for shown, _ in snapshots for t in shown]
-    assert "▶ 等 AI 选…" in texts  # 没有目标的"下一步"
-    assert "选择" in texts and "黑暗之赐 · 3 选 1" in texts
+    flat = [t.replace("\n", "") for t in texts]
+    assert "▶ 等 AI 选…" in texts and "分析中…" in texts  # 没有目标的"下一步"
+    assert "黑暗之赐" in texts and "摧心招募者 · 怒胆喷毒鱼人 · 泰瑞尔" in flat
     assert "▶ 选 左数第 3 个 泰瑞尔" in texts and "选项 ○ ○ ●" in texts
-    assert any("★泰瑞尔" in t for t in texts)
-    assert any(t.startswith("32/32 直接成主力") for t in texts)
-    assert snapshots[-1][0][1:3] == ["▶ 买 左数第 1 个 海盗", "商店 ●"]
-    assert "选择" not in snapshots[-1][0]  # 选完：选择区消失
+    assert "摧心招募者 · 怒胆喷毒鱼人 · ★泰瑞尔" in flat
+    assert "理由" in texts and any(t.startswith("32/32 直接成主力") for t in texts)
+    last = snapshots[-1][0]
+    step = last.index("▶ 买 左数第 1 个 海盗")
+    assert last[step + 1] == "商店 ●"
+    assert "黑暗之赐" not in last  # 选完：选项那一行消失
     assert all(h <= window._layout.max_height for _, (_w, h) in snapshots)
 
 
@@ -1010,12 +1160,8 @@ def test_overlay_window_renders_the_position_step():
 
     window.run(model, keep_running)
     last = snapshots[-1]
-    assert last[1:4] == [
-        "▶ 把 左数第 2 个 孢林卵怪 拖到最左边",
-        "场面 ○ ● ○   拖到最左边",
-        "亡语最早触发",
-    ]
-    assert "站位：把 孢林卵怪 拖到最左边 · 亡语最早触发" in last
+    step = last.index("▶ 把 左数第 2 个 孢林卵怪 拖到最左边")
+    assert last[step + 1 : step + 4] == ["场面 ○ ● ○   拖到最左边", "为何", "亡语最早触发"]
 
 
 def test_highlight_preview_draws_the_move_badge():
@@ -1160,7 +1306,7 @@ def test_grip_sits_above_the_panel_and_hides_with_it(monkeypatch, tmp_path):
     assert panel_y + panel_h == y + 882  # 面板底边 = 客户区底边 − 2%
     assert panel_x + panel_w == x + 1600 - 32  # 右边 − 2%
     assert grip.bottom == panel_y and grip.right == panel_x + panel_w  # 标签在面板正上方、右对齐
-    assert (grip.width, grip.height) == (72, 22)  # 900 高 → 16 像素字 → 4.5 × 1.4 个字
+    assert (grip.width, grip.height) == (63, 20)  # 900 高 → 14 像素字 → 4.5 × 1.4 个字
     assert box == Rect(panel_x, grip.y, panel_w, panel_h + grip.height)
     assert seen["grip_foreground"] == (True, 217)
     assert seen["hidden"] == (0, 0, None)

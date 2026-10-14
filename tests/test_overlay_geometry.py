@@ -23,20 +23,25 @@ CLIENT = Rect(0, 0, 1920, 1080)
 
 
 def test_font_size_is_auto_from_client_height_and_clamped():
-    assert font_px(1080) == 20  # 1080 / 55 ≈ 19.6
-    assert font_px(1440) == 26  # 上限随高度变大：max(22, 1440 / 45)
-    assert font_px(2160) == 39  # 4K
-    assert font_px(800) == 15
-    assert font_px(400) == 12  # 7 → 下限 12
+    assert font_px(1369) == 20  # 1440p 的炉石窗口（客户区高 1369）：1369 / 70 ≈ 19.6
+    assert font_px(1080) == 15  # 1080 / 70 ≈ 15.4
+    assert font_px(1440) == 21
+    assert font_px(2160) == 31  # 4K：上限随高度变大（max(22, 2160 / 45)），不会被卡在 22
+    assert font_px(900) == 14  # 12.9 → 下限 14
+    assert font_px(800) == 14
+    assert font_px(600) == 14
+    assert font_px(400) == 14
     assert font_px(1080, font_size=30) == 30  # 手动字号不受限制
 
 
 def test_panel_width_follows_font_size():
     # 约 22 个汉字 + 标签列 + 左右内边距
     layout = panel_layout(CLIENT)
-    assert (layout.font_px, layout.pad, layout.width) == (20, 12, 20 * 24.5 + 24)
+    assert (layout.font_px, layout.pad, layout.width) == (15, 9, 368 + 2 * 9)  # 15 × 24.5 ≈ 368
+    hd = panel_layout(Rect(0, 0, 2560, 1369))  # 1440p：面板约 514 像素宽（原来 642）
+    assert (hd.font_px, hd.pad, hd.width) == (20, 12, 20 * 24.5 + 24)
     big = panel_layout(Rect(0, 0, 3840, 2160))
-    assert (big.font_px, big.width) == (39, 956 + 2 * 23)  # 4K 下面板跟着变宽
+    assert (big.font_px, big.width) == (31, 760 + 2 * 19)  # 4K 下面板跟着变宽
     manual = panel_layout(CLIENT, font_size=16)
     assert (manual.font_px, manual.pad, manual.width) == (16, 10, 392 + 20)
     # 手动大字号也会加宽，但不超过客户区宽度的 35%
@@ -184,6 +189,37 @@ def test_wrap(text, width, lines):
 
 def test_wrap_puts_at_least_one_char_per_line():
     assert wrap("很长", 5, measure) == ["很", "长"]
+
+
+@pytest.mark.parametrize(
+    ("text", "width", "lines"),
+    [
+        # 名字之间（" · "）优先断开，断开处的分隔符不写；名字里的"·"不算
+        ("凯瑞尔·罗姆 10 · 泰瑟兰·血望者 18", 150, ["凯瑞尔·罗姆 10", "泰瑟兰·血望者 18"]),
+        (
+            "★▲邪恶试验 · 多彩罗盘 · 操纵者肖像 · 代位神主",
+            230,
+            ["★▲邪恶试验 · 多彩罗盘 · 操纵者肖像", "代位神主"],
+        ),
+        ("甲 · 乙 · 丙", 1000, ["甲 · 乙 · 丙"]),  # 放得下就不断
+        ("甲 · 乙丙丁戊己", 30, ["甲", "乙丙丁", "戊己"]),  # 一个名字比一行还长：照旧按字断开
+        ("① 买 甲  ② 买 乙 · 丙", 100, ["① 买 甲", "② 买 乙 · 丙"]),  # 步与步之间照旧优先
+        (
+            "下个对手 洛卡拉 身材 12 · 最强 厄祖玛特 身材 194",
+            200,
+            ["下个对手 洛卡拉 身材 12", "最强 厄祖玛特 身材 194"],
+        ),
+    ],
+)
+def test_wrap_prefers_breaking_between_names(text, width, lines):
+    assert wrap(text, width, measure) == lines
+
+
+def test_wrap_can_ignore_name_separators():
+    # 只留第一行的地方（画面上的战斗结果横幅）：第一行尽量写满
+    text = "本场已定：赢 · 洛卡拉掉 5 血"
+    assert wrap(text, 100, measure, names=False) == ["本场已定：赢 · 洛", "卡拉掉 5 血"]
+    assert wrap(text, 100, measure) == ["本场已定：赢", "洛卡拉掉 5 血"]
 
 
 def test_clip_keeps_first_lines_and_marks_the_cut():

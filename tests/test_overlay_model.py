@@ -1,12 +1,26 @@
 import threading
 
+import pytest
 from factory import hero_select_state, make_state, minion, offered_event, power, shop_minion
 from helpers import NEEDS_STATS_FIXTURES
 
 from lscs.advisor.models import Action, Advice, HeroAdvice, HeroComment, Plan
 from lscs.llm.notices import AUTH_DISABLED, BUDGET_EXHAUSTED
-from lscs.overlay.model import IDLE, Line, NextStep, OverlayModel, OverlayView, Target, condense
+from lscs.overlay.model import (
+    IDLE,
+    Block,
+    Line,
+    NextStep,
+    OverlayModel,
+    OverlayView,
+    Target,
+    condense,
+    reason_lines,
+)
 from lscs.state.models import Event, EventType, Phase
+
+# 和模式无关的用例两种模式各跑一遍：精简（默认）和详细（[overlay] detail = true）
+MODES = pytest.mark.parametrize("detail", [False, True], ids=["compact", "detail"])
 
 NAMES = {
     "A": "小鬼",
@@ -52,8 +66,29 @@ def ai_advice(turn=3, summary="", stale=None, actions=None):
     return Advice(state_seq=1, turn=turn, plan=plan, stale_note=stale, elapsed=2.0)
 
 
-def test_starts_idle():
-    view = OverlayModel(name).snapshot()
+def rows(view):
+    """精简模式的行：(标签, 正文)。"""
+    return [(line.label, line.text) for block in view.blocks for line in block.lines]
+
+
+def labeled(view, label):
+    """标签是 label 的那一行的正文；没有时为 None。"""
+    return next((text for tag, text in rows(view) if tag == label), None)
+
+
+def texts(view):
+    """所有块里的行的正文。"""
+    return [line.text for block in view.blocks for line in block.lines]
+
+
+def head(view):
+    """页眉右侧：(来源, 后面的灰字)。"""
+    return view.source, view.source_note
+
+
+@MODES
+def test_starts_idle(detail):
+    view = OverlayModel(name, detail=detail).snapshot()
     assert view.title == IDLE == "lscs 已就绪，等待招募阶段"
     assert view.compact
 
@@ -64,19 +99,34 @@ def test_a_whole_turn():
     view = model.snapshot()
     assert view.title == "第 3 回合 · 铸币 5 · 2 本 · 升本 6"
     assert not view.compact
-    assert (view.rules, view.ai, view.warning) == ((), (), None)
+    assert (view.blocks, view.notice, view.warning, head(view)) == ((), None, None, ("", ""))
+    assert view.next_step == NextStep("▶ 等建议…", tone="muted")
 
     model.show_rules(T3, rules_advice())
-    assert model.snapshot().rules == (
-        Line("① 买 海盗 3/2  ② 刷新"),
-        Line("方向：海盗", role="direction"),
+    view = model.snapshot()
+    assert head(view) == ("规则", "")
+    assert view.next_step.text == "▶ 买 左数第 1 个 海盗"
+    assert view.blocks == (
+        Block(
+            "lines",
+            (
+                Line("② 刷新", "dim", "aside", label="然后", max_lines=2),
+                Line("海盗", role="goal", label="方向", max_lines=1),
+            ),
+        ),
     )
 
     model.ai_pending()
-    assert model.snapshot().ai == (Line("分析中…", "muted"),)
+    assert head(model.snapshot()) == ("规则", "· 分析中…")
 
     model.show_ai(T3, ai_advice(summary="先保血"), agrees=False)
-    assert model.snapshot().ai == (Line("① 买 蚀脑怪 3/4"), Line("目标：先保血", role="reason"))
+    view = model.snapshot()
+    assert head(view) == ("AI", "")
+    assert view.next_step.text == "▶ 买 左数第 2 个 蚀脑怪"
+    # 只显示 AI 这一套：规则的"然后"和"方向"都不在面板上（终端里有）
+    assert view.blocks == (
+        Block("lines", (Line("先保血", role="goal", label="目标", max_lines=2),)),
+    )
 
     combat = make_state(turn=3, phase=Phase.COMBAT, seq=2)
     model.on_update(combat, [Event(type=EventType.COMBAT_STARTED, turn=3)])
@@ -86,7 +136,7 @@ def test_a_whole_turn():
     model.on_update(make_state(turn=4, gold=6, seq=3), started(4))
     view = model.snapshot()
     assert view.title.startswith("第 4 回合 · 铸币 6")
-    assert (view.rules, view.ai) == ((), ())  # 新回合清空上一回合的建议
+    assert (view.blocks, head(view)) == ((), ("", ""))  # 新回合清空上一回合的建议
 
     over = make_state(turn=4, phase=Phase.GAME_OVER, seq=4).model_copy(update={"final_place": 3})
     model.on_update(over, [Event(type=EventType.GAME_ENDED, turn=4, data={"place": 3})])
@@ -94,41 +144,44 @@ def test_a_whole_turn():
     assert (view.title, view.compact) == ("对局结束 · 第 3 名", True)
 
 
-def test_advice_shown_before_the_state_update_of_the_same_turn_is_kept():
-    model = OverlayModel(name)
+@MODES
+def test_advice_shown_before_the_state_update_of_the_same_turn_is_kept(detail):
+    model = OverlayModel(name, detail=detail)
     model.on_update(make_state(turn=2, seq=1), started(2))
     model.show_rules(T3, rules_advice(turn=3))  # 建议先到，状态更新后到
     model.on_update(T3, started(3))
-    assert model.snapshot().rules[0] == Line("① 买 海盗 3/2  ② 刷新")
+    assert model.snapshot().next_step.text == "▶ 买 左数第 1 个 海盗"
 
 
-def test_agreeing_ai():
-    model = OverlayModel(name)
+@MODES
+def test_agreeing_ai_lists_its_own_steps(detail):
+    # AI 同意规则时面板照样按它的步骤列，不另说"同意"（终端里说）
+    model = OverlayModel(name, detail=detail)
     model.on_update(T3, started(3))
-    model.show_ai(T3, ai_advice(), agrees=True)
-    assert model.snapshot().ai == (Line("✓ 同意规则建议"),)
+    model.show_ai(T3, ai_advice(summary="稳"), agrees=True)
+    view = model.snapshot()
+    assert (view.next_step.text, head(view)) == ("▶ 买 左数第 2 个 蚀脑怪", ("AI", ""))
+    assert "同意" not in str(view)
 
 
-def test_stale_ai_and_long_summary_and_many_steps():
+def test_long_summary_and_many_steps_and_no_stale_note():
     model = OverlayModel(name)
     model.on_update(T3, started(3))
     steps = tuple(Action(type="refresh") for _ in range(6))
     summary = "先" * 43
     model.show_ai(T3, ai_advice(summary=summary, stale="基于 6 秒前的局面", actions=steps), False)
-    ai = model.snapshot().ai
-    assert ai == (
-        Line("① 刷新  ② 刷新  ③ 刷新  ④ 刷新  ⑤ 刷新  …"),  # AI 方案最多 5 步
-        Line("目标：" + "先" * 37 + "…", role="reason"),  # 整行最多 40 字，超出加"…"
-        Line("基于 6 秒前的局面", "muted", role="note"),
-    )
-    assert len(ai[1].text) == 41
+    view = model.snapshot()
+    # 剩下的五步都列在"然后"里，界面按像素折成最多两行
+    assert labeled(view, "然后") == "② 刷新  ③ 刷新  ④ 刷新  ⑤ 刷新  ⑥ 刷新"
+    assert labeled(view, "目标") == "先" * 40 + "…"  # 最多 40 字，超出加"…"
+    assert "基于 6 秒前的局面" not in str(view)  # 附注只在终端里
 
 
 def test_summary_that_fits_is_not_cut():
     model = OverlayModel(name)
     model.on_update(T3, started(3))
-    model.show_ai(T3, ai_advice(summary="先" * 37), False)
-    assert model.snapshot().ai[-1] == Line("目标：" + "先" * 37, role="reason")
+    model.show_ai(T3, ai_advice(summary="先" * 40), False)
+    assert labeled(model.snapshot(), "目标") == "先" * 40
 
 
 BOUGHT = make_state(
@@ -150,18 +203,13 @@ def test_rules_steps_already_done_are_dropped():
     model.on_update(T3, started(3))
     model.show_rules(T3, rules_advice())
     model.on_update(BOUGHT, [])  # 买了建议的海盗；规则这次没有出新建议
-    assert model.snapshot().rules == (Line("① 刷新"), Line("方向：海盗", role="direction"))
-    model.on_update(REFRESHED, [])  # 商店换了一批：不能说成"已按建议操作完"
-    assert model.snapshot().rules == (Line("商店已刷新", "muted"),)
-
-
-def test_all_steps_done_without_refresh():
-    model = OverlayModel(name)
-    model.on_update(T3, started(3))
-    plan = Plan(source="rules", actions=(Action(type="buy", entity_id=20),))
-    model.show_rules(T3, Advice(state_seq=1, turn=3, plan=plan))
-    model.on_update(BOUGHT, [])  # 商店里还剩 #21，没有刷新
-    assert model.snapshot().rules == (Line("已按建议操作完", "muted"),)
+    view = model.snapshot()
+    assert view.next_step == NextStep("▶ 刷新商店", Target(button="refresh"), badge="2")
+    assert rows(view) == [("方向", "海盗")]  # 没有剩下的步：没有"然后"
+    model.on_update(REFRESHED, [])
+    view = model.snapshot()
+    assert view.next_step == NextStep("✓ 建议的步骤都做完了", tone="muted")
+    assert rows(view) == [("方向", "海盗")]
 
 
 def test_rules_after_refresh_keep_steps_that_still_apply():
@@ -169,26 +217,35 @@ def test_rules_after_refresh_keep_steps_that_still_apply():
     model.on_update(T3, started(3))
     plan = Plan(source="rules", actions=(Action(type="upgrade"), Action(type="buy", entity_id=20)))
     model.show_rules(T3, Advice(state_seq=1, turn=3, plan=plan))
-    model.on_update(T3.model_copy(update={"shop": REFRESHED.shop, "seq": 2}), [])
-    assert model.snapshot().rules == (Line("① 升本 → 3 本"),)  # 等规则的新建议
+    rich = T3.me.model_copy(update={"gold": 6})  # 升本要 6 金：做得起
+    model.on_update(T3.model_copy(update={"shop": REFRESHED.shop, "seq": 2, "me": rich}), [])
+    view = model.snapshot()  # 等规则的新建议
+    assert view.next_step == NextStep("▶ 升本 → 3 本（6 金）", Target(button="upgrade"), badge="1")
+    assert rows(view) == []
 
 
-def test_ai_after_refresh_waits_for_new_advice():
+def test_ai_after_refresh_waits_for_new_advice_and_keeps_the_goal():
     model = OverlayModel(name)
     model.on_update(T3, started(3))
     model.show_ai(T3, ai_advice(summary="买蚀脑怪"), False)
     model.on_update(REFRESHED, [])
-    assert model.snapshot().ai == (Line("商店已刷新，等待新的 AI 建议", "muted"),)
+    view = model.snapshot()
+    assert view.next_step == NextStep("▶ 等新的建议…", tone="muted")
+    assert head(view) == ("", "分析中…")
+    assert rows(view) == [("目标", "买蚀脑怪")]
 
 
-def test_ai_after_refresh_when_ai_is_off_drops_the_block():
-    model = OverlayModel(name)
+@MODES
+def test_ai_after_refresh_when_ai_is_off_says_so_at_the_bottom(detail):
+    model = OverlayModel(name, detail=detail)
     model.on_update(T3, started(3))
     model.show_ai(T3, ai_advice(), False)
     model.ai_text(BUDGET_EXHAUSTED)  # 之后不会再有 AI 建议
     model.show_ai(T3, ai_advice(), False)
     model.on_update(REFRESHED, [])
-    assert model.snapshot().ai == (Line("本局 AI 次数已用完", "muted"),)
+    view = model.snapshot()
+    assert view.next_step == NextStep("▶ 等建议…", tone="muted")  # 等规则的新建议
+    assert view.notice == "本局 AI 次数已用完"
 
 
 def test_plan_without_steps_shows_no_action_needed():
@@ -196,62 +253,91 @@ def test_plan_without_steps_shows_no_action_needed():
     model.on_update(T3, started(3))
     empty = Plan(source="rules", summary="本回合不需要操作", direction="海盗")
     model.show_rules(T3, Advice(state_seq=1, turn=3, plan=empty))
-    assert model.snapshot().rules == (Line("无需操作", "muted"),)
+    view = model.snapshot()
+    assert view.next_step == NextStep("无需操作", tone="muted")
+    assert rows(view) == [("方向", "海盗")]
 
 
 def test_ai_steps_already_done_are_dropped():
+    rich = BOUGHT.model_copy(update={"me": BOUGHT.me.model_copy(update={"gold": 5})})
     model = OverlayModel(name)
     model.on_update(T3, started(3))
     actions = (Action(type="buy", entity_id=20), Action(type="buy", entity_id=21))
     model.show_ai(T3, ai_advice(summary="两张都要", actions=actions), False)
-    model.on_update(BOUGHT, [])
-    assert model.snapshot().ai == (Line("① 买 蚀脑怪 3/4"), Line("目标：两张都要", role="reason"))
-    model.on_update(BOUGHT.model_copy(update={"shop": (), "seq": 4}), [])
-    assert model.snapshot().ai == (Line("已按建议操作完", "muted"),)
+    assert labeled(model.snapshot(), "然后") == "② 买 蚀脑怪"
+    model.on_update(rich, [])
+    view = model.snapshot()
+    assert view.next_step.text == "▶ 买 左数第 1 个 蚀脑怪"
+    assert view.next_step.badge == "2"
+    assert rows(view) == [("目标", "两张都要")]
+    model.on_update(rich.model_copy(update={"shop": (), "seq": 4}), [])
+    view = model.snapshot()
+    assert view.next_step.text == "✓ 建议的步骤都做完了"
+    assert rows(view) == [("目标", "两张都要")]
 
 
-def test_ai_switched_off_mid_game_stays_visible():
-    model = OverlayModel(name)
+@MODES
+def test_ai_switched_off_mid_game_stays_at_the_bottom(detail):
+    model = OverlayModel(name, detail=detail)
     model.on_update(T3, started(3))
     model.ai_text(BUDGET_EXHAUSTED)
-    assert model.snapshot().ai == (Line(BUDGET_EXHAUSTED, "muted"),)
+    assert model.snapshot().notice == "本局 AI 次数已用完"
     model.on_update(make_state(turn=4, seq=5), started(4))
-    assert model.snapshot().ai == (Line("本局 AI 次数已用完", "muted"),)
+    assert model.snapshot().notice == "本局 AI 次数已用完"
     new_game = [Event(type=EventType.GAME_STARTED, turn=0)]
     model.on_update(make_state(turn=0, phase=Phase.HERO_SELECT, seq=6), new_game)
     model.on_update(make_state(turn=1, seq=7), started(1))
-    assert model.snapshot().ai == ()  # 预算按局计算，新的一局恢复
+    assert model.snapshot().notice is None  # 预算按局计算，新的一局恢复
 
     model.ai_text(AUTH_DISABLED)
     model.on_update(make_state(turn=2, seq=8), started(2))
-    assert model.snapshot().ai == (Line("AI 已关闭（Key 无效）", "muted"),)
+    assert model.snapshot().notice == "AI 已关闭（Key 无效）"
     model.on_update(make_state(turn=0, phase=Phase.HERO_SELECT, seq=9), new_game)
     model.on_update(make_state(turn=1, seq=10), started(1))
-    assert model.snapshot().ai == (Line("AI 已关闭（Key 无效）", "muted"),)  # Key 无效一直有效
+    assert model.snapshot().notice == "AI 已关闭（Key 无效）"  # Key 无效一直有效
 
 
-def test_ai_text_and_rules_error_are_muted():
-    model = OverlayModel(name)
+@MODES
+def test_notice_priority_ai_off_then_ai_error_then_rules_error(detail):
+    model = OverlayModel(name, detail=detail)
     model.on_update(T3, started(3))
     model.rules_error()
+    assert model.snapshot().notice == "本回合规则建议出错"
     model.ai_text("AI 超时")
-    view = model.snapshot()
-    assert view.rules == (Line("本回合规则建议出错", "muted"),)
-    assert view.ai == (Line("AI 超时", "muted"),)
+    assert model.snapshot().notice == "AI 超时"
+    model.ai_text(BUDGET_EXHAUSTED)
+    assert model.snapshot().notice == "本局 AI 次数已用完"
 
 
-def test_ai_disabled_and_uncertain_and_full_tier():
-    model = OverlayModel(name, ai_enabled=False)
+@MODES
+def test_notice_hides_ai_trouble_while_an_ai_plan_is_shown(detail):
+    model = OverlayModel(name, detail=detail)
+    model.on_update(T3, started(3))
+    model.show_ai(T3, llm_advice(BUY_20, lane="deep", **DEEP), False)
+    model.ai_text("AI 超时")  # 快速建议这一路出错
+    model.ai_text(BUDGET_EXHAUSTED)
+    assert model.snapshot().source == "AI 深度"
+    assert model.snapshot().notice is None
+    model.rules_error()
+    assert model.snapshot().notice == "本回合规则建议出错"
+
+
+@MODES
+def test_ai_disabled_and_uncertain_and_full_tier(detail):
+    model = OverlayModel(name, ai_enabled=False, detail=detail)
     state = make_state(turn=12, gold=10, tier=6, upgrade_cost=None)  # 满本时没有升本按钮
     model.on_update(state.model_copy(update={"uncertain": True}), started(12))
     view = model.snapshot()
     assert view.title == "第 12 回合 · 铸币 10 · 6 本 · 已满本"
-    assert view.ai == (Line("AI 未开启", "muted"),)
+    assert view.notice is None  # 不写"AI 未开启"（启动时终端说过）
     assert view.warning == "⚠ 状态可能不准"
+    model.show_rules(state, rules_advice(turn=12))
+    assert model.snapshot().source == "规则"
 
 
-def test_waiting_hero_select_and_new_game():
-    model = OverlayModel(name)
+@MODES
+def test_waiting_hero_select_and_new_game(detail):
+    model = OverlayModel(name, detail=detail)
     model.on_update(T3, started(3))
     model.show_rules(T3, rules_advice())
     # 还没发备选英雄：英雄还是占位的
@@ -259,14 +345,16 @@ def test_waiting_hero_select_and_new_game():
     model.on_update(hero, [Event(type=EventType.GAME_STARTED, turn=0)])
     assert model.snapshot().title == IDLE
     model.on_update(T3, started(3))  # 新对局的同一个回合数，不能留着上一局的建议
-    assert model.snapshot().rules == ()
+    view = model.snapshot()
+    assert (view.blocks, view.next_step.text) == ((), "▶ 等建议…")
     over = make_state(phase=Phase.GAME_OVER)
     model.on_update(over, [])
     assert model.snapshot().title == "对局结束"
 
 
-def test_version_changes_only_when_content_changes():
-    model = OverlayModel(name)
+@MODES
+def test_version_changes_only_when_content_changes(detail):
+    model = OverlayModel(name, detail=detail)
     model.on_update(T3, started(3))
     first = model.snapshot().version
     model.on_update(T3.model_copy(update={"seq": 5}), [])  # 内容没变
@@ -275,8 +363,9 @@ def test_version_changes_only_when_content_changes():
     assert model.snapshot().version == first + 1
 
 
-def test_message_overrides_everything():
-    model = OverlayModel(name)
+@MODES
+def test_message_overrides_everything(detail):
+    model = OverlayModel(name, detail=detail)
     model.on_update(T3, started(3))
     model.show_message("监听已停止，请查看终端")
     view = model.snapshot()
@@ -287,8 +376,9 @@ def test_ai_summary_is_accepted():
     OverlayModel(name).ai_summary(3, 1000, 200)  # 面板不显示，但必须有这个方法
 
 
-def test_concurrent_calls_are_safe():
-    model = OverlayModel(name)
+@MODES
+def test_concurrent_calls_are_safe(detail):
+    model = OverlayModel(name, detail=detail)
     errors = []
     versions = []
 
@@ -317,35 +407,41 @@ def test_concurrent_calls_are_safe():
     assert versions == sorted(versions)
 
 
-def test_condense_drops_direction_first_then_look_for_and_notes():
+def test_condense_levels_in_compact_mode():
+    step = NextStep("▶ 选 左数第 3 个 泰瑞尔", slots="选项 ○ ○ ●", reason="理由")
+    then = Line("② 买 海盗  ③ 刷新", "dim", "aside", label="然后", max_lines=2)
+    goal = Line("先保血再找畸变", role="goal", label="目标", max_lines=2)
     view = OverlayView(
         title="第 3 回合",
         compact=False,
-        rules=(Line("① 刷新"), Line("方向：海盗", role="direction")),
-        ai=(
-            Line("① 买 海盗 3/2"),
-            Line("方向：纳迦", role="direction"),
-            Line("要找：船长", role="look_for"),
-            Line("分析：先保血", role="reason"),
-            Line("基于 6 秒前的局面", "muted", role="note"),
-            Line("深度分析中…", "muted"),
-        ),
-        ai_title="AI（深度）",
+        next_step=step,
+        source="AI",
+        blocks=(Block("lines", (then, goal)),),
+        notice="本回合规则建议出错",
         warning="⚠ 状态可能不准",
     )
     assert condense(view, 0) == view
     one = condense(view, 1)
-    assert one.rules == (Line("① 刷新"),)
-    assert [line.text for line in one.ai] == [
-        "① 买 海盗 3/2",
-        "要找：船长",
-        "分析：先保血",
-        "基于 6 秒前的局面",
-        "深度分析中…",
-    ]
+    assert one.blocks == (Block("lines", (goal,)),)  # 次要的"然后"先去掉
     two = condense(view, 2)
-    assert [line.text for line in two.ai] == ["① 买 海盗 3/2", "分析：先保血", "深度分析中…"]
-    assert (two.title, two.warning, two.ai_title) == (view.title, view.warning, view.ai_title)
+    assert two.blocks == (
+        Block("lines", (Line(goal.text, role="goal", label="目标", max_lines=1),)),
+    )
+    assert condense(view, 3) == two  # 精简模式的第 3 级什么都不做
+    for level in (1, 2, 3):
+        kept = condense(view, level)
+        assert (kept.title, kept.next_step, kept.notice, kept.warning, kept.source) == (
+            view.title,
+            step,
+            view.notice,
+            view.warning,
+            "AI",
+        )
+    # "下一步"的理由：第 2 级起只留一行
+    assert [reason_lines(level) for level in range(4)] == [2, 2, 1, 1]
+    # 块里的行都去掉了，块也不留
+    only_then = OverlayView(title="t", compact=False, blocks=(Block("lines", (then,)),))
+    assert condense(only_then, 1).blocks == ()
 
 
 def test_hero_power_step_shows_and_disappears_once_used():
@@ -361,12 +457,14 @@ def test_hero_power_step_shows_and_disappears_once_used():
         ),
     )
     model.show_rules(ready, Advice(state_seq=1, turn=3, plan=plan))
-    assert model.snapshot().rules == (Line("① 买 海盗 3/2  ② 使用英雄技能 定罪  ③ 刷新"),)
+    assert labeled(model.snapshot(), "然后") == "② 用技能 定罪  ③ 刷新"  # 短写
     used = BOUGHT.model_copy(
         update={"me": BOUGHT.me.model_copy(update={"hero_power": power(used=True)}), "seq": 5}
     )
     model.on_update(used, [])
-    assert model.snapshot().rules == (Line("① 刷新"),)
+    view = model.snapshot()
+    assert view.next_step == NextStep("▶ 刷新商店", Target(button="refresh"), badge="3")
+    assert labeled(view, "然后") is None
 
 
 # ---- 快速 + 深度两路 ----
@@ -389,7 +487,7 @@ DEEP = {
 }
 
 
-def test_fast_ai_lines_show_look_for_and_goal_instead_of_long_analysis():
+def test_goal_is_the_summary_not_the_long_analysis_and_no_look_for():
     model = OverlayModel(name)
     model.on_update(T3, started(3))
     advice = llm_advice(
@@ -401,53 +499,46 @@ def test_fast_ai_lines_show_look_for_and_goal_instead_of_long_analysis():
     )
     model.show_ai(T3, advice, False)
     view = model.snapshot()
-    assert view.ai_title == "AI"
-    assert view.ai == (
-        Line("① 买 蚀脑怪 3/4"),
-        Line("方向：海盗", role="direction"),
-        Line("要找：船长", role="look_for"),
-        Line("目标：补一张战力，留钱刷新", role="reason"),
-    )
+    assert rows(view) == [("目标", "补一张战力，留钱刷新")]  # 要找、方向只在终端里
 
 
 def test_analysis_is_shown_only_when_there_is_no_summary():
     model = OverlayModel(name)
     model.on_update(T3, started(3))
-    model.show_ai(T3, llm_advice(BUY_21, analysis="血量健康，先补战力。"), False)
-    assert model.snapshot().ai[-1] == Line("分析：血量健康，先补战力。", role="reason")
+    model.show_ai(T3, llm_advice(BUY_21, analysis="分" * 50), False)
+    assert labeled(model.snapshot(), "目标") == "分" * 40 + "…"
 
 
-def test_look_for_and_analysis_are_cut():
+def test_goal_falls_back_to_the_rules_direction_only_without_any_ai_plan():
     model = OverlayModel(name)
     model.on_update(T3, started(3))
-    names = tuple(f"很长的牌名{i}" for i in range(6))
-    model.show_ai(T3, llm_advice(BUY_21, analysis="分" * 50, look_for=names), False)
-    look_for, analysis = model.snapshot().ai[1:]
-    # 按整张牌截断：放得下的前 5 张，后面加"…"（不会截出半个牌名）
-    assert look_for.text == "要找：" + "、".join(names[:5]) + "…"
-    assert analysis.text == ("分析：" + "分" * 37) + "…"
+    model.show_rules(T3, rules_advice(direction=None))
+    assert rows(model.snapshot()) == [("然后", "② 刷新")]  # 没有 AI、也没有方向：没有这一行
+    model.show_rules(T3, rules_advice())
+    assert labeled(model.snapshot(), "方向") == "海盗"
+    model.show_ai(T3, llm_advice(BUY_21), False)  # AI 的方案没有总结和分析
+    view = model.snapshot()
+    assert labeled(view, "方向") is None and labeled(view, "目标") is None
 
 
-def test_deep_analysis_pending_line_and_deep_result_first():
+def test_deep_analysis_pending_and_deep_result_first():
     model = OverlayModel(name)
     model.on_update(T3, started(3))
     model.ai_pending()
     model.ai_pending("deep")
-    assert model.snapshot().ai == (Line("分析中…", "muted"), Line("深度分析中…", "muted"))
+    assert head(model.snapshot()) == ("", "分析中…")
+    model.show_rules(T3, rules_advice())
+    assert head(model.snapshot()) == ("规则", "· 分析中…")
     model.show_ai(T3, llm_advice(BUY_21, analysis="快速分析"), False)
-    assert model.snapshot().ai[-1] == Line("深度分析中…", "muted")
+    assert head(model.snapshot()) == ("AI", "· 分析中…")  # 深度分析还在等
     model.show_ai(T3, llm_advice(BUY_20, lane="deep", **DEEP), False)
     view = model.snapshot()
-    assert view.ai_title == "AI（深度）"
-    assert view.ai == (
-        Line("① 买 海盗 3/2"),
-        Line("方向：畸变", role="direction"),
-        Line("要找：神明、祭品", role="look_for"),
-        Line("目标：提前升 5 本找畸变核心", role="reason"),
-    )
+    assert head(view) == ("AI 深度", "")
+    assert view.next_step.text == "▶ 买 左数第 1 个 海盗"
+    assert rows(view) == [("目标", "提前升 5 本找畸变核心")]  # 规则的步骤不在面板上
     model.on_update(make_state(turn=4, seq=9), started(4))
     view = model.snapshot()
-    assert (view.ai, view.ai_title) == ((), "AI")  # 新回合清空深度分析
+    assert (view.blocks, head(view)) == ((), ("", ""))  # 新回合清空深度分析
 
 
 def test_deep_steps_done_keep_the_thoughts():
@@ -455,14 +546,12 @@ def test_deep_steps_done_keep_the_thoughts():
     model.on_update(T3, started(3))
     model.show_ai(T3, llm_advice(BUY_20, lane="deep", **DEEP), False)
     model.on_update(BOUGHT, [])
-    assert model.snapshot().ai == (
-        Line("已按建议操作完", "muted"),
-        Line("要找：神明、祭品", role="look_for"),
-        Line("目标：提前升 5 本找畸变核心", role="reason"),
-    )
+    view = model.snapshot()
+    assert view.next_step.text == "✓ 建议的步骤都做完了"
+    assert rows(view) == [("目标", "提前升 5 本找畸变核心")]
 
 
-def test_expired_deep_result_shows_its_direction_look_for_and_analysis():
+def test_expired_deep_result_gives_the_goal_to_the_fast_plan():
     model = OverlayModel(name)
     model.on_update(T3, started(3))
     plan = Plan(source="llm", actions=BUY_21, analysis="快速分析", direction="海盗")
@@ -470,18 +559,12 @@ def test_expired_deep_result_shows_its_direction_look_for_and_analysis():
     model.show_ai(T3, fast, False)
     model.show_ai(T3, llm_advice(BUY_20, lane="deep", expired="invalid", **DEEP), False)
     view = model.snapshot()
-    assert view.ai_title == "AI（深度）"
-    assert view.ai == (  # 快速建议的操作 + 深度分析的方向和思路 + 快速建议的附注
-        Line("① 买 蚀脑怪 3/4"),
-        Line("方向：畸变", role="direction"),
-        Line("要找：神明、祭品", role="look_for"),
-        Line("目标：提前升 5 本找畸变核心", role="reason"),
-        Line("基于 6 秒前的局面", "muted", role="note"),
-    )
-    assert [line.text for line in condense(view, 1).ai][:2] == [
-        "① 买 蚀脑怪 3/4",
-        "要找：神明、祭品",
-    ]
+    assert head(view) == ("AI", "")  # 快速建议的操作
+    assert view.next_step.text == "▶ 买 左数第 2 个 蚀脑怪"
+    assert rows(view) == [("目标", "提前升 5 本找畸变核心")]  # 深度分析的思路
+
+
+RICH_REFRESHED = REFRESHED.model_copy(update={"me": REFRESHED.me.model_copy(update={"gold": 5})})
 
 
 def test_refresh_after_deep_result_keeps_its_thoughts_with_the_new_fast_advice():
@@ -489,18 +572,16 @@ def test_refresh_after_deep_result_keeps_its_thoughts_with_the_new_fast_advice()
     model.on_update(T3, started(3))
     model.show_ai(T3, llm_advice(BUY_21, analysis="快速分析"), False)
     model.show_ai(T3, llm_advice(BUY_20, lane="deep", **DEEP), False)
-    model.on_update(REFRESHED, [])  # 深度分析的操作过期
-    thoughts = (
-        Line("方向：畸变", role="direction"),
-        Line("要找：神明、祭品", role="look_for"),
-        Line("目标：提前升 5 本找畸变核心", role="reason"),
-    )
-    assert model.snapshot().ai == (Line("商店已刷新，等待新的 AI 建议", "muted"), *thoughts)
-    buy_30 = (Action(type="buy", entity_id=30),)
-    model.show_ai(REFRESHED, llm_advice(buy_30, state_seq=3, analysis="刷新后的快速分析"), False)
+    model.on_update(RICH_REFRESHED, [])  # 深度分析的操作过期
     view = model.snapshot()
-    assert view.ai_title == "AI（深度）"
-    assert view.ai == (Line("① 买 小鬼 1/1"), *thoughts)
+    assert (view.next_step.text, head(view)) == ("▶ 等新的建议…", ("", "分析中…"))
+    assert rows(view) == [("目标", "提前升 5 本找畸变核心")]
+    buy_30 = (Action(type="buy", entity_id=30),)
+    advice = llm_advice(buy_30, state_seq=3, summary="刷新后的快速建议")
+    model.show_ai(RICH_REFRESHED, advice, False)
+    view = model.snapshot()
+    assert (view.next_step.text, head(view)) == ("▶ 买 左数第 1 个 小鬼", ("AI", ""))
+    assert rows(view) == [("目标", "提前升 5 本找畸变核心")]  # 深度优先
 
 
 def test_expired_deep_thoughts_while_the_new_fast_advice_is_pending():
@@ -508,58 +589,69 @@ def test_expired_deep_thoughts_while_the_new_fast_advice_is_pending():
     model.on_update(T3, started(3))
     model.show_ai(T3, llm_advice(BUY_21, analysis="快速分析"), False)
     model.show_ai(T3, llm_advice(BUY_20, lane="deep", **DEEP), False)
-    model.on_update(REFRESHED, [])
+    model.on_update(RICH_REFRESHED, [])
     model.ai_pending()  # 刷新后的快速建议已经发出
     view = model.snapshot()
-    assert view.ai_title == "AI（深度）"
-    assert view.ai == (
-        Line("分析中…", "muted"),
-        Line("方向：畸变", role="direction"),
-        Line("要找：神明、祭品", role="look_for"),
-        Line("目标：提前升 5 本找畸变核心", role="reason"),
-    )
+    assert (view.next_step.text, head(view)) == ("▶ 等建议…", ("", "分析中…"))
+    assert rows(view) == [("目标", "提前升 5 本找畸变核心")]
 
 
-def test_deep_error_only_clears_the_pending_line():
-    model = OverlayModel(name)
+@MODES
+def test_deep_error_only_clears_the_pending_note(detail):
+    model = OverlayModel(name, detail=detail)
     model.on_update(T3, started(3))
     model.ai_pending("deep")
     model.show_ai(T3, llm_advice(BUY_21), False)
+    assert head(model.snapshot()) == ("AI", "· 分析中…")
     model.ai_text("深度分析超时", "deep")
     view = model.snapshot()
-    assert (view.ai, view.ai_title) == ((Line("① 买 蚀脑怪 3/4"),), "AI")
+    assert (head(view), view.notice) == (("AI", ""), None)  # 深度分析的错误只在终端里
 
 
-def test_deep_agreeing_with_rules_keeps_its_thoughts():
+def test_deep_agreeing_with_rules_is_shown_as_the_deep_plan():
     model = OverlayModel(name)
     model.on_update(T3, started(3))
+    model.show_rules(T3, rules_advice())
     model.show_ai(T3, llm_advice(BUY_20, lane="deep", **DEEP), True)
     view = model.snapshot()
-    assert view.ai_title == "AI（深度）"
-    assert view.ai == (
-        Line("✓ 同意规则建议"),
-        Line("要找：神明、祭品", role="look_for"),
-        Line("目标：提前升 5 本找畸变核心", role="reason"),
-    )
+    assert (view.next_step.text, head(view)) == ("▶ 买 左数第 1 个 海盗", ("AI 深度", ""))
+    assert rows(view) == [("目标", "提前升 5 本找畸变核心")]
 
 
-def test_budget_notice_with_deep_pending():
-    model = OverlayModel(name)
+@MODES
+def test_budget_notice_with_deep_pending(detail):
+    model = OverlayModel(name, detail=detail)
     model.on_update(T3, started(3))
     model.ai_text(BUDGET_EXHAUSTED)
     model.ai_pending("deep")
-    assert model.snapshot().ai == (Line(BUDGET_EXHAUSTED, "muted"), Line("深度分析中…", "muted"))
+    view = model.snapshot()
+    assert (view.notice, head(view)) == ("本局 AI 次数已用完", ("", "分析中…"))
+
+
+def test_only_one_plan_is_shown_and_falls_back_in_order():
+    # 规则 + 快速 + 深度都在：只显示深度；深度过期 → 快速；快速的商店刷新了 → 等新的建议
+    model = OverlayModel(name)
+    model.on_update(T3, started(3))
+    model.show_rules(T3, rules_advice())
+    model.show_ai(T3, llm_advice((*BUY_21, Action(type="refresh")), summary="快"), False)
+    deep = llm_advice((*BUY_20, Action(type="upgrade")), lane="deep", **DEEP)
+    model.show_ai(T3, deep, False)
+    view = model.snapshot()
+    assert head(view) == ("AI 深度", "")
+    assert rows(view) == [("然后", "② 升本 → 3 本"), ("目标", "提前升 5 本找畸变核心")]
+    model.show_ai(T3, deep.model_copy(update={"expired": "refreshed"}), False)
+    view = model.snapshot()
+    assert head(view) == ("AI", "")
+    assert rows(view) == [("然后", "② 刷新"), ("目标", "提前升 5 本找畸变核心")]
+    model.on_update(RICH_REFRESHED, [])
+    view = model.snapshot()
+    assert (view.next_step.text, head(view)) == ("▶ 等新的建议…", ("", "分析中…"))
 
 
 # ---- 选英雄 ----
 
 HERO_TITLE = "选英雄 · 护甲越少越强"
-HERO_ROWS = (
-    Line("凯瑞尔·罗姆  护甲 10"),
-    Line("泰瑟兰·血望者  护甲 18"),
-    Line("洛，在世传奇  护甲 19"),
-    Line("了不起的杰弗里斯  护甲 17"),
-)
+HERO_ARMOR = "凯瑞尔·罗姆 10 · 泰瑟兰·血望者 18 · 洛，在世传奇 19 · 了不起的杰弗里斯 17"
 COMMENTS = ((92, "发现随机，看运气"), (90, "要靠对子才强，前期慢"), (91, "技能复杂，新手难发挥"))
 
 
@@ -587,74 +679,94 @@ def test_hero_select_view():
     model = OverlayModel(name)
     st = choosing(model)
     view = model.snapshot()
-    assert (view.title, view.compact, view.ai_title, view.warning) == (
+    assert (view.title, view.compact, view.warning, head(view)) == (
         HERO_TITLE,
         False,
-        "AI",
         None,
+        ("", ""),
     )
-    assert (view.rules, view.ai) == (HERO_ROWS, ())  # 规则建议还没到：先列出英雄，不标 ★
+    assert view.next_step == NextStep("▶ 等建议…", tone="muted")
+    assert rows(view) == [("护甲", HERO_ARMOR)]  # 规则建议还没到：先列出英雄，不标 ★
     model.show_hero(st, rules_pick(st))
-    assert model.snapshot().rules == (Line("★ 凯瑞尔·罗姆  护甲 10"), *HERO_ROWS[1:])
+    view = model.snapshot()
+    assert rows(view) == [("护甲", "★" + HERO_ARMOR)]
+    assert head(view) == ("规则", "")
     model.ai_pending("hero")
-    assert model.snapshot().ai == (Line("分析中…", "muted"),)
-    model.show_hero(st, hero_advice(st, comments=COMMENTS))
-    assert model.snapshot().ai == (
-        Line("选 凯瑞尔·罗姆：0 费技能每回合白送属性"),
-        Line("泰瑟兰·血望者：要靠对子才强，前期慢", role="comment"),  # 按备选顺序
-        Line("洛，在世传奇：技能复杂，新手难发挥", role="comment"),
-        Line("了不起的杰弗里斯：发现随机，看运气", role="comment"),
+    assert head(model.snapshot()) == ("规则", "· 分析中…")
+    model.show_hero(st, hero_advice(st, pick=90, comments=COMMENTS))
+    view = model.snapshot()
+    assert head(view) == ("AI", "")
+    assert view.next_step == NextStep(
+        "▶ 选 左数第 2 个 泰瑟兰·血望者",
+        Target(row="hero", index=1, count=4),
+        slots="英雄 ○ ● ○ ○",
+        reason="0 费技能每回合白送属性",
+        badge="选",
     )
-    assert model.snapshot().title == HERO_TITLE
+    # ★ 跟着"下一步"（AI 的推荐）；点评只在终端和详细模式里
+    assert rows(view) == [
+        ("护甲", "凯瑞尔·罗姆 10 · ★泰瑟兰·血望者 18 · 洛，在世传奇 19 · 了不起的杰弗里斯 17")
+    ]
+    assert "要靠对子才强" not in str(view)
 
 
 def test_hero_rules_without_a_pick_and_ai_agreeing():
     model = OverlayModel(name)
     st = choosing(model)
     model.show_hero(st, rules_pick(st, pick=None))
-    assert (model.snapshot().title, model.snapshot().rules) == (HERO_TITLE, HERO_ROWS)
-    model.show_hero(st, hero_advice(st, pick=91, comments=((91, "稳"),)), agrees=True)
-    assert model.snapshot().ai == (
-        Line("✓ 也选 洛，在世传奇：0 费技能每回合白送属性"),
-        Line("洛，在世传奇：稳", role="comment"),
+    view = model.snapshot()
+    assert (view.title, rows(view), view.next_step.text) == (
+        HERO_TITLE,
+        [("护甲", HERO_ARMOR)],
+        "▶ 等建议…",
     )
+    model.show_hero(st, hero_advice(st, pick=91, comments=((91, "稳"),)), agrees=True)
+    view = model.snapshot()
+    assert view.next_step.text == "▶ 选 左数第 3 个 洛，在世传奇"
+    assert view.next_step.reason == "0 费技能每回合白送属性"  # 不再写"✓ 也选 ××："
+    assert "★洛，在世传奇 19" in labeled(view, "护甲")
 
 
-def test_hero_reason_is_cut_to_one_line():
+def test_hero_reason_is_the_whole_ai_reason():
     model = OverlayModel(name)
     st = choosing(model)
     model.show_hero(st, hero_advice(st, reason="理" * 60))
-    first = model.snapshot().ai[0]
-    assert first.text == ("选 凯瑞尔·罗姆：" + "理" * 60)[:40] + "…"
-    assert first.role == "main"
+    assert model.snapshot().next_step.reason == "理" * 60  # 界面按像素截成最多两行
 
 
-def test_hero_errors_and_ai_off_are_muted():
+def test_hero_unknown_armor():
+    heroes = ((89, "BG21_HERO_000", 0, 1), (95, "BG22_HERO_003", 12, 2))
     model = OverlayModel(name)
+    choosing(model, hero_select_state(heroes))
+    assert labeled(model.snapshot(), "护甲") == "凯瑞尔·罗姆 未知 · 范达尔·雷矛 12"
+
+
+@MODES
+def test_hero_errors_and_ai_off_go_to_the_bottom(detail):
+    model = OverlayModel(name, detail=detail)
     choosing(model)
     model.ai_text("AI 超时", "hero")
-    assert model.snapshot().ai == (Line("AI 超时", "muted"),)
-    model.ai_text(BUDGET_EXHAUSTED)  # 调度器的提示不分路：选英雄时显示在选英雄的 AI 区
-    assert model.snapshot().ai == (Line(BUDGET_EXHAUSTED, "muted"),)
+    assert model.snapshot().notice == "AI 超时"
+    model.ai_text(BUDGET_EXHAUSTED)  # 调度器的提示不分路：选英雄时算选英雄这一路的
+    assert model.snapshot().notice == "本局 AI 次数已用完"
     model.on_update(make_state(turn=1, seq=5), started(1))
-    assert model.snapshot().ai == (Line("本局 AI 次数已用完", "muted"),)
-    off = OverlayModel(name, ai_enabled=False)
+    assert model.snapshot().notice == "本局 AI 次数已用完"
+    off = OverlayModel(name, ai_enabled=False, detail=detail)
     choosing(off)
-    assert off.snapshot().ai == (Line("AI 未开启", "muted"),)
-    disabled = OverlayModel(name)
+    assert off.snapshot().notice is None  # 不写"AI 未开启"
+    disabled = OverlayModel(name, detail=detail)
     disabled.ai_text(AUTH_DISABLED)
     choosing(disabled)  # 新的一局也一直有效
-    assert disabled.snapshot().ai == (Line("AI 已关闭（Key 无效）", "muted"),)
+    assert disabled.snapshot().notice == "AI 已关闭（Key 无效）"
 
 
-def test_condense_drops_hero_comments_at_level_two():
+def test_condense_drops_the_hero_row_first():
     model = OverlayModel(name)
     st = choosing(model)
     model.show_hero(st, hero_advice(st, comments=COMMENTS))
     view = model.snapshot()
-    assert condense(view, 1) == view
-    assert condense(view, 2).ai == (Line("选 凯瑞尔·罗姆：0 费技能每回合白送属性"),)
-    assert condense(view, 2).rules == view.rules
+    one = condense(view, 1)
+    assert one.blocks == () and one.next_step == view.next_step
 
 
 def test_reroll_shows_the_new_heroes_and_waits_for_the_ai_again():
@@ -666,17 +778,18 @@ def test_reroll_shows_the_new_heroes_and_waits_for_the_ai_again():
     again = hero_select_state(heroes, seq=2)
     model.on_update(again, [offered_event(again, changed=1)])
     view = model.snapshot()
-    assert view.rules == (Line("凯瑞尔·罗姆  护甲 10"), Line("范达尔·雷矛  护甲 12"))
-    assert view.ai == ()  # 上一组的推荐不再显示
+    assert rows(view) == [("护甲", "凯瑞尔·罗姆 10 · 范达尔·雷矛 12")]
+    assert head(view) == ("", "")  # 上一组的推荐不再显示
     model.show_hero(again, rules_pick(again))
     model.ai_pending("hero")
     view = model.snapshot()
-    assert view.rules[0] == Line("★ 凯瑞尔·罗姆  护甲 10")
-    assert view.ai == (Line("分析中…", "muted"),)
+    assert labeled(view, "护甲").startswith("★凯瑞尔·罗姆 10")
+    assert head(view) == ("规则", "· 分析中…")
 
 
-def test_after_the_choice_a_compact_title_until_recruit():
-    model = OverlayModel(name)
+@MODES
+def test_after_the_choice_a_compact_title_until_recruit(detail):
+    model = OverlayModel(name, detail=detail)
     st = choosing(model)
     model.show_hero(st, rules_pick(st))
     model.show_hero(st, hero_advice(st))
@@ -686,7 +799,7 @@ def test_after_the_choice_a_compact_title_until_recruit():
     assert (view.title, view.compact) == ("已选 凯瑞尔·罗姆 · 等待招募阶段", True)
     model.on_update(T3.model_copy(update={"turn": 1}), started(1))
     view = model.snapshot()
-    assert view.title.startswith("第 1 回合") and (view.rules, view.ai) == ((), ())
+    assert view.title.startswith("第 1 回合") and view.blocks == ()
 
 
 def test_new_game_drops_the_hero_advice():
@@ -695,17 +808,24 @@ def test_new_game_drops_the_hero_advice():
     model.show_hero(st, rules_pick(st))
     model.show_hero(st, hero_advice(st))
     choosing(model, st.model_copy(update={"seq": 9}))  # 重连：同一组英雄，重新开始
-    assert (model.snapshot().rules, model.snapshot().ai) == (HERO_ROWS, ())
+    view = model.snapshot()
+    assert (rows(view), head(view), view.next_step.text) == (
+        [("护甲", HERO_ARMOR)],
+        ("", ""),
+        "▶ 等建议…",
+    )
 
 
-def test_hero_view_shows_the_uncertain_warning():
-    model = OverlayModel(name)
+@MODES
+def test_hero_view_shows_the_uncertain_warning(detail):
+    model = OverlayModel(name, detail=detail)
     choosing(model, hero_select_state(uncertain=True))
     assert model.snapshot().warning == "⚠ 状态可能不准"
 
 
-def test_concurrent_hero_calls_are_safe():
-    model = OverlayModel(name)
+@MODES
+def test_concurrent_hero_calls_are_safe(detail):
+    model = OverlayModel(name, detail=detail)
     errors = []
 
     def writer(seq):
@@ -729,23 +849,25 @@ def test_concurrent_hero_calls_are_safe():
     assert errors == []
 
 
-def test_new_offer_drops_the_old_hero_ai_lines():
+@MODES
+def test_new_offer_drops_the_old_hero_ai_lines(detail):
     # 上一组的错误、提示不能留到新的一组上（新的请求会再给"分析中…"）
-    model = OverlayModel(name)
+    model = OverlayModel(name, detail=detail)
     choosing(model)
     model.ai_text("AI 超时", "hero")
     heroes = ((89, "BG21_HERO_000", 10, 1), (95, "BG22_HERO_003", 12, 2))
     again = hero_select_state(heroes, seq=2)
     model.on_update(again, [offered_event(again, changed=1)])
-    assert model.snapshot().ai == ()
+    assert model.snapshot().notice is None
     model.ai_text("生成 AI 局面时出错，本次跳过")
     model.on_update(again.model_copy(update={"seq": 3}), [])  # 别的更新：提示留着
-    assert model.snapshot().ai == (Line("生成 AI 局面时出错，本次跳过", "muted"),)
+    assert model.snapshot().notice == "生成 AI 局面时出错，本次跳过"
 
 
-def test_title_before_the_recruit_starts_leaves_out_the_upgrade():
+@MODES
+def test_title_before_the_recruit_starts_leaves_out_the_upgrade(detail):
     # TURN 变成 1 之后约 0.5 秒才有升本按钮：这时不显示"已满本"
-    model = OverlayModel(name)
+    model = OverlayModel(name, detail=detail)
     early = make_state(turn=1, gold=0, upgrade_cost=None, main_action=False)
     model.on_update(early, [])
     assert model.snapshot().title == "第 1 回合 · 铸币 0 · 1 本"
@@ -753,11 +875,13 @@ def test_title_before_the_recruit_starts_leaves_out_the_upgrade():
     assert model.snapshot().title == "第 1 回合 · 铸币 3 · 1 本 · 升本 5"
 
 
-def test_hero_rules_error_keeps_the_hero_rows():
+def test_hero_rules_error_keeps_the_hero_row():
     model = OverlayModel(name)
     choosing(model)
     model.rules_error(hero=True)
-    assert model.snapshot().rules == HERO_ROWS  # 英雄和护甲照样列出，只是没有 ★
+    view = model.snapshot()
+    assert rows(view) == [("护甲", HERO_ARMOR)]  # 英雄和护甲照样列出，只是没有 ★
+    assert view.notice is None
 
 
 # ---- 下一步 ----
@@ -767,8 +891,9 @@ def step(model):
     return model.snapshot().next_step
 
 
-def test_next_step_follows_the_rules_plan_and_moves_on():
-    model = OverlayModel(name)
+@MODES
+def test_next_step_follows_the_rules_plan_and_moves_on(detail):
+    model = OverlayModel(name, detail=detail)
     model.on_update(T3, started(3))
     assert step(model) == NextStep("▶ 等建议…", tone="muted")  # 还没有任何方案
     model.show_rules(T3, rules_advice())
@@ -784,8 +909,9 @@ def test_next_step_follows_the_rules_plan_and_moves_on():
     assert step(model) == NextStep("✓ 建议的步骤都做完了", tone="muted")
 
 
-def test_next_step_switches_to_the_ai_plan_and_then_the_deep_one():
-    model = OverlayModel(name)
+@MODES
+def test_next_step_switches_to_the_ai_plan_and_then_the_deep_one(detail):
+    model = OverlayModel(name, detail=detail)
     model.on_update(T3, started(3))
     model.show_rules(T3, rules_advice())
     model.ai_pending()
@@ -798,11 +924,14 @@ def test_next_step_switches_to_the_ai_plan_and_then_the_deep_one():
         badge="1",
     )
     model.show_ai(T3, llm_advice((Action(type="upgrade"),), lane="deep"), False)
+    assert step(model).text == "▶ 买 左数第 2 个 蚀脑怪"  # 升本要 6 金、只有 5 金：深度让路
+    model.on_update(T3.model_copy(update={"me": T3.me.model_copy(update={"gold": 6})}), [])
     assert step(model) == NextStep("▶ 升本 → 3 本（6 金）", Target(button="upgrade"), badge="1")
 
 
-def test_next_step_waits_for_new_ai_advice_after_a_refresh():
-    model = OverlayModel(name)
+@MODES
+def test_next_step_waits_for_new_ai_advice_after_a_refresh(detail):
+    model = OverlayModel(name, detail=detail)
     model.on_update(T3, started(3))
     model.show_rules(T3, rules_advice())
     model.show_ai(T3, ai_advice(), False)
@@ -812,15 +941,17 @@ def test_next_step_waits_for_new_ai_advice_after_a_refresh():
     assert step(model).text == "✓ 建议的步骤都做完了"
 
 
-def test_next_step_for_an_expired_deep_plan_uses_the_fast_one():
-    model = OverlayModel(name)
+@MODES
+def test_next_step_for_an_expired_deep_plan_uses_the_fast_one(detail):
+    model = OverlayModel(name, detail=detail)
     model.on_update(T3, started(3))
     model.show_ai(T3, llm_advice(BUY_20, lane="deep", expired="invalid", **DEEP), False)
     model.show_ai(T3, ai_advice(), False)
     assert step(model).text == "▶ 买 左数第 2 个 蚀脑怪"
 
 
-def test_next_step_for_each_kind_of_action():
+@MODES
+def test_next_step_for_each_kind_of_action(detail):
     from factory import shop_spell
 
     hp = power(targets=(10,))
@@ -830,7 +961,7 @@ def test_next_step_for_each_kind_of_action():
             "me": T3.me.model_copy(update={"hero_power": hp}),
         }
     )
-    model = OverlayModel(lambda c: {"S": "香蕉"}.get(c, name(c)))
+    model = OverlayModel(lambda c: {"S": "香蕉"}.get(c, name(c)), detail=detail)
     model.on_update(state, started(3))
 
     def first_step(*actions):
@@ -857,15 +988,17 @@ def test_next_step_for_each_kind_of_action():
     assert first_step() == NextStep("无需操作", tone="muted")
 
 
-def test_next_step_is_none_in_combat_and_without_a_game():
-    model = OverlayModel(name)
+@MODES
+def test_next_step_is_none_in_combat_and_without_a_game(detail):
+    model = OverlayModel(name, detail=detail)
     assert step(model) is None
     model.on_update(make_state(turn=3, phase=Phase.COMBAT), [])
     assert step(model) is None
 
 
-def test_next_step_at_hero_select_prefers_the_ai_pick():
-    model = OverlayModel(name)
+@MODES
+def test_next_step_at_hero_select_prefers_the_ai_pick(detail):
+    model = OverlayModel(name, detail=detail)
     state = hero_select_state()
     model.on_update(state, [offered_event(state)])
     assert step(model) == NextStep("▶ 等建议…", tone="muted")
@@ -907,20 +1040,19 @@ def choice_advice(pick=6933, choice_id=12, reason="32/32 直接成主力"):
     return ChoiceAdvice(choice_id=choice_id, pick=pick, reason=reason, elapsed=1.2)
 
 
-def test_choice_section_and_next_step_with_ai():
+def test_choice_row_and_next_step_with_ai():
     model = OverlayModel(choice_name)
     state = offered_choice(model)
     view = model.snapshot()
-    assert view.choice == (
-        Line("黑暗之赐 · 3 选 1"),
-        Line("摧心招募者 · 怒胆喷毒鱼人 · 泰瑞尔", role="comment"),
-    )
+    assert view.title == "第 9 回合 · 铸币 3 · 1 本 · 升本 5"  # 页眉不变，"3 选 1"不进页眉
+    assert rows(view) == [("黑暗之赐", "摧心招募者 · 怒胆喷毒鱼人 · 泰瑞尔")]
     assert view.next_step == NextStep("▶ 等 AI 选…", tone="muted")
+    assert head(view) == ("", "分析中…")
     model.ai_pending("choice")
-    assert model.snapshot().ai == (Line("分析中…", "muted"),)
+    assert head(model.snapshot()) == ("", "分析中…")
     model.show_choice(state, choice_advice())
     view = model.snapshot()
-    assert view.choice[1] == Line("摧心招募者 · 怒胆喷毒鱼人 · ★泰瑞尔", role="comment")
+    assert rows(view) == [("黑暗之赐", "摧心招募者 · 怒胆喷毒鱼人 · ★泰瑞尔")]
     assert view.next_step == NextStep(
         "▶ 选 左数第 3 个 泰瑞尔",
         Target(row="choice", index=2, count=3),
@@ -928,27 +1060,31 @@ def test_choice_section_and_next_step_with_ai():
         reason="32/32 直接成主力",
         badge="选",
     )
-    assert view.ai == ()  # 结果到了：AI 区回到招募的内容（这里还没有）
+    assert head(view) == ("AI", "")
 
 
-def test_choice_without_ai_asks_the_player_to_choose():
-    model = OverlayModel(choice_name, ai_enabled=False)
+@MODES
+def test_choice_without_ai_asks_the_player_to_choose(detail):
+    model = OverlayModel(choice_name, ai_enabled=False, detail=detail)
     offered_choice(model)
-    assert step(model) == NextStep("▶ 自己选一个（AI 没有建议）", tone="muted")
-    model = OverlayModel(choice_name, choice_ai=False)
+    view = model.snapshot()
+    assert view.next_step == NextStep("▶ 自己选一个（AI 没有建议）", tone="muted")
+    assert (head(view), view.notice) == (("", ""), None)
+    model = OverlayModel(choice_name, choice_ai=False, detail=detail)
     offered_choice(model)
     assert step(model).text == "▶ 自己选一个（AI 没有建议）"
-    model = OverlayModel(choice_name)
+    model = OverlayModel(choice_name, detail=detail)
     offered_choice(model)
     model.ai_pending("choice")
     model.ai_text("AI 超时", "choice")
     view = model.snapshot()
-    assert view.ai == (Line("AI 超时", "muted"),)
+    assert (view.notice, head(view)) == ("AI 超时", ("", ""))
     assert view.next_step.text == "▶ 自己选一个（AI 没有建议）"
 
 
-def test_choice_section_disappears_once_chosen_and_ignores_stale_advice():
-    model = OverlayModel(choice_name)
+@MODES
+def test_choice_row_disappears_once_chosen_and_ignores_stale_advice(detail):
+    model = OverlayModel(choice_name, detail=detail)
     state = offered_choice(model)
     model.show_choice(state, choice_advice(choice_id=11))  # 上一组的结果
     assert step(model).text == "▶ 等 AI 选…"
@@ -958,10 +1094,24 @@ def test_choice_section_disappears_once_chosen_and_ignores_stale_advice():
     done = make_state(turn=9, seq=2, shop=SHOP)
     model.on_update(done, [resolved_event(12, picked=6933)])
     view = model.snapshot()
-    assert view.choice == ()
+    assert view.blocks == ()
     assert view.next_step == NextStep("▶ 等建议…", tone="muted")
     offered_choice(model, seq=3)  # 同一组编号再出现也不会沿用旧的推荐（已经清空）
     assert step(model).text == "▶ 等 AI 选…"
+
+
+def test_choice_hides_the_recruit_lines_until_chosen():
+    from factory import choice_event, choice_state, resolved_event
+
+    model = OverlayModel(choice_name)
+    model.on_update(T3, started(3))
+    model.show_rules(T3, rules_advice())
+    model.show_ai(T3, ai_advice(summary="先保血"), False)
+    choice = choice_state(turn=3, shop=SHOP)
+    model.on_update(choice, [choice_event(choice)])
+    assert [tag for tag, _ in rows(model.snapshot())] == ["黑暗之赐"]  # 没有"然后""目标"
+    model.on_update(T3.model_copy(update={"seq": 9}), [resolved_event(12, turn=3)])
+    assert labeled(model.snapshot(), "目标") == "先保血"
 
 
 def test_choice_before_main_action_starts_the_turn():
@@ -971,27 +1121,25 @@ def test_choice_before_main_action_starts_the_turn():
     offered_choice(model, turn=6, main_action=False, seq=2)
     view = model.snapshot()
     assert view.title == "第 6 回合 · 铸币 3 · 1 本"
-    assert view.rules == ()  # 新回合：上一回合的建议清空
+    assert [tag for tag, _ in rows(view)] == ["黑暗之赐"]  # 新回合：上一回合的建议清空
     assert view.next_step.text == "▶ 等 AI 选…"
 
 
 def test_condense_keeps_the_next_step_and_drops_the_option_names():
-    view = OverlayView(
-        title="第 9 回合",
-        compact=False,
-        next_step=NextStep("▶ 选 左数第 3 个 泰瑞尔", slots="选项 ○ ○ ●", reason="理由"),
-        choice=(Line("黑暗之赐 · 3 选 1"), Line("a · ★b · c", role="comment")),
-    )
-    assert condense(view, 1) == view
-    two = condense(view, 2)
-    assert two.next_step == view.next_step
-    assert two.choice == (Line("黑暗之赐 · 3 选 1"),)
+    model = OverlayModel(choice_name)
+    state = offered_choice(model)
+    model.show_choice(state, choice_advice())
+    view = model.snapshot()
+    one = condense(view, 1)
+    assert one.next_step == view.next_step
+    assert one.blocks == ()
 
 
-def test_concurrent_choice_updates_are_safe():
+@MODES
+def test_concurrent_choice_updates_are_safe(detail):
     from factory import choice_event, choice_state, resolved_event
 
-    model = OverlayModel(choice_name)
+    model = OverlayModel(choice_name, detail=detail)
     errors = []
 
     def writer(seq0):
@@ -1017,21 +1165,23 @@ def test_concurrent_choice_updates_are_safe():
 # ---- AI 自我改正（AI 自我改正设计文档第 3.7 节） ----
 
 
-def test_fast_repair_shows_repairing_and_the_rules_step_meanwhile():
-    model = OverlayModel(name)
+@MODES
+def test_fast_repair_shows_repairing_and_the_rules_step_meanwhile(detail):
+    model = OverlayModel(name, detail=detail)
     model.on_update(T3, started(3))
     model.show_rules(T3, rules_advice())
     model.ai_pending()
     model.ai_repairing("fast", "第 1 步：铸币不够")
     view = model.snapshot()
-    assert view.ai == (Line("改正中…", "muted"),)
+    assert head(view) == ("规则", "· 改正中…")
     assert view.next_step.text == "▶ 买 左数第 1 个 海盗"  # 还是按规则方案
     model.show_ai(T3, ai_advice(), False)
-    assert model.snapshot().ai == (Line("① 买 蚀脑怪 3/4"),)
+    assert head(model.snapshot()) == ("AI", "")
 
 
-def test_deep_repair_keeps_the_deep_pending_line():
-    model = OverlayModel(name)
+@MODES
+def test_deep_repair_changes_nothing(detail):
+    model = OverlayModel(name, detail=detail)
     model.on_update(T3, started(3))
     model.ai_pending()
     model.ai_pending("deep")
@@ -1039,47 +1189,51 @@ def test_deep_repair_keeps_the_deep_pending_line():
     before = model.snapshot()
     model.ai_repairing("deep", "第 2 步：刷新要放在最后，刷新之后不能再有动作")
     after = model.snapshot()
-    assert after.ai == before.ai and after.ai[-1] == Line("深度分析中…", "muted")
+    assert head(after) == ("AI", "· 分析中…")  # 还在等深度分析
     assert after.version == before.version  # 什么都没变
     model.show_ai(T3, llm_advice(BUY_20, lane="deep", **DEEP), False)
-    assert model.snapshot().ai_title == "AI（深度）"
+    assert model.snapshot().source == "AI 深度"
 
 
-def test_choice_repair_still_waits_for_the_ai():
-    model = OverlayModel(choice_name)
+@MODES
+def test_choice_repair_still_waits_for_the_ai(detail):
+    model = OverlayModel(choice_name, detail=detail)
     state = offered_choice(model)
     model.ai_pending("choice")
     model.ai_repairing("choice", "推荐的选项不在选项里")
     view = model.snapshot()
-    assert view.ai == (Line("改正中…", "muted"),)
+    assert head(view) == ("", "改正中…")
     assert view.next_step == NextStep("▶ 等 AI 选…", tone="muted")  # 不是"自己选一个"
     model.show_choice(state, choice_advice())
     assert step(model).text == "▶ 选 左数第 3 个 泰瑞尔"
 
 
-def test_hero_repair_shows_repairing_until_the_pick_arrives():
-    model = OverlayModel(name)
+@MODES
+def test_hero_repair_shows_repairing_until_the_pick_arrives(detail):
+    model = OverlayModel(name, detail=detail)
     st = choosing(model)
     model.ai_pending("hero")
     model.ai_repairing("hero", "推荐的英雄不在备选里")
-    assert model.snapshot().ai == (Line("改正中…", "muted"),)
+    assert head(model.snapshot()) == ("", "改正中…")
     model.show_hero(st, hero_advice(st))
-    assert model.snapshot().ai[0] == Line("选 凯瑞尔·罗姆：0 费技能每回合白送属性")
+    view = model.snapshot()
+    assert (head(view), view.next_step.reason) == (("AI", ""), "0 费技能每回合白送属性")
 
 
-def test_choice_lane_notice_without_budget_lets_the_player_choose():
+@MODES
+def test_choice_lane_notice_without_budget_lets_the_player_choose(detail):
     from lscs.llm.notices import NO_BUDGET_THIS_TIME
 
-    model = OverlayModel(choice_name)
+    model = OverlayModel(choice_name, detail=detail)
     offered_choice(model)
     model.ai_pending("choice")
     model.ai_text(NO_BUDGET_THIS_TIME, "choice")  # 调度器的分路提示（设计文档第 5.1 节）
     view = model.snapshot()
-    assert view.ai == (Line("这次不再分析：本局 AI 预算已用完", "muted"),)
+    assert view.notice == "这次不再分析：本局 AI 预算已用完"
     assert view.next_step == NextStep("▶ 自己选一个（AI 没有建议）", tone="muted")
 
 
-# ---- 对手一览、对子和要找的张数 ----
+# ---- 对手一览 ----
 
 OPP_NAMES = {
     "H2": "洛卡拉",
@@ -1128,107 +1282,6 @@ def with_rivals(state, next_id=5, opponents=None):
 
 
 T10 = with_rivals(make_state(turn=10, gold=10, tier=6, upgrade_cost=None, shop=SHOP))
-GHOST = Line("▶ 詹迪斯 已淘汰（残影）· 第 4 回合见 2 个 · 身材 22", role="opponent")
-STRONGEST = Line("★ 厄祖玛特 30+3 · 5本 · 畸变×1 身材 180 · 威胁 93", role="threat")
-
-
-def test_recruit_shows_the_next_opponent_and_the_strongest_at_the_bottom():
-    model = OverlayModel(name)
-    model.on_update(T10, started(10))
-    assert model.snapshot().opponents == (GHOST, STRONGEST)
-    model.on_update(with_rivals(T10, next_id=4).model_copy(update={"seq": 2}), [])
-    assert model.snapshot().opponents == (
-        Line("▶ 布莱恩 28+0 · 4本 · 还没见过阵容", role="opponent"),
-        STRONGEST,
-    )
-    model.on_update(with_rivals(T10, next_id=3).model_copy(update={"seq": 3}), [])
-    assert model.snapshot().opponents == (
-        Line("▶★ 厄祖玛特 30+3 · 5本 · 畸变×1 身材 180 · 第 8 回合见 · 威胁 93", role="opponent"),
-    )
-
-
-def test_opponent_lines_stay_while_a_choice_is_open():
-    from factory import make_choice
-
-    model = OverlayModel(name)
-    model.on_update(T10.model_copy(update={"choice": make_choice()}), started(10))
-    view = model.snapshot()
-    assert view.choice and view.opponents == (GHOST, STRONGEST)
-
-
-def test_no_opponent_lines_when_switched_off_or_unknown():
-    model = OverlayModel(name, opponents=False)
-    model.on_update(T10, started(10))
-    assert model.snapshot().opponents == ()
-    model = OverlayModel(name)
-    model.on_update(T3, started(3))  # 没有对手的数据
-    assert model.snapshot().opponents == ()
-
-
-def test_condense_drops_the_strongest_first_then_the_next_opponent():
-    model = OverlayModel(name)
-    model.on_update(T10, started(10))
-    model.show_ai(T10, llm_advice(BUY_21, turn=10, **DEEP), False)
-    view = model.snapshot()
-    one = condense(view, 1)
-    assert one.opponents == (GHOST,)
-    assert "direction" not in {line.role for line in one.ai}
-    two = condense(view, 2)
-    assert two.opponents == ()
-    assert [line.text for line in two.ai] == ["① 买 蚀脑怪 3/4", "目标：提前升 5 本找畸变核心"]
-    assert two.next_step == view.next_step
-
-
-COMBAT_10 = with_rivals(make_state(turn=10, phase=Phase.COMBAT, seq=5))
-
-
-def test_combat_lists_every_opponent():
-    model = OverlayModel(name)
-    model.on_update(COMBAT_10, [Event(type=EventType.COMBAT_STARTED, turn=10)])
-    view = model.snapshot()
-    assert (view.title, view.compact, view.next_step) == (
-        "第 10 回合 · 战斗中 · 对手 詹迪斯",
-        False,
-        None,
-    )
-    assert (view.rules, view.ai) == ((), ())
-    assert view.opponents == (
-        Line("▶ 第8名 詹迪斯 已淘汰（残影）· 第 4 回合见 2 个 · 身材 22"),
-        Line("第1名 洛卡拉 30+9 · 5本 · 畸变×2 身材 38 · 第 9 回合见", role="opponent"),
-        Line("第2名 布莱恩 28+0 · 4本 · 还没见过阵容", role="opponent"),
-        Line("★ 第3名 厄祖玛特 30+3 · 5本 · 畸变×1 身材 180 · 威胁 93", role="threat"),
-        Line("第7名 范克里夫 已淘汰", "muted", role="comment"),
-    )
-    two = condense(view, 2)
-    assert two.opponents == view.opponents[:1]  # 正在打的那一行总是保留
-
-
-def test_combat_row_says_this_turn_once_the_board_is_captured():
-    model = OverlayModel(name)
-    model.on_update(COMBAT_10, [Event(type=EventType.COMBAT_STARTED, turn=10)])
-    seen = dict(RIVALS)
-    seen[5] = rival(5, 0, 0, 8, 2, GHOST_BOARD[:1], 10)  # 第一次攻击时截到本回合的阵容
-    model.on_update(with_rivals(COMBAT_10, opponents=seen).model_copy(update={"seq": 6}), [])
-    first = model.snapshot().opponents[0]
-    assert first == Line("▶ 第8名 詹迪斯 已淘汰（残影）· 本回合见 1 个 · 身材 14")
-
-
-def test_combat_strongest_being_fought_is_one_main_row():
-    model = OverlayModel(name)
-    model.on_update(with_rivals(COMBAT_10, next_id=3), [])
-    rows = model.snapshot().opponents
-    assert rows[0] == Line("▶★ 第3名 厄祖玛特 30+3 · 5本 · 畸变×1 身材 180 · 第 8 回合见 · 威胁 93")
-    assert [line.role for line in rows] == ["main", "opponent", "opponent", "comment", "comment"]
-
-
-def test_combat_stays_one_line_when_opponents_are_off_or_unknown():
-    model = OverlayModel(name, opponents=False)
-    model.on_update(COMBAT_10, [])
-    view = model.snapshot()
-    assert (view.title, view.compact, view.opponents) == ("第 10 回合 · 战斗中", True, ())
-    model = OverlayModel(name)
-    model.on_update(make_state(turn=3, phase=Phase.COMBAT), [])
-    assert (model.snapshot().title, model.snapshot().compact) == ("第 3 回合 · 战斗中", True)
 
 
 def pool_note(card_id, card_name, have, left, shop=0):
@@ -1237,66 +1290,67 @@ def pool_note(card_id, card_name, have, left, shop=0):
     return PoolNote(card_id, card_name, have, left, shop)
 
 
-def test_pairs_line_in_the_rules_and_pool_counts_after_look_for():
-    notes = (
-        pool_note("C", "蚀脑怪", 2, 11),
-        pool_note("B", "海盗", 1, 14, shop=1),
-        pool_note("W", "飘荡祭品", 0, 11),
-    )
+def test_recruit_in_compact_mode_has_no_opponents_look_for_or_pairs():
+    notes = (pool_note("C", "蚀脑怪", 2, 11),)
     model = OverlayModel(name)
-    model.on_update(T3, started(3))
-    model.show_rules(T3, rules_advice().model_copy(update={"pool_notes": notes}))
-    assert model.snapshot().rules == (
-        Line("① 买 海盗 3/2  ② 刷新"),
-        Line("对子：蚀脑怪×2 · 还剩约 11 张；海盗×1 商店有 · 还剩约 14 张", role="look_for"),
-        Line("方向：海盗", role="direction"),
-    )
-    advice = llm_advice(BUY_21, look_for=("飘荡祭品", "深渊使者"), summary="找祭品")
-    model.show_ai(T3, advice.model_copy(update={"pool_notes": notes}), False)
-    assert model.snapshot().ai == (
-        Line("① 买 蚀脑怪 3/4"),
-        Line("要找：飘荡祭品（约 11 张）、深渊使者", role="look_for"),
-        Line("目标：找祭品", role="reason"),
-    )
+    model.on_update(T10, started(10))
+    model.show_rules(T10, rules_advice(turn=10).model_copy(update={"pool_notes": notes}))
+    advice = llm_advice(BUY_21, turn=10, look_for=("飘荡祭品",), summary="找祭品")
+    model.show_ai(T10, advice.model_copy(update={"pool_notes": notes}), False)
     view = model.snapshot()
-    assert "对子" not in " ".join(line.text for line in condense(view, 2).rules)
+    assert rows(view) == [("目标", "找祭品")]
+    text = str(view)
+    assert not any(word in text for word in ("要找", "对子", "厄祖玛特", "詹迪斯", "威胁"))
 
 
-def test_empty_captured_board_on_the_panel():
-    seen_empty = {
-        2: rival(2, 20, 0, 1, 3, (), 5),
-        5: rival(5, 0, 0, 8, 2, (), 4),
-    }
+COMBAT_10 = with_rivals(make_state(turn=10, phase=Phase.COMBAT, seq=5))
+
+
+def test_combat_title_and_the_strongest_line():
     model = OverlayModel(name)
-    model.on_update(with_rivals(T10, next_id=5, opponents=seen_empty), started(10))
-    assert model.snapshot().opponents == (
-        Line("▶ 詹迪斯 已淘汰（残影）· 第 4 回合见到空场", role="opponent"),
-        Line("★ 洛卡拉 20+0 · 3本 · 见到空场 · 威胁 35", role="threat"),
+    model.on_update(COMBAT_10, [Event(type=EventType.COMBAT_STARTED, turn=10)])
+    view = model.snapshot()
+    assert (view.title, view.compact, view.next_step) == (
+        "第 10 回合 · 战斗中 · 对手 詹迪斯",
+        False,
+        None,
     )
-    model.on_update(with_rivals(COMBAT_10, next_id=2, opponents=seen_empty), [])
-    assert model.snapshot().opponents[0] == Line(
-        "▶★ 第1名 洛卡拉 20+0 · 3本 · 第 5 回合见到空场 · 威胁 35"
+    assert view.blocks == (
+        Block("lines", (Line("厄祖玛特 · 畸变×1 身材 180", "dim", label="最强"),), small=True),
     )
+    assert condense(view, 3) == view  # 唯一的一行总是保留
 
 
-def test_look_for_with_pool_counts_is_cut_between_cards():
-    notes = (
-        pool_note("W", "飘荡祭品", 0, 11),
-        pool_note("C", "蚀脑怪", 0, 11),
-        pool_note("D", "深渊使者", 0, 12),
-        pool_note("M", "残忍的精神鞭笞者", 0, 12),
-    )
+def test_combat_strongest_being_fought_is_only_the_title():
     model = OverlayModel(name)
-    model.on_update(T3, started(3))
-    look_for = ("飘荡祭品", "蚀脑怪", "深渊使者", "残忍的精神鞭笞者")
-    advice = llm_advice(BUY_21, look_for=look_for).model_copy(update={"pool_notes": notes})
-    model.show_ai(T3, advice, False)
-    assert model.snapshot().ai[1] == Line(
-        "要找：飘荡祭品（约 11 张）、蚀脑怪（约 11 张）、深渊使者（约 12 张）…", role="look_for"
+    model.on_update(with_rivals(COMBAT_10, next_id=3), [])
+    view = model.snapshot()
+    assert (view.title, view.compact, view.blocks) == (
+        "第 10 回合 · 战斗中 · 对手 厄祖玛特",
+        True,
+        (),
     )
-    one = llm_advice(BUY_21, look_for=("长" * 50,))
-    model.show_ai(T3, one, False)
-    assert model.snapshot().ai[1].text == "要找：" + "长" * 37 + "…"  # 一张就放不下：按字截
+
+
+@MODES
+def test_combat_stays_one_line_when_opponents_are_off_or_unknown(detail):
+    model = OverlayModel(name, opponents=False, detail=detail)
+    model.on_update(COMBAT_10, [])
+    view = model.snapshot()
+    assert (view.title, view.compact, view.blocks) == ("第 10 回合 · 战斗中", True, ())
+    model = OverlayModel(name, detail=detail)
+    model.on_update(make_state(turn=3, phase=Phase.COMBAT), [])
+    assert (model.snapshot().title, model.snapshot().compact) == ("第 3 回合 · 战斗中", True)
+
+
+def test_combat_strongest_with_an_empty_board():
+    seen_empty = {2: rival(2, 20, 0, 1, 3, (), 5), 5: RIVALS[5]}
+    model = OverlayModel(name)
+    model.on_update(with_rivals(COMBAT_10, next_id=5, opponents=seen_empty), [])
+    assert labeled(model.snapshot(), "最强") == "洛卡拉 · 空场"
+
+
+# ---- 复盘 ----
 
 
 def _review(**kw):
@@ -1340,45 +1394,49 @@ def test_review_shows_under_the_game_over_title():
     model = OverlayModel(name)
     model.on_update(GAME_OVER, [Event(type=EventType.GAME_ENDED, turn=13, data={"place": 3})])
     assert model.snapshot().compact
-    model.show_review(GAME_OVER, _review())
+    model.show_review(GAME_OVER, _review(ai_state="pending"))
     view = model.snapshot()
     assert (view.title, view.compact, view.next_step) == ("对局结束 · 第 3 名", False, None)
-    assert view.review == (
-        Line("① 第 7、8 回合 升本不补场面 → 连掉 30 血"),
-        Line("② 第 5 回合 升本不补场面"),
-        Line("③ 第 11 回合 做得好：凑出金色蚀脑怪"),
-        Line("下局重点：升本的回合也要买一张随从"),
-        Line("已保存 reviews/2026-10-11_2320_凯瑞尔·罗姆_第3名.md", "muted", role="comment"),
+    # 关键时刻每条一行、下局重点最多两行；文件路径和"生成中"只在终端和详细模式里
+    assert view.blocks == (
+        Block(
+            "lines",
+            (
+                Line("① 第 7、8 回合 升本不补场面 → 连掉 30 血", max_lines=1),
+                Line("② 第 5 回合 升本不补场面", max_lines=1),
+                Line("③ 第 11 回合 做得好：凑出金色蚀脑怪", max_lines=1),
+                Line("下局重点：升本的回合也要买一张随从", role="goal", max_lines=2),
+            ),
+        ),
     )
-    # 面板超高时先去掉路径那一行
-    assert condense(view, 1).review == view.review
-    assert condense(view, 2).review == view.review[:-1]
+    assert condense(view, 1) == view
+    assert condense(view, 2).blocks[0].lines[-1].max_lines == 1
 
 
 def test_review_without_moments_and_save_error():
     model = OverlayModel(name)
     model.on_update(GAME_OVER, [])
     model.show_review(GAME_OVER, _review(moments=(), save_error="没有权限", path=None))
-    assert model.snapshot().review == (
-        Line("这局没有触发提醒", "muted"),
-        Line("下局重点：升本的回合也要买一张随从"),
-        Line("复盘没能保存：没有权限", "muted", role="comment"),
-    )
+    assert rows(model.snapshot()) == [
+        ("", "这局没有触发提醒"),
+        ("", "下局重点：升本的回合也要买一张随从"),
+    ]
 
 
-def test_review_is_cleared_by_the_next_game_and_ignored_outside_game_over():
-    model = OverlayModel(name)
+@MODES
+def test_review_is_cleared_by_the_next_game_and_ignored_outside_game_over(detail):
+    model = OverlayModel(name, detail=detail)
     model.on_update(GAME_OVER, [])
     model.show_review(GAME_OVER, _review())
     hero = make_state(turn=0, phase=Phase.HERO_SELECT, seq=9, hero="TB_BaconShop_HERO_PH")
     model.on_update(hero, [Event(type=EventType.GAME_STARTED, turn=0)])
     model.on_update(GAME_OVER.model_copy(update={"seq": 10}), [])
-    assert model.snapshot().review == ()
+    assert model.snapshot().blocks == ()
     # 下一局已经开始了：晚到的复盘不显示
     model.on_update(T3, started(3))
     model.show_review(T3, _review())
     model.on_update(GAME_OVER.model_copy(update={"seq": 11}), [])
-    assert model.snapshot().review == ()
+    assert model.snapshot().blocks == ()
 
 
 # ---- 站位（站位建议设计文档第 6.2 节） ----
@@ -1417,8 +1475,8 @@ def pos_advice(board, *moves, turn=9):
     return PositionAdvice(state_seq=2, turn=turn, board=ids, target=ids, moves=tuple(moves))
 
 
-def t9_model():
-    model = OverlayModel(pos_name)
+def t9_model(detail=False):
+    model = OverlayModel(pos_name, detail=detail)
     model.on_update(T9_START, started(9))
     plan = Plan(source="rules", actions=(Action(type="buy", entity_id=20),))
     model.show_rules(T9_START, Advice(state_seq=1, turn=9, plan=plan))
@@ -1433,18 +1491,20 @@ SPAWN_STEP = NextStep(
     slots="场面 ○ ● ○ ○ ○ ○   拖到最左边",
     reason="亡语最早触发",
     badge="拖",
+    reason_label="为何",
 )
 
 
-def test_position_after_the_plan_is_done():
-    model = t9_model()
+@MODES
+def test_position_after_the_plan_is_done(detail):
+    model = t9_model(detail)
     view = model.snapshot()
     assert view.title == "第 9 回合 · 铸币 0 · 6 本 · 已满本"
-    assert view.rules == (
-        Line("已按建议操作完", "muted"),
-        Line("站位：把 孢林卵怪 拖到最左边 · 亡语最早触发"),
-    )
     assert view.next_step == SPAWN_STEP
+    if detail:  # 本回合：方案做完了；站位只有一步，已经在"现在"里，不再写一行
+        assert texts(view) == ["已按建议操作完"]
+    else:
+        assert view.blocks == ()  # 只有一步：没有"然后"
     # 拖完：这一步自然消失，不用等运行器
     dragged = T9.model_copy(
         update={
@@ -1455,11 +1515,9 @@ def test_position_after_the_plan_is_done():
         }
     )
     model.on_update(dragged, [])
-    view = model.snapshot()
-    assert view.rules == (Line("已按建议操作完", "muted"),)
-    assert view.next_step == NextStep("✓ 建议的步骤都做完了", tone="muted")
+    assert model.snapshot().next_step == NextStep("✓ 建议的步骤都做完了", tone="muted")
     model.show_position(dragged, pos_advice([(2, "SP"), (1, "T"), *T9_BOARD[2:]]))
-    assert model.snapshot().rules == (Line("已按建议操作完", "muted"),)
+    assert model.snapshot().next_step.text == "✓ 建议的步骤都做完了"
 
 
 def test_position_waits_for_the_plan_steps_first():
@@ -1470,40 +1528,61 @@ def test_position_waits_for_the_plan_steps_first():
     model.show_rules(rich, Advice(state_seq=1, turn=9, plan=plan))
     model.show_position(rich, pos_advice(T9_BOARD, pos_move(2, 0)))
     assert step(model) == NextStep("▶ 刷新商店", Target(button="refresh"), badge="1")
-    assert model.snapshot().rules[1] == Line("站位：把 孢林卵怪 拖到最左边 · 亡语最早触发")
+    assert labeled(model.snapshot(), "然后") == "站位 把 孢林卵怪 拖到最左边"
     # 铸币花在了别处（用户录像第 3 回合：方案说刷新，玩家买了孢林卵怪）：刷新做不了，
     # 运行器回合中途不再发"无需操作"，面板上的刷新留着，但不挡站位
     model.on_update(T9, [])
     assert step(model) == SPAWN_STEP
-    model.show_position(T9, None)
-    assert step(model) == NextStep("▶ 刷新商店", Target(button="refresh"), badge="1")
+    model.show_position(T9, None)  # 没有站位了：刷新还是做不起
+    assert step(model) == NextStep("无需操作", tone="muted")
     model.show_position(T9, pos_advice(T9_BOARD, pos_move(2, 0)))
     # 方案本来就没有动作（铸币 0）：直接是站位
     model.show_rules(T9, Advice(state_seq=1, turn=9, plan=Plan(source="rules")))
     assert step(model) == SPAWN_STEP
-    assert model.snapshot().rules[0] == Line("无需操作", "muted")
 
 
-def test_outdated_rules_buy_does_not_hide_the_position_step():
+def test_then_line_with_steps_and_a_position_to_adjust():
+    model = OverlayModel(pos_name)
+    rich = T9_START.model_copy(update={"me": T9_START.me.model_copy(update={"gold": 9})})
+    model.on_update(rich, started(9))
+    plan = Plan(
+        source="rules",
+        actions=(Action(type="upgrade"), Action(type="refresh"), Action(type="freeze")),
+    )
+    model.show_rules(rich, Advice(state_seq=1, turn=9, plan=plan))
+    model.show_position(rich, pos_advice(T9_BOARD, pos_move(2, 0)))
+    assert labeled(model.snapshot(), "然后") == "② 刷新  ③ 冻结  · 站位 把 孢林卵怪 拖到最左边"
+
+
+@MODES
+def test_outdated_rules_buy_does_not_hide_the_position_step(detail):
     # CC0 第 5 回合：规则方案说买，玩家把铸币花在了别处、只剩 1 金（米尔豪斯买一张 2 金）；
     # 运行器只在现在的规则方案里没有买、卖时才给站位，所以面板上留着的买是旧方案的
-    model = OverlayModel(pos_name)
+    model = OverlayModel(pos_name, detail=detail)
     model.on_update(T9_START, started(9))
     plan = Plan(source="rules", actions=(Action(type="buy", entity_id=20), Action(type="refresh")))
     model.show_rules(T9_START, Advice(state_seq=1, turn=9, plan=plan))
     poor = T9_START.model_copy(update={"seq": 2, "me": T9_START.me.model_copy(update={"gold": 1})})
     model.on_update(poor, [])
-    assert step(model).text == "▶ 买 左数第 1 个 海盗"  # 还没有站位：照旧
+    assert step(model) == NextStep("无需操作", tone="muted")  # 还没有站位：买不起的买不当下一步
     model.show_position(poor, pos_advice(T9_BOARD, pos_move(2, 0)))
     assert step(model) == SPAWN_STEP
-    # AI 的买照常排在前面（规则不买的牌 AI 可能会买，比如酒馆法术）
+    # AI 的买照常排在前面（规则不买的牌 AI 可能会买，比如酒馆法术），只要买得起
     ai = Plan(source="llm", actions=(Action(type="buy", entity_id=20),))
     model.show_ai(poor, Advice(state_seq=2, turn=9, plan=ai), False)
-    assert step(model).text == "▶ 买 左数第 1 个 海盗"
+    assert step(model) == SPAWN_STEP  # 1 金买不起 3 金的随从：AI 的方案让路
+    from factory import shop_spell
+
+    spell = poor.model_copy(update={"seq": 3, "shop": (*poor.shop, shop_spell(22, "S", 1))})
+    model.on_update(spell, [])
+    ai = Plan(source="llm", actions=(Action(type="buy", entity_id=22),))
+    model.show_ai(spell, Advice(state_seq=3, turn=9, plan=ai), False)
+    assert step(model).text == "▶ 买 左数第 2 个 S（法术）"
 
 
-def test_position_does_not_jump_the_queue_while_waiting_for_advice():
-    model = OverlayModel(pos_name)
+@MODES
+def test_position_does_not_jump_the_queue_while_waiting_for_advice(detail):
+    model = OverlayModel(pos_name, detail=detail)
     model.on_update(T9, started(9))
     model.show_position(T9, pos_advice(T9_BOARD, pos_move(2, 0)))
     assert step(model) == NextStep("▶ 等建议…", tone="muted")  # 还没有任何方案
@@ -1517,10 +1596,9 @@ def test_two_position_steps_one_after_the_other():
     model.show_rules(state, Advice(state_seq=1, turn=9, plan=Plan(source="rules")))
     avenge = pos_move(2, 4, role="avenge", short="复仇放右边等触发")
     model.show_position(state, pos_advice(board, pos_move(4, 0), avenge))
-    assert model.snapshot().rules[1] == Line(
-        "站位：① 把 无害的骨颅 拖到最左边 · 亡语最早触发  ② 把 铁血防御机 拖到最右边 · 复仇放右边等触发"
-    )
-    assert step(model).text == "▶ 把 左数第 4 个 无害的骨颅 拖到最左边"
+    view = model.snapshot()
+    assert view.next_step.text == "▶ 把 左数第 4 个 无害的骨颅 拖到最左边"
+    assert rows(view) == [("然后", "② 把 铁血防御机 拖到最右边")]
     first = [board[3], board[0], board[1], board[2], board[4]]
     model.on_update(
         state.model_copy(
@@ -1528,14 +1606,15 @@ def test_two_position_steps_one_after_the_other():
         ),
         [],
     )
-    assert model.snapshot().rules[1] == Line("站位：把 铁血防御机 拖到最右边 · 复仇放右边等触发")
     assert step(model) == NextStep(
         "▶ 把 左数第 3 个 铁血防御机 拖到最右边",
         Target(row="board", index=2, count=5),
         slots="场面 ○ ○ ● ○ ○   拖到最右边",
         reason="复仇放右边等触发",
         badge="拖",
+        reason_label="为何",
     )
+    assert model.snapshot().blocks == ()
     both = [board[3], board[0], board[2], board[4], board[1]]
     model.on_update(
         state.model_copy(
@@ -1543,20 +1622,18 @@ def test_two_position_steps_one_after_the_other():
         ),
         [],
     )
-    assert model.snapshot().rules == (Line("无需操作", "muted"),)
     assert step(model) == NextStep("无需操作", tone="muted")
 
 
-def test_position_step_left_of_a_minion():
+@MODES
+def test_position_step_left_of_a_minion(detail):
     board = [(1, "SP"), (2, "C"), (3, "V"), (4, "SK")]
     state = make_state(turn=9, gold=0, board=pos_board(*board))
-    model = OverlayModel(pos_name)
+    model = OverlayModel(pos_name, detail=detail)
     model.on_update(state, started(9))
     model.show_rules(state, Advice(state_seq=1, turn=9, plan=Plan(source="rules")))
     model.show_position(state, pos_advice(board, pos_move(4, 1, before_id=2)))
-    assert model.snapshot().rules[1] == Line(
-        "站位：把 无害的骨颅 拖到 蚀脑怪 的左边 · 亡语最早触发"
-    )
+    assert step(model).text == "▶ 把 左数第 4 个 无害的骨颅 拖到 蚀脑怪 的左边"
     assert step(model).slots == "场面 ○ ○ ○ ●   拖到 蚀脑怪 的左边"
     done = [board[0], board[3], board[1], board[2]]
     model.on_update(
@@ -1565,11 +1642,12 @@ def test_position_step_left_of_a_minion():
         ),
         [],
     )
-    assert len(model.snapshot().rules) == 1
+    assert step(model).text == "无需操作"
 
 
-def test_position_hidden_when_the_board_has_other_minions():
-    model = t9_model()
+@MODES
+def test_position_hidden_when_the_board_has_other_minions(detail):
+    model = t9_model(detail)
     bought = T9.model_copy(
         update={
             "seq": 3,
@@ -1577,48 +1655,48 @@ def test_position_hidden_when_the_board_has_other_minions():
         }
     )
     model.on_update(bought, [])  # 又买了一个（运行器会给新的结果）：整条不显示
-    view = model.snapshot()
-    assert len(view.rules) == 1 and view.next_step.badge != "拖"
+    assert model.snapshot().next_step.badge != "拖"
     model.show_position(bought, None)
-    assert len(model.snapshot().rules) == 1
+    assert model.snapshot().next_step.badge != "拖"
 
 
-def test_position_cleared_by_a_new_turn_and_kept_when_condensed():
-    model = t9_model()
-    assert condense(model.snapshot(), 2).rules[1].text.startswith("站位：")
+@MODES
+def test_position_cleared_by_a_new_turn_and_kept_when_condensed(detail):
+    model = t9_model(detail)
+    assert condense(model.snapshot(), 3, detail).next_step == SPAWN_STEP
     t10 = make_state(turn=10, gold=10, tier=6, upgrade_cost=None, seq=5, board=pos_board(*T9_BOARD))
     model.on_update(t10, started(10))
     model.show_rules(t10, Advice(state_seq=5, turn=10, plan=Plan(source="rules")))
-    assert model.snapshot().rules == (Line("无需操作", "muted"),)
+    assert step(model) == NextStep("无需操作", tone="muted")
     model.show_position(t10, None)
     assert step(model) == NextStep("无需操作", tone="muted")
 
 
-def test_position_line_after_a_rules_error():
-    model = OverlayModel(pos_name, ai_enabled=False)
+@MODES
+def test_position_after_a_rules_error(detail):
+    model = OverlayModel(pos_name, ai_enabled=False, detail=detail)
     model.on_update(T9, started(9))
     model.rules_error()
     model.show_position(T9, pos_advice(T9_BOARD, pos_move(2, 0)))
-    assert model.snapshot().rules == (
-        Line("本回合规则建议出错", "muted"),
-        Line("站位：把 孢林卵怪 拖到最左边 · 亡语最早触发"),
-    )
     # AI 没开：不会再有方案，"下一步"直接是站位
-    assert step(model) == SPAWN_STEP
+    view = model.snapshot()
+    assert (view.next_step, view.notice) == (SPAWN_STEP, "本回合规则建议出错")
     # AI 开着：等它的方案，站位不插队
-    model = OverlayModel(pos_name)
+    model = OverlayModel(pos_name, detail=detail)
     model.on_update(T9, started(9))
     model.rules_error()
     model.show_position(T9, pos_advice(T9_BOARD, pos_move(2, 0)))
     assert step(model) == NextStep("▶ 等建议…", tone="muted")
     model.ai_text(BUDGET_EXHAUSTED)  # AI 不会再来了
-    assert step(model) == SPAWN_STEP
+    view = model.snapshot()
+    assert (view.next_step, view.notice) == (SPAWN_STEP, "本局 AI 次数已用完")
 
 
-def test_unknown_refresh_cost_still_blocks_the_position_step():
+@MODES
+def test_unknown_refresh_cost_still_blocks_the_position_step(detail):
     # 不知道刷新要多少钱（refresh_cost 为 None）时，不能说它做不了
     unknown = T9.model_copy(update={"me": T9.me.model_copy(update={"refresh_cost": None})})
-    model = OverlayModel(pos_name)
+    model = OverlayModel(pos_name, detail=detail)
     model.on_update(unknown, started(9))
     plan = Plan(source="rules", actions=(Action(type="refresh"),))
     model.show_rules(unknown, Advice(state_seq=1, turn=9, plan=plan))
@@ -1629,11 +1707,6 @@ def test_unknown_refresh_cost_still_blocks_the_position_step():
 # ---- 本版本统计（本版本统计设计文档第 6.3、7.1 节） ----
 
 HERO_STATS_TITLE = "选英雄 · 本版本战绩 · Firestone"
-HERO_STATS_ROWS = (
-    Line("泰瑟兰·血望者  第 3.99 名 · 选 15% · 第 5/10"),
-    Line("洛，在世传奇  第 3.91 名 · 选 29% · 第 4/10"),
-    Line("了不起的杰弗里斯  第 4.04 名 · 选 27% · 第 7/10"),
-)
 
 
 def hero_stats(model, state):
@@ -1654,11 +1727,17 @@ def test_hero_view_with_stats():
     hero_stats(model, st)
     view = model.snapshot()
     assert view.title == HERO_STATS_TITLE
-    assert view.rules == (Line("★ 凯瑞尔·罗姆  第 3.67 名 · 选 28% · 第 2/10"), *HERO_STATS_ROWS)
+    assert rows(view) == [
+        (
+            "名次",
+            "★凯瑞尔·罗姆 3.67 · 泰瑟兰·血望者 3.99 · 洛，在世传奇 3.91 · 了不起的杰弗里斯 4.04",
+        )
+    ]
     assert view.next_step.text == "▶ 选 左数第 1 个 凯瑞尔·罗姆"  # ★ 是规则推荐，AI 优先
     model.show_hero(st, hero_advice(st, pick=91))
-    assert model.snapshot().next_step.text == "▶ 选 左数第 3 个 洛，在世传奇"
-    assert condense(model.snapshot(), 2).rules == model.snapshot().rules  # 条目总是保留
+    view = model.snapshot()
+    assert view.next_step.text == "▶ 选 左数第 3 个 洛，在世传奇"
+    assert "★洛，在世传奇 3.91" in labeled(view, "名次")  # ★ 跟着"下一步"
 
 
 @NEEDS_STATS_FIXTURES
@@ -1669,10 +1748,7 @@ def test_hero_without_stats_keeps_its_armor():
     hero_stats(model, st)  # 有英雄查不到：规则按护甲
     view = model.snapshot()
     assert view.title == HERO_STATS_TITLE
-    assert view.rules == (
-        Line("★ 凯瑞尔·罗姆  第 3.67 名 · 选 28% · 第 2/10"),
-        Line("UNKNOWN_HERO  护甲 12"),
-    )
+    assert rows(view) == [("名次", "★凯瑞尔·罗姆 3.67 · UNKNOWN_HERO 护甲 12")]
 
 
 @NEEDS_STATS_FIXTURES
@@ -1684,10 +1760,7 @@ def test_reroll_drops_the_hero_stats():
     again = hero_select_state(heroes, seq=2)
     model.on_update(again, [offered_event(again, changed=1)])
     view = model.snapshot()
-    assert (view.title, view.rules) == (
-        HERO_TITLE,
-        (Line("凯瑞尔·罗姆  护甲 10"), Line("范达尔·雷矛  护甲 12")),
-    )
+    assert (view.title, rows(view)) == (HERO_TITLE, [("护甲", "凯瑞尔·罗姆 10 · 范达尔·雷矛 12")])
     # 晚到的上一组的条目（签名不对）不显示
     from helpers import fixture_stats
 
@@ -1735,24 +1808,17 @@ def offered_trinkets(model, choice_id=6, seq=1, last="BG30_MagicItem_420"):
     return state
 
 
-TRINKET_ROWS = (
-    Line("沉没的船锚  第 4.06 名 · 选 15%", role="comment"),
-    Line("▲ 精神鞭笞者肖像  第 3.89 名 · 选 27%", role="comment"),
-    Line("神秘魔方  第 3.95 名 · 选 30%", role="comment"),
-    Line("麦迪文之书  第 3.95 名 · 选 18%", role="comment"),
-)
+TRINKET_ROW = ("小型饰品", "沉没的船锚 · ▲精神鞭笞者肖像 · 神秘魔方 · 麦迪文之书")
 
 
 @NEEDS_STATS_FIXTURES
-def test_trinket_choice_lists_each_option_with_its_stats():
+def test_trinket_choice_marks_the_best_by_stats():
     model = OverlayModel(trinket_name, ai_enabled=False)
     offered_trinkets(model)
     view = model.snapshot()
-    assert view.choice == (Line("小型饰品 · 4 选 1 · Firestone"), *TRINKET_ROWS)
+    assert rows(view) == [TRINKET_ROW]  # 统计数字只在终端和详细模式里
     # ▲ 不是推荐：AI 没开时还是让玩家自己选，不高亮
     assert view.next_step == NextStep("▶ 自己选一个（AI 没有建议）", tone="muted")
-    assert condense(view, 1).choice == view.choice
-    assert condense(view, 2).choice == (Line("小型饰品 · 4 选 1 · Firestone"),)
 
 
 @NEEDS_STATS_FIXTURES
@@ -1762,15 +1828,10 @@ def test_trinket_marks_merge_when_the_ai_picks_the_best():
     model = OverlayModel(trinket_name)
     state = offered_trinkets(model)
     model.show_choice(state, ChoiceAdvice(choice_id=6, pick=3026, reason="稳"))
-    assert model.snapshot().choice[2] == Line(
-        "★▲ 精神鞭笞者肖像  第 3.89 名 · 选 27%", role="comment"
-    )
+    assert "★▲精神鞭笞者肖像" in rows(model.snapshot())[0][1]
     model.show_choice(state, ChoiceAdvice(choice_id=6, pick=3025, reason="铸币够"))
     view = model.snapshot()
-    assert view.choice[2:4] == (
-        Line("▲ 精神鞭笞者肖像  第 3.89 名 · 选 27%", role="comment"),
-        Line("★ 神秘魔方  第 3.95 名 · 选 30%", role="comment"),
-    )
+    assert rows(view) == [("小型饰品", "沉没的船锚 · ▲精神鞭笞者肖像 · ★神秘魔方 · 麦迪文之书")]
     assert view.next_step.text == "▶ 选 左数第 3 个 神秘魔方"  # 高亮跟 AI
 
 
@@ -1778,7 +1839,7 @@ def test_trinket_marks_merge_when_the_ai_picks_the_best():
 def test_trinket_without_stats_is_listed_by_name():
     model = OverlayModel(trinket_name)
     offered_trinkets(model, last="BG99_MagicItem_NONE")
-    assert model.snapshot().choice[-1] == Line("没有数据的饰品", role="comment")
+    assert rows(model.snapshot())[0][1].endswith(" · 没有数据的饰品")
 
 
 @NEEDS_STATS_FIXTURES
@@ -1789,16 +1850,523 @@ def test_trinket_stats_cleared_with_a_new_group_or_once_chosen():
     offered_trinkets(model)
     other = choice_state(turn=6, seq=2)  # 换了一组（黑暗之赐）
     model.on_update(other, [choice_event(other)])
-    assert model.snapshot().choice == (
-        Line("黑暗之赐 · 3 选 1"),
-        Line("BG36_312 · BG33_318 · BG36_356", role="comment"),
-    )
+    assert rows(model.snapshot()) == [("黑暗之赐", "BG36_312 · BG33_318 · BG36_356")]
     offered_trinkets(model, seq=3)
     done = make_state(turn=6, seq=4, main_action=False)
     model.on_update(done, [resolved_event(6, turn=6, picked=3026)])
-    assert model.snapshot().choice == ()
+    assert model.snapshot().blocks == ()
     model.on_update(choice_state(turn=6, seq=5).model_copy(update={"choice": other.choice}), [])
-    assert "Firestone" not in model.snapshot().choice[0].text
+    assert "▲" not in rows(model.snapshot())[0][1]
+
+
+# ---- 铸币不够做第一步时换下一套方案（面板精简设计文档第 3.1 节） ----
+
+
+def _with_power(state, **kw):
+    return state.model_copy(update={"me": state.me.model_copy(update={"hero_power": power(**kw)})})
+
+
+def test_unaffordable_ai_plans_give_way_to_the_rules_plan():
+    # 用户录像第 9 回合：铸币花到 0，深度和快速的第一步都是买（3 金），规则是英雄技能（0 费）
+    model = OverlayModel(name)
+    broke = _with_power(T3.model_copy(update={"me": T3.me.model_copy(update={"gold": 0})}))
+    model.on_update(broke, started(3))
+    hp_plan = Plan(source="rules", actions=(Action(type="hero_power"),), direction="海盗")
+    model.show_rules(broke, Advice(state_seq=1, turn=3, plan=hp_plan))
+    model.show_ai(broke, llm_advice(BUY_21), False)
+    model.show_ai(broke, llm_advice(BUY_20, lane="deep", **DEEP), False)
+    view = model.snapshot()
+    assert view.next_step == NextStep("▶ 用英雄技能 定罪", Target(button="hero_power"), badge="1")
+    assert head(view) == ("规则", "")
+    # 深度分析的思路没有过期，只是操作做不了："目标"照旧
+    assert rows(view) == [("目标", "提前升 5 本找畸变核心")]
+    # 铸币回来了：深度分析又排在最前面
+    model.on_update(_with_power(T3.model_copy(update={"seq": 2})), [])
+    assert (step(model).text, model.snapshot().source) == ("▶ 买 左数第 1 个 海盗", "AI 深度")
+
+
+@MODES
+def test_unaffordable_fast_plan_falls_back_to_the_rules_plan(detail):
+    model = OverlayModel(name, detail=detail)
+    poor = T3.model_copy(update={"me": T3.me.model_copy(update={"gold": 2})})
+    model.on_update(poor, started(3))
+    model.show_rules(
+        poor,
+        Advice(state_seq=1, turn=3, plan=Plan(source="rules", actions=(Action(type="refresh"),))),
+    )
+    model.show_ai(poor, ai_advice(), False)  # 买 3 金的随从，只有 2 金
+    assert step(model) == NextStep("▶ 刷新商店", Target(button="refresh"), badge="1")
+    assert model.snapshot().source == "规则"
+
+
+@MODES
+def test_upgrade_cost_decides_whether_the_first_step_is_affordable(detail):
+    model = OverlayModel(name, detail=detail)
+    state = make_state(turn=4, gold=5, tier=3, upgrade_cost=7, shop=SHOP)
+    model.on_update(state, started(4))
+    model.show_rules(state, Advice(state_seq=1, turn=4, plan=Plan(source="rules", actions=BUY_20)))
+    model.show_ai(state, llm_advice((Action(type="upgrade"),), turn=4), False)
+    assert step(model).text == "▶ 买 左数第 1 个 海盗"  # 升本要 7 金，只有 5 金
+    unknown = state.model_copy(
+        update={"seq": 2, "me": state.me.model_copy(update={"upgrade_cost": None})}
+    )
+    model.on_update(unknown, [])  # 不知道升本多少钱：不下结论
+    assert step(model).text == "▶ 升本 → 4 本"
+
+
+@MODES
+def test_spells_are_priced_by_their_cost(detail):
+    from factory import shop_spell
+
+    model = OverlayModel(lambda c: {"S": "香蕉", "T": "宝藏"}.get(c, name(c)), detail=detail)
+    shop = (*SHOP, shop_spell(22, "S", 1), shop_spell(23, "T", 4), shop_spell(24, "S", None))
+    state = make_state(turn=3, gold=2, tier=2, upgrade_cost=6, shop=shop)
+    model.on_update(state, started(3))
+    model.show_rules(
+        state,
+        Advice(state_seq=1, turn=3, plan=Plan(source="rules", actions=(Action(type="refresh"),))),
+    )
+    model.show_ai(state, llm_advice((Action(type="buy", entity_id=22),)), False)
+    assert step(model).text == "▶ 买 左数第 3 个 香蕉（法术）"  # 1 金的法术买得起
+    model.show_ai(state, llm_advice((Action(type="buy", entity_id=23),)), False)
+    assert step(model).text == "▶ 刷新商店"  # 4 金的法术买不起
+    model.show_ai(state, llm_advice((Action(type="buy", entity_id=24),)), False)
+    assert step(model).text == "▶ 买 左数第 5 个 香蕉（法术）"  # 没有价格：不下结论
+
+
+@MODES
+def test_buy_cost_follows_the_hero(detail):
+    state = make_state(turn=3, gold=3, tier=2, upgrade_cost=6, shop=SHOP)
+    refresh = Plan(source="rules", actions=(Action(type="refresh"),))
+    texts = []
+    for buy_cost in (None, lambda hero: 4 if hero == "TB_BaconShop_HERO_49" else 3):
+        model = (
+            OverlayModel(name, detail=detail)
+            if buy_cost is None
+            else OverlayModel(name, buy_cost=buy_cost, detail=detail)
+        )
+        model.on_update(state, started(3))
+        model.show_rules(state, Advice(state_seq=1, turn=3, plan=refresh))
+        model.show_ai(state, ai_advice(), False)
+        texts.append(step(model).text)
+    # 默认买牌 3 金：买得起；这个英雄买牌要 4 金：买不起，换成规则的刷新
+    assert texts == ["▶ 买 左数第 2 个 蚀脑怪", "▶ 刷新商店"]
+
+
+@MODES
+def test_hero_power_cost_counts_and_the_rules_plan_is_not_skipped_for_another(detail):
+    model = OverlayModel(name, detail=detail)
+    state = _with_power(make_state(turn=3, gold=1, tier=2, upgrade_cost=6, shop=SHOP), cost=2)
+    model.on_update(state, started(3))
+    hp = Plan(source="rules", actions=(Action(type="hero_power"),))
+    model.show_rules(state, Advice(state_seq=1, turn=3, plan=hp))
+    # 规则的方案不让给别的方案；但它剩下的第一步做不起（技能 2 费、只有 1 金）时不当"下一步"
+    view = model.snapshot()
+    assert (view.next_step, view.source) == (NextStep("无需操作", tone="muted"), "规则")
+    refresh = Plan(source="rules", actions=(Action(type="refresh"),))
+    model.show_rules(state, Advice(state_seq=1, turn=3, plan=refresh))
+    model.show_ai(state, llm_advice((Action(type="hero_power"),)), False)
+    assert step(model).text == "▶ 刷新商店"  # AI 的技能 2 费，只有 1 金：换成规则的
+
+
+# ---- 符号 ----
+
+
+def _all_views(detail=False):
+    """各种状态下的面板（招募、站位、选项、选英雄、战斗、复盘）。"""
+    views = []
+    model = OverlayModel(name, detail=detail)
+    model.on_update(T10, started(10))
+    model.show_rules(T10, rules_advice(turn=10))
+    views.append(model.snapshot())
+    model.show_ai(T10, llm_advice(BUY_21, turn=10, **DEEP), False)
+    views.append(model.snapshot())
+    model.on_update(COMBAT_10, [])
+    views.append(model.snapshot())
+    views.append(t9_model(detail).snapshot())
+    hero = OverlayModel(name, detail=detail)
+    st = choosing(hero)
+    hero.show_hero(st, rules_pick(st))
+    hero.show_hero(st, hero_advice(st, pick=91, comments=COMMENTS))
+    views.append(hero.snapshot())
+    choice = OverlayModel(choice_name, detail=detail)
+    cs = offered_choice(choice)
+    choice.show_choice(cs, choice_advice())
+    views.append(choice.snapshot())
+    over = OverlayModel(name, detail=detail)
+    over.on_update(GAME_OVER, [])
+    over.show_review(GAME_OVER, _review())
+    views.append(over.snapshot())
+    return views
+
+
+@MODES
+def test_symbols_mean_one_thing_each(detail):
+    # ▶ 只在"下一步"；★ 只标推荐的那个（每个视图至多一个）；不再有 ▶★
+    for view in _all_views(detail):
+        texts = [view.title, view.source, view.source_note]
+        texts += [line.text for block in view.blocks for line in block.lines]
+        texts += [line.label for block in view.blocks for line in block.lines]
+        assert not any("▶" in text for text in texts), view
+        assert sum(text.count("★") for text in texts) <= 1, view
+        assert "▶★" not in str(view)
+
+
+# ---- 详细模式（[overlay] detail = true，面板精简设计文档第 5 节） ----
+
+
+def detailed(namer=name, **kw):
+    return OverlayModel(namer, detail=True, **kw)
+
+
+def block(view, kind):
+    return next((b for b in view.blocks if b.kind == kind), None)
+
+
+def test_detail_recruit_lists_each_step_the_goal_and_what_the_rules_say_differently():
+    model = detailed()
+    ready = _with_power(T3)
+    model.on_update(ready, started(3))
+    rules = Plan(
+        source="rules",
+        actions=(
+            Action(type="buy", entity_id=20),
+            Action(type="hero_power"),
+            Action(type="refresh"),
+        ),
+        direction="海盗",
+    )
+    model.show_rules(ready, Advice(state_seq=1, turn=3, plan=rules))
+    model.show_ai(ready, llm_advice((*BUY_21, Action(type="refresh")), lane="deep", **DEEP), False)
+    view = model.snapshot()
+    assert head(view) == ("AI 深度", "")
+    assert view.blocks == (
+        Block(
+            "plan",
+            (
+                Line("① 买 蚀脑怪 3/4", "text", "step"),  # 完整写法；"下一步"那一步是正文色
+                Line("② 刷新", "dim", "step"),
+                Line("目标：提前升 5 本找畸变核心", role="goal"),
+                # 只列规则有、AI 没有的步（短写）；刷新两边都有，不列
+                Line("规则另议：买 海盗 · 用技能 定罪", "muted", "alt", max_lines=1),
+            ),
+            label="本回合",
+        ),
+        Block(
+            "aside",
+            (Line("要找 神明、祭品", "dim", "aside", max_lines=2),),
+            label="留意",
+            small=True,
+        ),
+    )
+
+
+def test_detail_rules_plan_has_no_alternative_and_shows_its_status():
+    model = detailed()
+    model.on_update(T3, started(3))
+    model.show_rules(T3, rules_advice())
+    assert block(model.snapshot(), "plan").lines == (
+        Line("① 买 海盗 3/2", "text", "step"),
+        Line("② 刷新", "dim", "step"),
+        Line("方向：海盗", role="goal"),  # 没有 AI 的方案：规则的方向
+    )
+    model.on_update(BOUGHT, [])
+    assert texts(model.snapshot()) == ["② 刷新", "方向：海盗"]
+    model.on_update(REFRESHED, [])  # 商店换了一批：不能说成"已按建议操作完"
+    assert block(model.snapshot(), "plan").lines[0] == Line("商店已刷新", "muted", "step")
+    plan = Plan(source="rules", actions=(Action(type="buy", entity_id=20),))
+    model.show_rules(T3, Advice(state_seq=1, turn=3, plan=plan))
+    model.on_update(BOUGHT.model_copy(update={"seq": 9}), [])  # 商店里还剩 #21，没有刷新
+    assert texts(model.snapshot()) == ["已按建议操作完"]
+    model.show_rules(T3, Advice(state_seq=1, turn=3, plan=Plan(source="rules")))
+    assert texts(model.snapshot()) == ["无需操作"]
+
+
+def test_detail_many_steps_are_cut_after_five():
+    model = detailed()
+    model.on_update(T3, started(3))
+    steps = tuple(Action(type="refresh") for _ in range(6))
+    model.show_ai(T3, ai_advice(actions=steps), False)
+    assert texts(model.snapshot()) == ["① 刷新", "② 刷新", "③ 刷新", "④ 刷新", "⑤ 刷新", "…"]
+
+
+def test_detail_spent_gold_shows_the_rules_step_the_position_and_the_goal():
+    # 用户录像第 9 回合（recruit9_position）：铸币 0，深度分析的买做不起，换成规则的英雄技能
+    state = _with_power(
+        T9_START.model_copy(update={"me": T9_START.me.model_copy(update={"gold": 0})})
+    )
+    model = detailed(pos_name)
+    model.on_update(state, started(9))
+    model.show_rules(
+        state,
+        Advice(
+            state_seq=1, turn=9, plan=Plan(source="rules", actions=(Action(type="hero_power"),))
+        ),
+    )
+    model.show_ai(state, llm_advice(BUY_20, turn=9, lane="deep", **DEEP), False)
+    model.show_position(state, pos_advice(T9_BOARD, pos_move(2, 0)))
+    view = model.snapshot()
+    assert (view.next_step.text, head(view)) == ("▶ 用英雄技能 定罪", ("规则", ""))
+    assert block(view, "plan").lines == (
+        Line("① 使用英雄技能 定罪", "text", "step"),
+        Line("站位：把 孢林卵怪 拖到最左边 · 亡语最早触发", "dim"),
+        Line("目标：提前升 5 本找畸变核心", role="goal"),
+    )  # 显示的是规则：没有"规则另议"
+
+
+def test_detail_position_line_lists_the_moves_after_the_current_one():
+    board = [(1, "C"), (2, "IR"), (3, "V"), (4, "SK"), (5, "C")]
+    state = make_state(turn=9, gold=0, board=pos_board(*board))
+    model = detailed(pos_name)
+    model.on_update(state, started(9))
+    model.show_rules(state, Advice(state_seq=1, turn=9, plan=Plan(source="rules")))
+    avenge = pos_move(2, 4, role="avenge", short="复仇放右边等触发")
+    model.show_position(state, pos_advice(board, pos_move(4, 0), avenge))
+    assert texts(model.snapshot()) == [
+        "无需操作",
+        "站位：② 把 铁血防御机 拖到最右边 · 复仇放右边等触发",
+    ]
+
+
+def test_detail_watch_block_look_for_pairs_and_opponents():
+    notes = (
+        pool_note("C", "蚀脑怪", 2, 11),
+        pool_note("B", "海盗", 1, 14, shop=1),
+        pool_note("W", "飘荡祭品", 0, 11),
+    )
+    model = detailed()
+    model.on_update(T10, started(10))
+    model.show_rules(T10, rules_advice(turn=10).model_copy(update={"pool_notes": notes}))
+    advice = llm_advice(BUY_21, turn=10, look_for=("飘荡祭品", "深渊使者"), summary="找祭品")
+    model.show_ai(T10, advice.model_copy(update={"pool_notes": notes}), False)
+    watch = block(model.snapshot(), "aside")
+    assert (watch.label, watch.small) == ("留意", True)
+    assert [line.text for line in watch.lines] == [
+        "要找 飘荡祭品（约 11 张）、深渊使者 · 对子 蚀脑怪×2 还剩约 11 张；海盗×1 商店有 还剩约 14 张",
+        "下个对手 詹迪斯 残影 · 2 个 身材 22 · 最强 厄祖玛特 畸变×1 身材 180",
+    ]
+    model.on_update(with_rivals(T10, next_id=4).model_copy(update={"seq": 2}), [])
+    assert texts(model.snapshot())[-1] == "下个对手 布莱恩 还没见过 · 最强 厄祖玛特 畸变×1 身材 180"
+    model.on_update(with_rivals(T10, next_id=3).model_copy(update={"seq": 3}), [])
+    assert texts(model.snapshot())[-1] == "下个对手 厄祖玛特 畸变×1 身材 180 · 下个对手也是最强"
+    off = detailed(opponents=False)
+    off.on_update(T10, started(10))
+    assert block(off.snapshot(), "aside") is None  # 没有要找、对子，也不写对手
+
+
+def test_detail_empty_board_on_the_watch_line():
+    seen_empty = {2: rival(2, 20, 0, 1, 3, (), 5), 5: rival(5, 0, 0, 8, 2, (), 4)}
+    model = detailed()
+    model.on_update(with_rivals(T10, next_id=5, opponents=seen_empty), started(10))
+    assert texts(model.snapshot()) == ["下个对手 詹迪斯 残影 · 空场 · 最强 洛卡拉 空场"]
+
+
+def test_detail_look_for_is_cut_between_cards():
+    notes = (
+        pool_note("W", "飘荡祭品", 0, 11),
+        pool_note("C", "蚀脑怪", 0, 11),
+        pool_note("D", "深渊使者", 0, 12),
+        pool_note("M", "残忍的精神鞭笞者", 0, 12),
+    )
+    model = detailed()
+    model.on_update(T3, started(3))
+    look_for = ("飘荡祭品", "蚀脑怪", "深渊使者", "残忍的精神鞭笞者")
+    advice = llm_advice(BUY_21, look_for=look_for).model_copy(update={"pool_notes": notes})
+    model.show_ai(T3, advice, False)
+    assert texts(model.snapshot())[-1] == (
+        "要找 飘荡祭品（约 11 张）、蚀脑怪（约 11 张）、深渊使者（约 12 张）…"
+    )
+    model.show_ai(T3, llm_advice(BUY_21, look_for=("长" * 50,)), False)
+    assert texts(model.snapshot())[-1] == "要找 " + "长" * 37 + "…"  # 一张就放不下：按字截
+
+
+def test_detail_choice_block():
+    model = detailed(choice_name)
+    state = offered_choice(model)
+    view = model.snapshot()
+    assert view.blocks == (
+        Block(
+            "choice",
+            (
+                Line("摧心招募者", "dim", "stats"),
+                Line("怒胆喷毒鱼人", "dim", "stats"),
+                Line("泰瑞尔", "dim", "stats"),
+            ),
+            label="选择",
+            note="黑暗之赐 · 3 选 1",
+        ),
+    )
+    model.show_choice(state, choice_advice())
+    view = model.snapshot()
+    assert block(view, "choice").lines[2] == Line("★ 泰瑞尔", "text", "stats")
+    assert view.next_step.reason == "32/32 直接成主力"
+
+
+def test_detail_choice_keeps_only_the_opponents_to_watch():
+    from factory import make_choice
+
+    model = detailed()
+    model.on_update(T10, started(10))
+    model.show_ai(T10, llm_advice(BUY_21, turn=10, **DEEP), False)
+    model.on_update(T10.model_copy(update={"choice": make_choice(), "seq": 2}), [])
+    view = model.snapshot()
+    assert [b.kind for b in view.blocks] == ["choice", "aside"]  # 选项期间没有"本回合"
+    assert texts(view)[-1].startswith("下个对手 詹迪斯")
+    assert not any("要找" in text for text in texts(view))
+
+
+@NEEDS_STATS_FIXTURES
+def test_detail_trinket_stats_in_the_right_column():
+    from lscs.advisor.models import ChoiceAdvice
+
+    model = detailed(trinket_name)
+    state = offered_trinkets(model)
+    model.show_choice(state, ChoiceAdvice(choice_id=6, pick=3026, reason="稳"))
+    choose = block(model.snapshot(), "choice")
+    assert choose.note == "小型饰品 · 4 选 1 · Firestone"
+    assert choose.lines == (
+        Line("沉没的船锚", "dim", "stats", right="第 4.06 名 · 选 15%"),
+        Line("★▲ 精神鞭笞者肖像", "text", "stats", right="第 3.89 名 · 选 27%"),
+        Line("神秘魔方", "dim", "stats", right="第 3.95 名 · 选 30%"),
+        Line("麦迪文之书", "dim", "stats", right="第 3.95 名 · 选 18%"),
+    )
+
+
+def test_detail_hero_candidates_comments_and_the_rules_pick():
+    model = detailed()
+    st = choosing(model)
+    model.show_hero(st, rules_pick(st))
+    armors = ("护甲 10", "护甲 18", "护甲 19", "护甲 17")
+    names = ("凯瑞尔·罗姆", "泰瑟兰·血望者", "洛，在世传奇", "了不起的杰弗里斯")
+    assert model.snapshot().blocks == (
+        Block(
+            "heroes",
+            tuple(
+                Line(f"★ {n}" if i == 0 else n, "text" if i == 0 else "dim", "stats", right=a)
+                for i, (n, a) in enumerate(zip(names, armors, strict=True))
+            ),
+            label="备选",
+        ),
+    )
+    model.show_hero(st, hero_advice(st, pick=90, comments=COMMENTS))
+    view = model.snapshot()
+    heroes, comments = view.blocks
+    assert heroes.lines[1] == Line("★ 泰瑟兰·血望者", "text", "stats", right="护甲 18")
+    assert heroes.lines[-1] == Line("规则另选：凯瑞尔·罗姆", "muted", "alt", max_lines=1)
+    assert comments == Block(
+        "comments",
+        (
+            Line("泰瑟兰·血望者：要靠对子才强，前期慢", "dim", "comment"),
+            Line("洛，在世传奇：技能复杂，新手难发挥", "dim", "comment"),
+            Line("了不起的杰弗里斯：发现随机，看运气", "dim", "comment"),
+        ),
+        label="点评",
+        small=True,
+    )
+    model.show_hero(st, hero_advice(st, pick=89))  # AI 和规则选的是同一个：不另说
+    assert not any(text.startswith("规则另选") for text in texts(model.snapshot()))
+
+
+@NEEDS_STATS_FIXTURES
+def test_detail_hero_stats_in_the_right_column():
+    heroes = ((89, "BG21_HERO_000", 10, 1), (95, "UNKNOWN_HERO", 12, 2))
+    model = detailed()
+    st = choosing(model, hero_select_state(heroes))
+    hero_stats(model, st)
+    candidates = block(model.snapshot(), "heroes")
+    assert candidates.note == "Firestone"
+    assert [(line.text, line.right) for line in candidates.lines] == [
+        ("★ 凯瑞尔·罗姆", "第 3.67 名 · 选 28% · 第 2/10"),
+        ("UNKNOWN_HERO", "护甲 12"),
+    ]
+
+
+def test_detail_combat_lists_every_opponent():
+    model = detailed()
+    model.on_update(COMBAT_10, [Event(type=EventType.COMBAT_STARTED, turn=10)])
+    view = model.snapshot()
+    assert (view.title, view.compact, view.next_step) == (
+        "第 10 回合 · 战斗中 · 对手 詹迪斯",
+        False,
+        None,
+    )
+    assert view.blocks == (
+        Block(
+            "opponents",
+            (
+                Line("对手 第8名 詹迪斯 已淘汰（残影）· 第 4 回合见 2 个 · 身材 22"),
+                Line("最强 第3名 厄祖玛特 30+3 · 5本 · 畸变×1 身材 180 · 威胁 93"),
+                Line(
+                    "第1名 洛卡拉 30+9 · 5本 · 畸变×2 身材 38 · 第 9 回合见",
+                    "dim",
+                    "opponent",
+                    small=True,
+                ),
+                Line("第2名 布莱恩 28+0 · 4本 · 还没见过阵容", "dim", "opponent", small=True),
+                Line("已淘汰：范克里夫", "muted", "opponent", small=True),
+            ),
+            label="对手",
+        ),
+    )
+    two = condense(view, 2, detail=True)
+    assert two.blocks[0].lines == view.blocks[0].lines[:2]  # 正在打的和最强总是保留
+
+
+def test_detail_combat_current_strongest_and_a_board_captured_this_turn():
+    model = detailed()
+    model.on_update(with_rivals(COMBAT_10, next_id=3), [])
+    lines = model.snapshot().blocks[0].lines
+    assert lines[0] == Line(
+        "对手·最强 第3名 厄祖玛特 30+3 · 5本 · 畸变×1 身材 180 · 第 8 回合见 · 威胁 93"
+    )
+    assert not any(line.text.startswith("最强") for line in lines)
+    seen = dict(RIVALS)
+    seen[5] = rival(5, 0, 0, 8, 2, GHOST_BOARD[:1], 10)  # 第一次攻击时截到本回合的阵容
+    model.on_update(with_rivals(COMBAT_10, opponents=seen).model_copy(update={"seq": 6}), [])
+    first = model.snapshot().blocks[0].lines[0]
+    assert first == Line("对手 第8名 詹迪斯 已淘汰（残影）· 本回合见 1 个 · 身材 14")
+
+
+def test_detail_review_keeps_the_path_and_the_pending_line():
+    model = detailed()
+    model.on_update(GAME_OVER, [])
+    model.show_review(GAME_OVER, _review(ai_state="pending"))
+    (review,) = model.snapshot().blocks
+    assert (review.kind, review.label) == ("review", "复盘")
+    assert [line.text for line in review.lines][-2:] == [
+        "已保存 reviews/2026-10-11_2320_凯瑞尔·罗姆_第3名.md",
+        "AI 复盘生成中…",
+    ]
+
+
+def test_condense_levels_in_detail_mode():
+    model = detailed()
+    ready = _with_power(T10)
+    model.on_update(ready, started(10))
+    rules = Plan(source="rules", actions=(Action(type="hero_power"),))
+    model.show_rules(ready, Advice(state_seq=1, turn=10, plan=rules))
+    model.show_ai(ready, llm_advice(BUY_21, turn=10, **DEEP), False)
+    view = model.snapshot()
+    assert [b.kind for b in view.blocks] == ["plan", "aside"]
+    assert condense(view, 0, detail=True) == view
+    one = condense(view, 1, detail=True)
+    assert [b.kind for b in one.blocks] == ["plan"]  # 先去掉"留意"
+    assert one.blocks[0] == view.blocks[0]
+    two = condense(view, 2, detail=True)
+    assert [line.role for line in two.blocks[0].lines] == ["step", "goal"]  # 再去掉"规则另议"
+    assert two.blocks[0].lines[-1].max_lines == 0
+    three = condense(view, 3, detail=True)
+    assert three.blocks[0].lines[-1].max_lines == 1  # 目标只留一行
+    assert [reason_lines(level, detail=True) for level in range(4)] == [2, 2, 2, 1]
+    # 选英雄：先去掉点评，再去掉右列和"规则另选"
+    hero = detailed()
+    st = choosing(hero)
+    hero.show_hero(st, rules_pick(st))
+    hero.show_hero(st, hero_advice(st, pick=90, comments=COMMENTS))
+    view = hero.snapshot()
+    assert [b.kind for b in condense(view, 1, detail=True).blocks] == ["heroes"]
+    heroes = condense(view, 2, detail=True).blocks[0]
+    assert len(heroes.lines) == 4 and all(line.right == "" for line in heroes.lines)
 
 
 # ---- 战斗结果的横幅：面板模型只把它放进快照（规则见 test_overlay_banner.py）----
@@ -1830,12 +2398,13 @@ def settled(result):
     return [Event(type=EventType.COMBAT_RESULT, turn=result.turn)]
 
 
-def test_banner_rides_along_and_the_combat_view_does_not_change():
+@MODES
+def test_banner_rides_along_and_the_combat_view_does_not_change(detail):
     from dataclasses import replace
 
     from lscs.overlay.banner import Banner
 
-    model = OverlayModel(name)
+    model = OverlayModel(name, detail=detail)
     model.on_update(COMBAT_10, [Event(type=EventType.COMBAT_STARTED, turn=10)])
     before = model.snapshot()
     assert before.banner is None  # 结算之前没有横幅
@@ -1846,8 +2415,10 @@ def test_banner_rides_along_and_the_combat_view_does_not_change():
     assert after.version == before.version + 1
     assert replace(after, banner=None, version=0) == replace(before, version=0)  # 面板一字不变
     assert after.title == "第 10 回合 · 战斗中 · 对手 詹迪斯"
-    for level in range(3):
-        assert condense(after, level).banner == after.banner
+    # 战斗中的面板（两种模式）从不写结果
+    assert not any("赢" in t or "掉 5 血" in t for t in [after.title, *texts(after)])
+    for level in range(4):
+        assert condense(after, level, detail).banner == after.banner
 
 
 def test_banner_switch_and_clock_reach_the_banner():
@@ -1869,3 +2440,76 @@ def test_banner_switch_and_clock_reach_the_banner():
     now[0] = 120.0
     model.on_update(over.model_copy(update={"seq": 2}), [])
     assert model.snapshot().banner is None
+
+
+@MODES
+def test_stale_rules_buy_at_zero_gold_is_not_the_next_step(detail):
+    # 运行器回合中途不发"无需操作"：铸币花在了别处、又没有站位要调时，规则方案留着的"买"
+    # 做不了，不能当"下一步"（也不框商店里的牌）；AI 的"目标"照旧
+    model = OverlayModel(name, detail=detail)
+    model.on_update(T3, started(3))
+    model.show_rules(T3, rules_advice())
+    model.show_ai(T3, ai_advice(summary="先保血"), False)
+    broke = T3.model_copy(update={"seq": 2, "me": T3.me.model_copy(update={"gold": 0})})
+    model.on_update(broke, [])
+    view = model.snapshot()
+    assert view.next_step == NextStep("无需操作", tone="muted")
+    assert view.source == "规则"
+    if detail:  # 本回合不再列做不了的步，也没有"规则另议"
+        assert texts(view) == ["目标：先保血"]
+    else:
+        assert rows(view) == [("目标", "先保血")]
+    # 铸币又够了（比如卖了随从）：照常是规则的第一步
+    model.on_update(T3.model_copy(update={"seq": 3}), [])
+    assert step(model).text == "▶ 买 左数第 2 个 蚀脑怪"  # AI 的方案又做得起了
+
+
+def test_detail_outdated_rules_steps_are_dropped_when_the_position_takes_over():
+    # 规则方案里的买已经做不了（铸币花在了别处），站位成了"下一步"：本回合不再列旧的步
+    model = detailed(pos_name)
+    model.on_update(T9_START, started(9))
+    plan = Plan(source="rules", actions=(Action(type="buy", entity_id=20), Action(type="refresh")))
+    model.show_rules(T9_START, Advice(state_seq=1, turn=9, plan=plan))
+    poor = T9_START.model_copy(update={"seq": 2, "me": T9_START.me.model_copy(update={"gold": 1})})
+    model.on_update(poor, [])
+    model.show_position(poor, pos_advice(T9_BOARD, pos_move(2, 0)))
+    view = model.snapshot()
+    assert view.next_step == SPAWN_STEP
+    assert block(view, "plan") is None  # 没有旧的"① 买 海盗""② 刷新"
+
+
+def test_first_step_unaffordable_without_enough_information():
+    from lscs.overlay.model import _first_step_unaffordable
+
+    buy = Plan(source="rules", actions=(Action(type="buy", entity_id=99),))
+    broke = T3.model_copy(update={"me": T3.me.model_copy(update={"gold": 0})})
+    assert not _first_step_unaffordable(buy, broke, 3)  # 要买的牌已经不在商店里：不下结论
+    assert not _first_step_unaffordable(
+        rules_advice().plan, broke.model_copy(update={"me": None}), 3
+    )
+    assert _first_step_unaffordable(rules_advice().plan, broke, 3)  # 对照：在商店里、0 金
+    assert not _first_step_unaffordable(Plan(source="rules"), broke, 3)  # 没有步
+
+
+@MODES
+def test_badge_and_then_numbers_follow_the_full_plan_after_a_step_is_done(detail):
+    model = OverlayModel(name, detail=detail)
+    rich = T3.model_copy(update={"me": T3.me.model_copy(update={"gold": 9})})
+    model.on_update(rich, started(3))
+    plan = Plan(
+        source="rules",
+        actions=(
+            Action(type="buy", entity_id=20),
+            Action(type="buy", entity_id=21),
+            Action(type="refresh"),
+        ),
+    )
+    model.show_rules(rich, Advice(state_seq=1, turn=3, plan=plan))
+    bought = BOUGHT.model_copy(update={"me": BOUGHT.me.model_copy(update={"gold": 6})})
+    model.on_update(bought, [])  # 第一步做完了：编号还是完整方案里的序号
+    view = model.snapshot()
+    assert (view.next_step.text, view.next_step.badge) == ("▶ 买 左数第 1 个 蚀脑怪", "2")
+    if detail:
+        assert texts(view)[:2] == ["② 买 蚀脑怪 3/4", "③ 刷新"]
+    else:
+        assert labeled(view, "然后") == "③ 刷新"

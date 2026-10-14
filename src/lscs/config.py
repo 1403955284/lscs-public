@@ -63,7 +63,9 @@ class OverlayConfig(BaseModel):
     font_size: int = 0  # 像素；0 表示按炉石窗口高度自动
     click_through: bool = True
     drag_handle: bool = True  # 面板右上角的"≡ 拖动"标签；false 不开（面板留在预设或上次拖到的位置）
-    opponents: bool = True  # 对手一览：招募时两行（下一个、最强），战斗中列出全部
+    # 对手：战斗中的"最强"一行（详细模式还有招募时"留意"的对手和战斗中的对手一览）
+    opponents: bool = True
+    detail: bool = False  # 详细模式：分区列出本回合的每一步、要找、对子和对手；默认精简
 
     @field_validator("font_size")
     @classmethod

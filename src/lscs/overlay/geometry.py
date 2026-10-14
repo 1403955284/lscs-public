@@ -11,11 +11,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
-FONT_DIVISOR = 55  # 自动字号约为客户区高度的 1/55
-MIN_FONT, MAX_FONT = 12, 22
+FONT_DIVISOR = 70  # 自动字号约为客户区高度的 1/70：1440p 的炉石窗口约 20 像素，1080p 约 15
+MIN_FONT, MAX_FONT = 14, 22  # 自动字号的下限：小窗口里也不小于 14 像素
 MAX_FONT_DIVISOR = 45  # 上限随高度变大：max(22, 高度 / 45)，4K 下字不会太小
 CHARS_PER_LINE = 22  # 面板宽度按字号算：每行约 22 个汉字
-TAG_CHARS = 2.5  # 左边"规则"/"AI"标签列约 2.5 个字宽
+TAG_CHARS = 2.5  # 来源标签和缩进的余量，约 2.5 个字宽
 MAX_WIDTH_RATIO = 0.35  # 但不超过客户区宽度的 35%
 MIN_WIDTH = 160
 MAX_HEIGHT_RATIO = 0.45  # 面板最高为客户区高度的 45%，超出时界面逐级精简内容
@@ -28,6 +28,7 @@ GRIP_CHARS, GRIP_HEIGHT = 4.5, 1.4  # 拖动标签的宽、高（字号的倍数
 DRAG_THRESHOLD = 3  # 按住标签移动这么多像素才算拖（点一下不写文件）
 
 STEP_SEP = "  "  # 方案各步之间的分隔
+NAME_SEP = " · "  # 一行里列出的几个名字（选项、英雄、对手的几段）之间的分隔
 Position = str  # "right" | "left" | "top"
 Measure = Callable[[str], int]
 
@@ -221,21 +222,26 @@ def clip(lines: list[str], max_lines: int, max_width: int, measure: Measure) -> 
     return kept
 
 
-def wrap(text: str, max_width: int, measure: Measure) -> list[str]:
+def wrap(text: str, max_width: int, measure: Measure, names: bool = True) -> list[str]:
     """按像素宽度把文字断成多行（Tk 的 wraplength 对中文断行不可靠，所以自己断）。
-    方案的各步之间用两个空格分隔，优先在步与步之间断开。"""
+    方案的各步之间用两个空格分隔、名字之间用" · "分隔：优先在这些地方断开（断开处的分隔符
+    不写），英雄、饰品、随从的名字不会从中间断开；一段比一整行还长时才按字断开。
+    names=False：不特意在" · "处断开（只要第一行、截掉其余时，第一行能多写几个字）。"""
     lines: list[str] = []
     for raw in text.split("\n"):
         line = ""
         for segment in raw.split(STEP_SEP):
-            joined = f"{line}{STEP_SEP}{segment}" if line else segment
-            if measure(joined) <= max_width:
-                line = joined
-                continue
-            if line:
-                lines.append(line)
-            parts = _wrap_line(segment, max_width, measure)
-            lines.extend(parts[:-1])
-            line = parts[-1]
+            pieces = segment.split(NAME_SEP) if names else [segment]
+            for i, piece in enumerate(pieces):
+                sep = NAME_SEP if i else STEP_SEP
+                joined = f"{line}{sep}{piece}" if line else piece
+                if measure(joined) <= max_width:
+                    line = joined
+                    continue
+                if line:
+                    lines.append(line)
+                parts = _wrap_line(piece, max_width, measure)
+                lines.extend(parts[:-1])
+                line = parts[-1]
         lines.append(line)
     return lines

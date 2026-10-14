@@ -895,11 +895,25 @@ def test_watch_with_overlay_feeds_panel_and_stops_on_ctrl_c(
         highlights.append((highlight, banner))
         return FakeWindow()
 
+    import lscs.cli
+    from lscs.advisor.rules_config import RulesConfig
+
+    panels = []
+
+    class RecordingModel(lscs.cli.OverlayModel):
+        def __init__(self, *args, **kwargs):
+            panels.append(kwargs)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(lscs.cli, "OverlayModel", RecordingModel)
     monkeypatch.setattr(lscs.overlay.app, "create_tk_window", create)
     argv, calls = _watch_setup(monkeypatch, tmp_path, mini_lines, "[highlight]\nshop_y = 0.3\n")
     assert main(argv) == 0
     assert highlights[0][0].shop_y == 0.3  # config.toml 的 [highlight] 交给面板窗口
     assert highlights[0][1] is True  # [combat_result] 默认开：高亮窗口画战斗结果的横幅
+    # 面板按规则配置的买牌价判断"做得起"；[overlay] detail 交给面板的数据模型
+    assert panels[0]["buy_cost"].__func__ is RulesConfig.buy_cost_for
+    assert panels[0]["detail"] is False
     out = capsys.readouterr().out
     assert "悬浮面板已打开（测试）" in out
     assert "📋 规则：① 买 刷新畸体 1/4（商店里身材最好，有嘲讽）" in out  # 终端照常
@@ -1177,13 +1191,14 @@ def test_overlay_opponents_setting_reaches_the_panel():
     rival = OpponentView(player_id=3, hero_card_id="H", health=30, armor=0, place=1, tavern_tier=2)
     combat = make_state(turn=4, phase=Phase.COMBAT)
     combat = combat.model_copy(update={"opponents": {3: rival}, "next_opponent_id": 3})
-    compact = {}
+    titles = {}
     for enabled in (True, False):
         cfg = AppConfig(overlay=OverlayConfig(opponents=enabled))
         model, _ = lscs.cli._displays(lambda c: c, cfg, None)
         model.on_update(combat, [])
-        compact[enabled] = model.snapshot().compact
-    assert compact == {True: False, False: True}  # 关掉时战斗中还是一行标题
+        titles[enabled] = model.snapshot().title
+    # 关掉时战斗中的标题不写正在打的对手
+    assert titles == {True: "第 4 回合 · 战斗中 · 对手 H", False: "第 4 回合 · 战斗中"}
 
 
 def test_replay_with_advice_prints_and_saves_the_rules_review(capsys):

@@ -166,6 +166,43 @@ def test_describe_hero_power_target_when_requirement_is_unknown():
     assert describe_action(action, state, name) == "使用英雄技能 瞄准 → 小鬼 1/1"
 
 
+def test_describe_action_short_for_the_panel():
+    # 悬浮面板的"然后"和"规则另议"用短写：不带身材、"使用英雄技能"写成"用技能"
+    state = STATE.model_copy(
+        update={
+            "me": STATE.me.model_copy(
+                update={"hero_power": power("AIM", targets=(10,)), "tavern_tier": 3}
+            )
+        }
+    )
+
+    def short(action):
+        return describe_action(action, state, name, reasons=False, short=True)
+
+    assert short(Action(type="buy", entity_id=20, reason="好")) == "买 海盗"
+    assert short(Action(type="buy", entity_id=30)) == "买 香蕉（法术）"
+    assert short(Action(type="buy", entity_id=99)) == "买 #99"
+    assert short(Action(type="sell", entity_id=10)) == "卖 小鬼"
+    assert short(Action(type="sell", entity_id=99)) == "卖 #99"
+    assert short(Action(type="upgrade")) == "升本 → 4 本"
+    assert short(Action(type="hero_power", entity_id=10)) == "用技能 瞄准 → 小鬼"
+    assert short(Action(type="hero_power", entity_id=99)) == "用技能 瞄准 → #99"
+    assert short(Action(type="refresh")) == "刷新"
+    assert short(Action(type="freeze")) == "冻结"
+    plain = make_state(hero_power_state=power())
+    assert describe_action(Action(type="hero_power"), plain, name, short=True) == "用技能 定罪"
+    assert describe_action(Action(type="hero_power"), make_state(), name, short=True) == "用技能"
+    # 理由照常跟在后面（面板不用，但参数是独立的）
+    assert describe_action(Action(type="refresh", reason="找牌"), state, name, short=True) == (
+        "刷新（找牌）"
+    )
+    # short=False 和原来逐字相同
+    assert describe_action(Action(type="buy", entity_id=30), state, name) == "买 香蕉（法术，1 金）"
+    assert describe_action(Action(type="hero_power", entity_id=10), state, name) == (
+        "使用英雄技能 瞄准 → 小鬼 1/1"
+    )
+
+
 def test_show_ai_lines_for_analysis_direction_and_look_for():
     out = []
     display = AdviceDisplay(name, out.append)

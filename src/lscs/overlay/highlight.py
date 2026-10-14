@@ -230,7 +230,8 @@ class HighlightWindow:
         px = banner_font_px(client, aspect)
         font = self._font(px)
         limit = max(banner_text_width(client, aspect, px), 1)
-        text = clip(wrap(banner.text, limit, font.measure), 1, limit, font.measure)[0]
+        lines = wrap(banner.text, limit, font.measure, names=False)
+        text = clip(lines, 1, limit, font.measure)[0]
         box = banner_box(client, aspect, font.measure(text), px)
         x0, y0 = box.x - client.x, box.y - client.y
         x1, y1 = x0 + box.width, y0 + box.height
