@@ -36,6 +36,9 @@
 - 回答解析不了或方案不合法时，把原因发回去让 AI 改正一次（AI 自我改正设计文档第 3 节，
   repair_invalid 打开时）：多轮对话，前缀和原请求相同；只在请求还是当前的、离截止时间还有
   REPAIR_MIN_SECONDS 秒、预算还有时才改正，占一次调用。深度这一路改正时不开思考。
+- 本版本统计（本版本统计设计文档第 8 节第 3 条）：生成局面消息时取，第一次取到之后整局复用
+  （后台在对局中途换了也不会让这局的前缀变来变去；选英雄时还没准备好的，之后的消息照样用上）；招募消息里的"本版本战绩好的随从"块
+  按本局种族缓存，和卡池块一样只在种族变化时才变。
 """
 
 from __future__ import annotations
@@ -75,6 +78,7 @@ from lscs.llm.prompt import (
     build_hero_message,
     build_hero_system_prompt,
     build_opponents_block,
+    build_stats_block,
     build_system_prompt,
     build_user_message,
     repair_text,
@@ -82,6 +86,7 @@ from lscs.llm.prompt import (
 from lscs.llm.provider import LLMError, LLMProvider, LLMResult, Thinking, Turn
 from lscs.llm.record import Recorder
 from lscs.state.models import Event, EventType, GameState, Phase
+from lscs.stats.model import MetaStats
 
 log = logging.getLogger(__name__)
 
@@ -220,8 +225,11 @@ class LLMScheduler:
         clock: Callable[[], float] = time.monotonic,
         run_async: Callable[[Callable[[], None]], None] = _run_in_thread,
         hero_debounce: float = HERO_DEBOUNCE,
+        stats: Callable[[], MetaStats | None] | None = None,
     ) -> None:
+        """stats：取本版本统计（StatsStore.get，还没准备好时返回 None）；统计关闭时为 None。"""
         self._provider = provider
+        self._stats = stats
         self._cfg = cfg
         self._cards = cards
         self._system = build_system_prompt(guide)
@@ -305,6 +313,10 @@ class LLMScheduler:
         # (酒馆回合, 对手块)：本回合第一次生成招募消息时算好，整回合复用（对手在招募中途升本、
         # 加护甲也不改），同一回合的几次调用都能命中这一段前缀缓存
         self._opponents: tuple[int, str] | None = None
+        # 本局的本版本统计：第一次取到（不是 None）之后整局复用
+        self._game_stats: MetaStats | None = None
+        # (本局种族, 战绩块)：种族变了才重算
+        self._stats_block: tuple[frozenset[str], str | None] | None = None
 
     def observe(self, state: GameState, events: Sequence[Event], ctx: TurnContext | None) -> None:
         """每次状态更新都调用；只记下要发的请求，不在这里发出。"""
@@ -516,10 +528,11 @@ class LLMScheduler:
     def _message(self, lane: _LaneState, pending: _Pending) -> str | None:
         # 先生成局面消息：出错时不占预算，也不作废在途的请求
         try:
+            stats = self._stats_for_game()
             if lane is self._hero:
-                return build_hero_message(pending.state, self._cards, pending.rerolled)
+                return build_hero_message(pending.state, self._cards, pending.rerolled, stats)
             if lane is self._choice:
-                return build_choice_message(pending.state, self._cards, self._memory)
+                return build_choice_message(pending.state, self._cards, self._memory, stats)
             assert pending.ctx is not None
             return build_user_message(
                 pending.state,
@@ -527,12 +540,32 @@ class LLMScheduler:
                 self._cards,
                 self._memory,
                 opponents_block=self._opponents_block(pending.state),
+                stats_block=self._stats_block_for(pending.state.tribes, stats),
             )
         except Exception:
             log.warning("生成 AI 局面消息时出错", exc_info=True)
             notice_lane = "choice" if lane is self._choice else None
             self._events.put(AINotice("生成 AI 局面时出错，本次跳过", notice_lane))
             return None
+
+    def _stats_for_game(self) -> MetaStats | None:
+        """本局的本版本统计：还没准备好（None）时每次生成消息都再取一次，第一次取到之后整局都用
+        这一份（后台在对局中途换了也不换，前缀不变）。取的时候出错就当这次没有。"""
+        if self._game_stats is None and self._stats is not None:
+            try:
+                self._game_stats = self._stats()
+            except Exception:
+                log.warning("取本版本统计时出错，这次的 AI 消息不用统计", exc_info=True)
+        return self._game_stats
+
+    def _stats_block_for(self, tribes: frozenset[str], stats: MetaStats | None) -> str | None:
+        if stats is None:
+            return None
+        cached = self._stats_block
+        if cached is None or cached[0] != tribes:
+            cached = (tribes, build_stats_block(self._cards, tribes, stats))
+            self._stats_block = cached
+        return cached[1]
 
     def _opponents_block(self, state: GameState) -> str:
         cached = self._opponents

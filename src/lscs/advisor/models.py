@@ -73,6 +73,28 @@ class HeroAdvice(_Frozen):
     comments: tuple[HeroComment, ...] = ()
     elapsed: float | None = None  # AI 调用耗时（秒）
     confidence: float | None = None  # AI 的把握，只记录不显示
+    # 规则按什么推荐：stats 本版本的平均名次（四个都有可靠的统计时），armor 护甲
+    basis: Literal["stats", "armor"] = "armor"
+
+
+class StatRow(_Frozen):
+    """本版本统计里的一个备选英雄或饰品（本版本统计设计文档第 6.1 节）。"""
+
+    entity_id: int
+    text: str  # 短句："第 3.67 名 · 选 28% · 第 5/116"（样本少："第 4.20 名（样本少）"）
+    score: float  # 排序用：平均名次，越小越好
+    low: bool = False  # 样本少：照样显示，不参与"战绩最好"
+
+
+class StatsNote(_Frozen):
+    """一组备选英雄或饰品选项的本版本统计（终端的 📊 块、面板的条目）。"""
+
+    kind: Literal["hero", "trinket"]
+    signature: tuple[tuple[int, str], ...] = ()  # hero：基于哪一组备选
+    choice_id: int | None = None  # trinket：基于哪一组选项
+    rows: tuple[StatRow, ...]  # 按备选 / 选项的画面顺序；没有数据的不在里面
+    best: int | None  # 战绩最好的实体（样本少的不参与；并列取靠前）
+    source: str  # MetaStats.source_text()
 
 
 class ChoiceAdvice(_Frozen):

@@ -20,6 +20,10 @@
 都做完后"下一步"是站位的第一步，高亮框住要拖的随从、徽章写"拖"。每次重画都按当前场面重新定位，
 拖完的那一步自然消失；场上的随从换了（又买了、卖了）整条不显示，等运行器的新结果。
 
+本版本统计（本版本统计设计文档第 6.3、7.1 节）：有这组备选英雄的统计时，选英雄的标题换成
+"本版本战绩 · Firestone"，规则区每个英雄写统计（查不到的仍写护甲），★ 照旧是规则推荐；弹出饰品
+时"选择"区每个选项一行带统计，▲ 标战绩最好的（不是推荐：★、"下一步"和高亮照旧只跟 AI）。
+
 对手一览（对手一览与卡池估计设计文档第 7 节）：招募时最下面的"对手"区两行（▶ 下一个对手、
 ★ 最强威胁），面板超高时最先去掉；战斗中整个面板列出所有对手。规则区多一行"对子"，
 要找的牌后面写池里还剩约几张。
@@ -43,6 +47,7 @@ from lscs.advisor.models import (
     Move,
     Plan,
     PositionAdvice,
+    StatsNote,
 )
 from lscs.advisor.names import armor_zh, choice_title, tribe_zh
 from lscs.advisor.opponents import OpponentOverview, OpponentSummary, summarize_opponents
@@ -78,6 +83,8 @@ MAX_REASON = 40  # "目标：……"（没有目标时"分析：……"）整行
 # "要找：……"整行最多几个字，按整张牌截断、后面加"…"（界面按像素折行，这里只是防止 AI 列十张牌）
 MAX_LOOK_FOR = 40
 HERO_TITLE = "选英雄 · 护甲越少越强"
+HERO_STATS_TITLE = "选英雄 · 本版本战绩 · Firestone"  # 有本版本统计时
+STATS_SOURCE = "Firestone"  # 面板上的署名（短写）
 PENDING = "分析中…"
 REPAIRING = "改正中…"  # AI 的回答不合法，正在让它改正（还在等，和"分析中…"一样）
 AI_TITLE = "AI"
@@ -440,6 +447,7 @@ class OverlayModel:
         self._overview_failed = False  # 整理对手一览出过错（只记一次警告）
         self._review: tuple[Line, ...] = ()  # 对局结束后的复盘区
         self._position: PositionAdvice | None = None  # 本回合最近一次站位建议
+        self._stats_note: StatsNote | None = None  # 这组备选英雄或饰品的本版本统计
 
     # ---- 界面线程 ----
 
@@ -459,8 +467,11 @@ class OverlayModel:
                 self._review = ()
             if any(e.type == EventType.HEROES_OFFERED for e in events):
                 self._hero_ai = ()  # 新的一组备选（重随）：上一组的推荐、错误和提示都不再显示
+                self._stats_note = None
             if state.choice is None or any(e.type == EventType.CHOICE_OFFERED for e in events):
                 self._choice_ai = ()  # 选完了，或者换了一组
+                if self._stats_note is not None and self._stats_note.kind == "trinket":
+                    self._stats_note = None
             if state.phase in (Phase.RECRUIT, Phase.COMBAT):
                 self._enter_turn(state.turn)
             else:
@@ -572,6 +583,14 @@ class OverlayModel:
             self._review = review_lines(review)
             self._commit()
 
+    # ---- 本版本统计 ----
+
+    def show_stats(self, state: GameState, note: StatsNote) -> None:
+        """这组备选英雄或饰品的本版本统计；只在签名（选项编号）对得上时显示。"""
+        with self._lock:
+            self._stats_note = note
+            self._commit()
+
     # ---- 选英雄 ----
 
     def show_hero(self, state: GameState, advice: HeroAdvice, agrees: bool = False) -> None:
@@ -606,6 +625,7 @@ class OverlayModel:
             self._hero_ai = ()
             self._choice_ai = ()
             self._position = None
+            self._stats_note = None
 
     def _remaining(self, entry: _PlanEntry, state: GameState) -> Plan:
         if state is entry.base or state.turn != entry.base.turn:
@@ -756,14 +776,35 @@ class OverlayModel:
         return None
 
     def _choice_lines(self, choice: Choice) -> tuple[Line, ...]:
-        """选择区：第一行"小型饰品 · 4 选 1"，下一行按顺序列出选项名，★ 标在 AI 推荐的前面。"""
+        """选择区：第一行"小型饰品 · 4 选 1"，下一行按顺序列出选项名，★ 标在 AI 推荐的前面。
+        有这组饰品的本版本统计时，标题加"· Firestone"，每个选项一行写统计，▲ 标战绩最好的。"""
         advice = self._choice_advice(choice)
         star = advice.pick if advice is not None else None
+        note = self._stats_note
+        if note is not None and note.kind == "trinket" and note.choice_id == choice.id:
+            return self._choice_stats_lines(choice, note, star)
         names = " · ".join(
             ("★" if o.entity_id == star else "") + self._name(o.card_id) for o in choice.options
         )
         title = f"{choice_title(choice, self._name)} · {len(choice.options)} 选 1"
         return (Line(title), Line(names, role="comment"))
+
+    def _choice_stats_lines(
+        self, choice: Choice, note: StatsNote, star: int | None
+    ) -> tuple[Line, ...]:
+        rows = {row.entity_id: row.text for row in note.rows}
+        title = f"{choice_title(choice, self._name)} · {len(choice.options)} 选 1 · {STATS_SOURCE}"
+        lines = [Line(title)]
+        for option in choice.options:
+            marks = ("★" if option.entity_id == star else "") + (
+                "▲" if option.entity_id == note.best else ""
+            )
+            text = f"{marks} " if marks else ""
+            text += self._name(option.card_id)
+            if option.entity_id in rows:
+                text += f"  {rows[option.entity_id]}"
+            lines.append(Line(text, role="comment"))
+        return tuple(lines)
 
     def _choice_step(self, choice: Choice) -> NextStep:
         advice = self._choice_advice(choice)
@@ -948,9 +989,14 @@ class OverlayModel:
             return OverlayView(title=IDLE)
         rules = self._hero_rules
         star = rules.pick if rules is not None and rules.signature == select.signature() else None
+        note = self._stats_note
+        if note is not None and (note.kind != "hero" or note.signature != select.signature()):
+            note = None  # 上一组备选的（重随了）
+        stats = {row.entity_id: row.text for row in note.rows} if note is not None else {}
         rows = tuple(
             Line(
-                f"{'★ ' if h.entity_id == star else ''}{self._name(h.card_id)}  {armor_zh(h.armor)}"
+                f"{'★ ' if h.entity_id == star else ''}{self._name(h.card_id)}  "
+                + stats.get(h.entity_id, armor_zh(h.armor))
             )
             for h in select.offered
         )
@@ -960,7 +1006,7 @@ class OverlayModel:
         elif not ai and not self._ai_enabled:
             ai = (Line("AI 未开启", "muted"),)
         return OverlayView(
-            title=HERO_TITLE,
+            title=HERO_STATS_TITLE if note is not None else HERO_TITLE,
             compact=False,
             rules=rows,
             ai=ai,

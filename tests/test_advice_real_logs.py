@@ -3,7 +3,7 @@
 from pathlib import Path
 
 import pytest
-from helpers import NEEDS_USER_LOG, REAL_LOG, USER_LOG
+from helpers import NEEDS_STATS_FIXTURES, NEEDS_USER_LOG, REAL_LOG, USER_LOG
 
 from lscs.advisor.context import build_context
 from lscs.advisor.display import AdviceDisplay
@@ -114,3 +114,77 @@ def test_main_action_starts_with_recruit_started(path):
         else:
             assert state.main_action == (state.turn in started), (state.turn, state.seq)
     assert recruit_updates > len(started) > 0
+
+
+# ---- 本版本统计（本版本统计设计文档第 3.5、12 节）：用夹具里的统计回放两份真实日志 ----
+
+
+class StatsTap:
+    """只记下本版本统计的条目和选英雄的规则建议。"""
+
+    def __init__(self):
+        self.notes, self.heroes = [], []
+
+    def show_stats(self, state, note):
+        self.notes.append(note)
+
+    def show_hero(self, state, advice, agrees=False):
+        self.heroes.append(advice)
+
+    def __getattr__(self, method):
+        return lambda *args: None
+
+
+def replay_with_stats(path):
+    from helpers import fixture_stats
+
+    stats = fixture_stats()
+    tap = StatsTap()
+    runner = AdviceRunner(RULES, lambda c: c, tap, stats=lambda: stats)
+    pipeline = Pipeline(StateTracker(load_pool_config(DEFAULT_POOL)), runner.on_update)
+    for line in read_log_lines(path):
+        pipeline.push(line)
+    pipeline.flush()
+    return tap
+
+
+@NEEDS_USER_LOG
+@NEEDS_STATS_FIXTURES
+def test_user_game_hero_and_trinket_stats():
+    tap = replay_with_stats(USER_LOG)
+    hero, early, late = tap.notes  # 选英雄一次，两次饰品；技能升级、黑暗之赐、三连不出条目
+    assert (hero.kind, hero.best) == ("hero", 89)
+    # 排名的分母是夹具里样本够的英雄数（10）
+    assert [(r.entity_id, r.text) for r in hero.rows] == [
+        (92, "第 4.04 名 · 选 27% · 第 7/10"),  # 了不起的杰弗里斯
+        (89, "第 3.67 名 · 选 28% · 第 2/10"),  # 凯瑞尔·罗姆
+        (90, "第 3.99 名 · 选 15% · 第 5/10"),  # 泰瑟兰·血望者
+        (91, "第 3.91 名 · 选 29% · 第 4/10"),  # 洛，在世传奇
+    ]
+    assert [(a.pick, a.basis) for a in tap.heroes] == [(89, "stats")]  # 和用户实际选的一样
+    # 第 6 回合：用户选了战绩最好的精神鞭笞者肖像
+    assert (early.kind, early.choice_id, early.best) == ("trinket", 6, 3026)
+    assert [(r.entity_id, r.text) for r in early.rows] == [
+        (3027, "第 4.06 名 · 选 15%"),  # 沉没的船锚
+        (3026, "第 3.89 名 · 选 27%"),  # 精神鞭笞者肖像
+        (3025, "第 3.95 名 · 选 30%"),  # 神秘魔方
+        (3028, "第 3.95 名 · 选 18%"),  # 麦迪文之书
+    ]
+    # 第 9 回合：邪恶试验；多彩罗盘是带 t 的那条（36068 局）
+    assert (late.choice_id, late.best) == (10, 6629)
+    assert [r.text for r in late.rows] == [
+        "第 3.64 名 · 选 27%",
+        "第 3.83 名 · 选 34%",
+        "第 3.82 名 · 选 15%",
+        "第 3.75 名 · 选 19%",
+    ]
+
+
+@NEEDS_STATS_FIXTURES
+def test_cc0_game_finds_the_skin_hero_and_recommends_vanndar():
+    tap = replay_with_stats(REAL_LOG)
+    (hero,) = tap.notes
+    assert [r.entity_id for r in hero.rows] == [92, 91, 93, 94]
+    assert hero.rows[2].text == "第 4.08 名 · 选 10% · 第 9/10"  # 米尔豪斯（_SKIN_A）
+    # 这份日志大多数英雄没有护甲，按护甲推荐不了；按统计推荐范达尔·雷矛
+    assert [(a.pick, a.basis) for a in tap.heroes] == [(94, "stats")]

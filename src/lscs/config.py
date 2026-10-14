@@ -188,6 +188,17 @@ class PositioningConfig(BaseModel):
     enabled: bool = True  # 买完牌后提示把哪个随从拖到最左 / 最右，附一句为什么
 
 
+class StatsConfig(BaseModel):
+    """本版本统计（本版本统计设计文档第 10 节）：Firestone 的公开数据，非官方，默认关闭。"""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    enabled: bool = False
+    mmr_percentile: Literal[100, 50, 25, 10, 1] = 100  # 100 全部玩家；50 前 50%……
+    period: Literal["last-patch", "past-seven"] = "last-patch"
+    cards: bool = True  # 把本版本战绩好的随从发给 AI（只给 AI，不显示）
+
+
 class AppConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -195,6 +206,7 @@ class AppConfig(BaseModel):
     overlay: OverlayConfig = OverlayConfig()
     review: ReviewConfig = ReviewConfig()
     positioning: PositioningConfig = PositioningConfig()
+    stats: StatsConfig = StatsConfig()
     highlight: HighlightConfig = HighlightConfig()
 
 

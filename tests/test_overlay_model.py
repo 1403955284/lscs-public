@@ -1,6 +1,7 @@
 import threading
 
 from factory import hero_select_state, make_state, minion, offered_event, power, shop_minion
+from helpers import NEEDS_STATS_FIXTURES
 
 from lscs.advisor.models import Action, Advice, HeroAdvice, HeroComment, Plan
 from lscs.llm.notices import AUTH_DISABLED, BUDGET_EXHAUSTED
@@ -1623,3 +1624,178 @@ def test_unknown_refresh_cost_still_blocks_the_position_step():
     model.show_rules(unknown, Advice(state_seq=1, turn=9, plan=plan))
     model.show_position(unknown, pos_advice(T9_BOARD, pos_move(2, 0)))
     assert step(model) == NextStep("▶ 刷新商店", Target(button="refresh"), badge="1")
+
+
+# ---- 本版本统计（本版本统计设计文档第 6.3、7.1 节） ----
+
+HERO_STATS_TITLE = "选英雄 · 本版本战绩 · Firestone"
+HERO_STATS_ROWS = (
+    Line("泰瑟兰·血望者  第 3.99 名 · 选 15% · 第 5/10"),
+    Line("洛，在世传奇  第 3.91 名 · 选 29% · 第 4/10"),
+    Line("了不起的杰弗里斯  第 4.04 名 · 选 27% · 第 7/10"),
+)
+
+
+def hero_stats(model, state):
+    from helpers import fixture_stats
+
+    from lscs.advisor.hero_rules import rule_hero_pick
+    from lscs.advisor.stats_note import hero_note
+
+    stats = fixture_stats()
+    model.show_stats(state, hero_note(state.hero_select, stats))
+    model.show_hero(state, rule_hero_pick(state.hero_select, stats))
+
+
+@NEEDS_STATS_FIXTURES
+def test_hero_view_with_stats():
+    model = OverlayModel(name)
+    st = choosing(model)
+    hero_stats(model, st)
+    view = model.snapshot()
+    assert view.title == HERO_STATS_TITLE
+    assert view.rules == (Line("★ 凯瑞尔·罗姆  第 3.67 名 · 选 28% · 第 2/10"), *HERO_STATS_ROWS)
+    assert view.next_step.text == "▶ 选 左数第 1 个 凯瑞尔·罗姆"  # ★ 是规则推荐，AI 优先
+    model.show_hero(st, hero_advice(st, pick=91))
+    assert model.snapshot().next_step.text == "▶ 选 左数第 3 个 洛，在世传奇"
+    assert condense(model.snapshot(), 2).rules == model.snapshot().rules  # 条目总是保留
+
+
+@NEEDS_STATS_FIXTURES
+def test_hero_without_stats_keeps_its_armor():
+    heroes = ((89, "BG21_HERO_000", 10, 1), (95, "UNKNOWN_HERO", 12, 2))
+    model = OverlayModel(name)
+    st = choosing(model, hero_select_state(heroes))
+    hero_stats(model, st)  # 有英雄查不到：规则按护甲
+    view = model.snapshot()
+    assert view.title == HERO_STATS_TITLE
+    assert view.rules == (
+        Line("★ 凯瑞尔·罗姆  第 3.67 名 · 选 28% · 第 2/10"),
+        Line("UNKNOWN_HERO  护甲 12"),
+    )
+
+
+@NEEDS_STATS_FIXTURES
+def test_reroll_drops_the_hero_stats():
+    model = OverlayModel(name)
+    st = choosing(model)
+    hero_stats(model, st)
+    heroes = ((89, "BG21_HERO_000", 10, 1), (95, "BG22_HERO_003", 12, 2))
+    again = hero_select_state(heroes, seq=2)
+    model.on_update(again, [offered_event(again, changed=1)])
+    view = model.snapshot()
+    assert (view.title, view.rules) == (
+        HERO_TITLE,
+        (Line("凯瑞尔·罗姆  护甲 10"), Line("范达尔·雷矛  护甲 12")),
+    )
+    # 晚到的上一组的条目（签名不对）不显示
+    from helpers import fixture_stats
+
+    from lscs.advisor.stats_note import hero_note
+
+    model.show_stats(again, hero_note(st.hero_select, fixture_stats()))
+    assert model.snapshot().title == HERO_TITLE
+
+
+TRINKET_NAMES = {
+    "BG30_Trinket_1st": "小型饰品",
+    "BG35_MagicItem_890": "沉没的船锚",
+    "BG36_MagicItem_402": "精神鞭笞者肖像",
+    "BG30_MagicItem_703": "神秘魔方",
+    "BG30_MagicItem_420": "麦迪文之书",
+    "BG99_MagicItem_NONE": "没有数据的饰品",
+}
+
+
+def trinket_name(card_id):
+    return TRINKET_NAMES.get(card_id, name(card_id))
+
+
+def offered_trinkets(model, choice_id=6, seq=1, last="BG30_MagicItem_420"):
+    from factory import choice_event, choice_option, choice_state, make_choice
+    from helpers import fixture_stats
+
+    from lscs.advisor.stats_note import trinket_note
+
+    trinkets = (
+        (3027, "BG35_MagicItem_890", 4),
+        (3026, "BG36_MagicItem_402", 4),
+        (3025, "BG30_MagicItem_703", 5),
+        (3028, last, 1),
+    )
+    options = [
+        choice_option(e, c, i, card_type="BATTLEGROUND_TRINKET", cost=cost)
+        for i, (e, c, cost) in enumerate(trinkets)
+    ]
+    choice = make_choice(options, choice_id=choice_id, kind="trinket", source="BG30_Trinket_1st")
+    state = choice_state(choice, turn=6, main_action=False, seq=seq)
+    model.on_update(state, [choice_event(state)])
+    model.show_stats(state, trinket_note(choice, fixture_stats()))
+    model.show_choice(state, None)
+    return state
+
+
+TRINKET_ROWS = (
+    Line("沉没的船锚  第 4.06 名 · 选 15%", role="comment"),
+    Line("▲ 精神鞭笞者肖像  第 3.89 名 · 选 27%", role="comment"),
+    Line("神秘魔方  第 3.95 名 · 选 30%", role="comment"),
+    Line("麦迪文之书  第 3.95 名 · 选 18%", role="comment"),
+)
+
+
+@NEEDS_STATS_FIXTURES
+def test_trinket_choice_lists_each_option_with_its_stats():
+    model = OverlayModel(trinket_name, ai_enabled=False)
+    offered_trinkets(model)
+    view = model.snapshot()
+    assert view.choice == (Line("小型饰品 · 4 选 1 · Firestone"), *TRINKET_ROWS)
+    # ▲ 不是推荐：AI 没开时还是让玩家自己选，不高亮
+    assert view.next_step == NextStep("▶ 自己选一个（AI 没有建议）", tone="muted")
+    assert condense(view, 1).choice == view.choice
+    assert condense(view, 2).choice == (Line("小型饰品 · 4 选 1 · Firestone"),)
+
+
+@NEEDS_STATS_FIXTURES
+def test_trinket_marks_merge_when_the_ai_picks_the_best():
+    from lscs.advisor.models import ChoiceAdvice
+
+    model = OverlayModel(trinket_name)
+    state = offered_trinkets(model)
+    model.show_choice(state, ChoiceAdvice(choice_id=6, pick=3026, reason="稳"))
+    assert model.snapshot().choice[2] == Line(
+        "★▲ 精神鞭笞者肖像  第 3.89 名 · 选 27%", role="comment"
+    )
+    model.show_choice(state, ChoiceAdvice(choice_id=6, pick=3025, reason="铸币够"))
+    view = model.snapshot()
+    assert view.choice[2:4] == (
+        Line("▲ 精神鞭笞者肖像  第 3.89 名 · 选 27%", role="comment"),
+        Line("★ 神秘魔方  第 3.95 名 · 选 30%", role="comment"),
+    )
+    assert view.next_step.text == "▶ 选 左数第 3 个 神秘魔方"  # 高亮跟 AI
+
+
+@NEEDS_STATS_FIXTURES
+def test_trinket_without_stats_is_listed_by_name():
+    model = OverlayModel(trinket_name)
+    offered_trinkets(model, last="BG99_MagicItem_NONE")
+    assert model.snapshot().choice[-1] == Line("没有数据的饰品", role="comment")
+
+
+@NEEDS_STATS_FIXTURES
+def test_trinket_stats_cleared_with_a_new_group_or_once_chosen():
+    from factory import choice_event, choice_state, resolved_event
+
+    model = OverlayModel(trinket_name)
+    offered_trinkets(model)
+    other = choice_state(turn=6, seq=2)  # 换了一组（黑暗之赐）
+    model.on_update(other, [choice_event(other)])
+    assert model.snapshot().choice == (
+        Line("黑暗之赐 · 3 选 1"),
+        Line("BG36_312 · BG33_318 · BG36_356", role="comment"),
+    )
+    offered_trinkets(model, seq=3)
+    done = make_state(turn=6, seq=4, main_action=False)
+    model.on_update(done, [resolved_event(6, turn=6, picked=3026)])
+    assert model.snapshot().choice == ()
+    model.on_update(choice_state(turn=6, seq=5).model_copy(update={"choice": other.choice}), [])
+    assert "Firestone" not in model.snapshot().choice[0].text

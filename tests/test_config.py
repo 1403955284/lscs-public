@@ -64,6 +64,7 @@ def test_example_file_matches_defaults():
     assert "\nchoice_advice = true " in text
     assert "\nrepair_invalid = true " in text
     assert "\ndrag_handle = true " in text
+    assert "\nenabled = false" in text  # [stats]：本版本统计默认关闭
 
 
 def test_values_are_read(tmp_path):
@@ -341,3 +342,50 @@ def test_positioning_defaults_on_and_can_be_switched_off(tmp_path):
 def test_positioning_unknown_key_is_rejected(tmp_path):
     with pytest.raises(ConfigError, match="positioning.moves"):
         load_config(write(tmp_path, "[positioning]\nmoves = 3\n"))
+
+
+def test_stats_defaults_off(tmp_path):
+    from lscs.config import StatsConfig
+
+    cfg = load_config(tmp_path / "config.toml").stats
+    assert cfg == StatsConfig() == AppConfig().stats
+    assert (cfg.enabled, cfg.mmr_percentile, cfg.period, cfg.cards) == (
+        False,
+        100,
+        "last-patch",
+        True,
+    )
+
+
+def test_stats_values_are_read(tmp_path):
+    text = '[stats]\nenabled = true\nmmr_percentile = 50\nperiod = "past-seven"\ncards = false\n'
+    cfg = load_config(write(tmp_path, text)).stats
+    assert (cfg.enabled, cfg.mmr_percentile, cfg.period, cfg.cards) == (
+        True,
+        50,
+        "past-seven",
+        False,
+    )
+
+
+@pytest.mark.parametrize(
+    ("line", "field"),
+    [
+        ("mmr_percentile = 30", "stats.mmr_percentile"),
+        ('period = "past-three"', "stats.period"),
+        ("enabled = 1.5", "stats.enabled"),
+        ("url = 1", "stats.url"),
+    ],
+)
+def test_stats_invalid_values_are_rejected(tmp_path, line, field):
+    with pytest.raises(ConfigError, match=field):
+        load_config(write(tmp_path, f"[stats]\n{line}\n"))
+
+
+def test_stats_section_in_the_example_file():
+    text = EXAMPLE.read_text(encoding="utf-8")
+    assert text.index("[positioning]") < text.index("[stats]") < text.index("[highlight]")
+    section = text[text.index("[stats]") : text.index("[highlight]")]
+    assert "\nenabled = false" in section and "Firestone" in section
+    assert "\nmmr_percentile = 100 " in section and '\nperiod = "last-patch" ' in section
+    assert "\ncards = true " in section

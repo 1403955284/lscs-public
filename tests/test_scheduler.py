@@ -1,7 +1,7 @@
 import json
 
 from factory import HEROES, hero_select_state, make_state, minion, offered_event, shop_minion
-from helpers import FIXTURES
+from helpers import FIXTURES, NEEDS_STATS_FIXTURES
 
 from lscs.advisor.context import build_context
 from lscs.cards.db import CardDB
@@ -63,11 +63,12 @@ def scheduler(
     deep=False,
     hero_debounce=0.0,
     step=0.0,
+    stats=None,
     **cfg,
 ):
     """deep=False：只有快速一路（大部分测试只关心快速建议的时机）。
     hero_debounce=0：选英雄这一路不等（等待只在专门的测试里看）。
-    step：每次调用让时钟前进几秒。"""
+    step：每次调用让时钟前进几秒。stats：取本版本统计的函数。"""
     clock = clock or Clock()
     provider = SteppingProvider(responses, clock, step) if step else FakeProvider(responses)
     sched = LLMScheduler(
@@ -79,6 +80,7 @@ def scheduler(
         clock=clock,
         run_async=run_async or (lambda job: job()),
         hero_debounce=hero_debounce,
+        stats=stats,
     )
     return sched, provider
 
@@ -1639,3 +1641,159 @@ def test_review_uses_the_schedulers_provider_config_and_recorder(tmp_path):
     sched, provider = scheduler([], recorder=recorder, deep_thinking="high")
     assert sched.provider is provider and sched.recorder is recorder
     assert sched.config.deep_thinking == "high" and sched.config.api_key == SECRET
+
+
+# ---- 本版本统计（本版本统计设计文档第 8 节第 3 条） ----
+
+
+def meta_stats(**impacts):
+    """只有随从统计的 MetaStats（回合修正值）。"""
+    from datetime import UTC, datetime
+
+    from lscs.stats.model import CardStat, MetaStats
+
+    return MetaStats(
+        updated=datetime(2026, 10, 14, 0, 10, tzinfo=UTC),
+        period="last-patch",
+        mmr=100,
+        games=938474,
+        hero_total=116,
+        heroes={},
+        trinkets={},
+        cards={
+            c: CardStat(card_id=c, played=50000, impact=i, low=False) for c, i in impacts.items()
+        },
+    )
+
+
+class StatsSource:
+    """按顺序返回 values 里的值（用完后一直是最后一个），记下被取了几次。"""
+
+    def __init__(self, *values):
+        self.values, self.taken = list(values), 0
+
+    def __call__(self):
+        self.taken += 1
+        return self.values[min(self.taken, len(self.values)) - 1]
+
+
+def recruit_state(turn=3, seq=1, tribes=("ABERRATION", "PIRATE")):
+    return state(turn=turn, seq=seq).model_copy(update={"tribes": frozenset(tribes)})
+
+
+@NEEDS_STATS_FIXTURES
+def test_stats_are_taken_once_per_game():
+    from helpers import fixture_stats
+
+    source = StatsSource(fixture_stats(), None)
+    sched, provider = scheduler([HERO, PICK, GOOD], stats=source)
+    st = hero_select_state()
+    offer(sched, st)
+    sched.tick()
+    assert "本版本战绩：数据来自 Firestone" in provider.calls[0].user
+    assert "本版本：第 3.67 名" in provider.calls[0].user
+    offer_choice(sched)
+    sched.tick()
+    observe(sched, recruit_state(), EventType.RECRUIT_STARTED)
+    sched.tick()
+    assert source.taken == 1  # 整局用第一次取到的（后台加载在对局中途变了也不影响前缀）
+    sched.reset_game()
+    offer(sched, hero_select_state(seq=9))
+    sched.tick()
+    assert source.taken == 2 and "本版本" not in provider.calls[-1].user  # 新的一局重新取
+
+
+@NEEDS_STATS_FIXTURES
+def test_stats_are_used_once_ready_and_then_frozen_for_the_game():
+    from helpers import fixture_stats
+
+    # 选英雄时还没准备好；之后第一次取到的那份整局都用（再变成别的也不换）
+    source = StatsSource(None, fixture_stats(), fixture_stats(period="past-seven"))
+    sched, provider = scheduler([HERO, TRINKET_PICK, TRINKET_PICK], stats=source)
+    offer(sched, hero_select_state())
+    sched.tick()
+    assert "本版本" not in provider.calls[0].user
+    offer_choice(sched, trinket_choice_state(seq=2))
+    sched.tick()
+    assert "本版本战绩：数据来自 Firestone，本补丁，" in provider.calls[1].user
+    offer_choice(sched, trinket_choice_state(seq=3, choice_id=7))
+    sched.tick()
+    assert "本版本战绩：数据来自 Firestone，本补丁，" in provider.calls[2].user
+    assert source.taken == 2  # 取到之后不再取
+    sched.reset_game()  # 新的一局重新取
+    offer(sched, hero_select_state(seq=9))
+    sched.tick()
+    assert source.taken == 3 and "最近 7 天" in provider.calls[-1].user
+
+
+def test_recruit_message_has_the_stats_block_after_the_pool():
+    stats = meta_stats(BG36_098=0.5, BG36_099=0.4, BGS_061=0.9)
+    sched, provider = scheduler([GOOD], stats=lambda: stats)
+    observe(sched, recruit_state(), EventType.RECRUIT_STARTED)
+    sched.tick()
+    pool, block, opponents, _ = provider.calls[0].user.split("\n\n", 3)
+    assert pool.startswith("【本局卡池") and opponents.startswith("【对手】")
+    assert block.splitlines()[0].startswith("【本版本战绩好的随从（数据来自 Firestone")
+    assert block.splitlines()[1:] == ["1本：虚悯者 +0.50", "2本：蚀脑怪 +0.40"]
+
+
+def test_stats_block_is_cached_by_the_lobby_tribes(monkeypatch):
+    import lscs.llm.scheduler
+
+    built = []
+    real = lscs.llm.scheduler.build_stats_block
+
+    def spy(cards, tribes, stats):
+        built.append(tribes)
+        return real(cards, tribes, stats)
+
+    monkeypatch.setattr(lscs.llm.scheduler, "build_stats_block", spy)
+    stats = meta_stats(BG36_098=0.5, BG29_888=0.3)
+    sched, provider = scheduler([GOOD] * 3, stats=lambda: stats)
+    observe(sched, recruit_state(turn=3), EventType.RECRUIT_STARTED)
+    sched.tick()
+    observe(sched, recruit_state(turn=4, seq=2), EventType.RECRUIT_STARTED)
+    sched.tick()
+    assert len(built) == 1  # 种族没变：同一块
+    dragons = recruit_state(turn=5, seq=3, tribes=("ABERRATION", "DRAGON"))
+    observe(sched, dragons, EventType.RECRUIT_STARTED)
+    sched.tick()
+    assert len(built) == 2 and "微光护卫者 +0.30" in provider.calls[-1].user
+
+
+def test_without_stats_the_messages_are_unchanged():
+    plain, plain_provider = scheduler([GOOD, PICK])
+    empty, empty_provider = scheduler([GOOD, PICK], stats=lambda: None)
+    for sched in (plain, empty):
+        observe(sched, recruit_state(), EventType.RECRUIT_STARTED)
+        sched.tick()
+        offer_choice(sched)
+        sched.tick()
+    assert [c.user for c in plain_provider.calls] == [c.user for c in empty_provider.calls]
+    assert "本版本" not in plain_provider.calls[0].user
+
+
+TRINKET_PICK = json.dumps({"pick": 3026, "reason": "稳"}, ensure_ascii=False)
+
+
+def trinket_choice_state(seq=1, choice_id=6):
+    from factory import choice_option, choice_state, make_choice
+
+    choice = make_choice(
+        [choice_option(3026, "BG36_MagicItem_402", 0, card_type="BATTLEGROUND_TRINKET", cost=4)],
+        choice_id=choice_id,
+        kind="trinket",
+        source="BG30_Trinket_1st",
+    )
+    return choice_state(choice, turn=6, seq=seq)
+
+
+@NEEDS_STATS_FIXTURES
+def test_choice_message_gets_the_trinket_stats():
+    from helpers import fixture_stats
+
+    stats = fixture_stats()
+    sched, provider = scheduler([TRINKET_PICK], stats=lambda: stats)
+    offer_choice(sched, trinket_choice_state())
+    sched.tick()
+    assert "| 本版本：第 3.89 名，被选率 27%（8835 局）" in provider.calls[0].user

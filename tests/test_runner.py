@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from factory import make_state, shop_minion
-from helpers import TEST_POOL
+from helpers import NEEDS_STATS_FIXTURES, TEST_POOL
 
 from lscs.advisor.display import AdviceDisplay
 from lscs.advisor.rules_config import load_rules_config
@@ -364,3 +364,82 @@ def test_position_lines_in_the_terminal():
         "（亡语随从先出手、先倒下，亡语最早生效，后面的随从都能用上）",
         "  🧭 站位已调好",
     ]
+
+
+# ---- 本版本统计（本版本统计设计文档第 6.3、7.1 节） ----
+
+
+def _trinket_state(kind="trinket"):
+    from factory import choice_option, choice_state, make_choice
+
+    options = [
+        choice_option(3027, "BG35_MagicItem_890", 0, card_type="BATTLEGROUND_TRINKET", cost=4),
+        choice_option(3026, "BG36_MagicItem_402", 1, card_type="BATTLEGROUND_TRINKET", cost=4),
+    ]
+    choice = make_choice(options, choice_id=6, kind=kind, source="BG30_Trinket_1st")
+    return choice_state(choice, turn=6, main_action=False)
+
+
+@NEEDS_STATS_FIXTURES
+def test_hero_stats_shown_once_before_the_rules_pick():
+    from factory import hero_select_state, offered_event
+    from helpers import fixture_stats
+
+    display = RecordingDisplay()
+    stats = fixture_stats()
+    runner = AdviceRunner(RULES, lambda c: c, display, stats=lambda: stats)
+    state = hero_select_state()
+    runner.on_update(state, [offered_event(state)])
+    runner.on_update(state.model_copy(update={"seq": 2}), [])  # 同一组备选：不再列
+    assert [method for method, _ in display.calls] == ["show_stats", "show_hero"]
+    note = display.calls[0][1][1]
+    assert (note.kind, note.best, note.signature) == ("hero", 89, state.hero_select.signature())
+    hero = display.calls[1][1][1]
+    assert (hero.pick, hero.basis) == (89, "stats") and runner.last_hero is hero
+
+
+@NEEDS_STATS_FIXTURES
+def test_trinket_stats_shown_before_the_choice_and_only_for_trinkets():
+    from factory import choice_event
+    from helpers import fixture_stats
+
+    display = RecordingDisplay()
+    stats = fixture_stats()
+    runner = AdviceRunner(RULES, lambda c: c, display, stats=lambda: stats)
+    state = _trinket_state()
+    runner.on_update(state, [choice_event(state)])
+    assert [method for method, _ in display.calls] == ["show_stats", "show_choice"]
+    note = display.calls[0][1][1]
+    assert (note.kind, note.choice_id, note.best) == ("trinket", 6, 3026)
+    display.calls.clear()
+    stance = _trinket_state("hero_power")
+    runner.on_update(stance, [choice_event(stance)])
+    assert [method for method, _ in display.calls] == ["show_choice"]  # 其他种类不出条目
+
+
+def test_no_stats_means_no_stats_rows_and_armor_rules():
+    from factory import choice_event, hero_select_state, offered_event
+
+    for stats in (None, lambda: None):  # 统计关闭；打开了但还没准备好
+        display = RecordingDisplay()
+        runner = AdviceRunner(RULES, lambda c: c, display, stats=stats)
+        state = hero_select_state()
+        runner.on_update(state, [offered_event(state)])
+        trinkets = _trinket_state()
+        runner.on_update(trinkets, [choice_event(trinkets)])
+        assert [method for method, _ in display.calls] == ["show_hero", "show_choice"]
+        assert display.calls[0][1][1].basis == "armor"
+
+
+def test_stats_errors_do_not_stop_the_rules(caplog):
+    from factory import hero_select_state, offered_event
+
+    def boom():
+        raise RuntimeError("坏了")
+
+    display = RecordingDisplay()
+    runner = AdviceRunner(RULES, lambda c: c, display, stats=boom)
+    state = hero_select_state()
+    runner.on_update(state, [offered_event(state)])
+    assert [method for method, _ in display.calls] == ["show_hero"]
+    assert "坏了" in caplog.text

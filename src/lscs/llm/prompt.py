@@ -1,10 +1,14 @@
 """生成发给大模型的系统提示和局面消息（M2 设计文档第 7.1 节、更聪明的 AI 建议设计文档第 3 节）。
 选英雄（选英雄建议设计文档第 5 节）和游戏弹出的"选一个"（选项建议设计文档第 5 节）各用单独的
-系统提示和局面消息，招募阶段的提示不受影响。"""
+系统提示和局面消息，招募阶段的提示不受影响。
+
+本版本统计（本版本统计设计文档第 6.4、7.2、8 节）：有统计时选英雄、选项的消息里多一行说明和
+每个选项的战绩，招募的消息在卡池块之后多一块"本版本战绩好的随从"；没有统计时和以前逐字相同。"""
 
 from __future__ import annotations
 
 import json
+import statistics
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +23,7 @@ from lscs.advisor.opponents import (
     summarize_opponents,
 )
 from lscs.advisor.pool import PoolNote, in_lobby, pool_notes
+from lscs.advisor.stats_note import pct
 from lscs.cards.db import CardDB, CardInfo
 from lscs.llm.parse import MAX_ACTIONS
 from lscs.state.models import (
@@ -32,6 +37,7 @@ from lscs.state.models import (
     ShopItem,
     TribesConfidence,
 )
+from lscs.stats.model import MetaStats
 
 # 系统提示里的 JSON 示例（快速和深度共用同一个系统提示，方便 DeepSeek 缓存前缀）
 EXAMPLE = {
@@ -101,9 +107,10 @@ HERO_SYSTEM_TEMPLATE = """你是《炉石传说》酒馆战棋的高分教练，
 
 【怎么判断】
 - 护甲：官方用起始护甲做平衡——越强的英雄给的护甲越少，护甲最少的英雄通常就是当前版本最强的。这是最可靠的强度信号，默认按它选；只有技能明显不适合新手、或明显依赖本局没有的条件时才偏离。
+- 局面里给了"本版本战绩"（平均名次、被选率、排名）时，以它为主、护甲为辅：平均名次差 0.1 以上就是明显差距，差不到 0.1 再看技能是否适合新手；没给战绩就按护甲。
 - 技能：看技能描述。新手优先选"每回合都有稳定收益、不需要复杂操作"的技能（加属性、给铸币、减费、免费刷新），少选要靠特定种族、特定卡或精细计算才强的技能。
 - 本局种族在选英雄时还看不到，所以依赖某个种族的技能要打折扣；只有本局机制（如神明）是已知的，可以结合它判断。
-- 不知道的事不要编：没有给出的数据（如胜率榜）不要假装知道。
+- 不知道的事不要编：没有给出的数据不要假装知道。
 
 只输出一个 json 对象，格式：
 {example}
@@ -126,6 +133,7 @@ CHOICE_SYSTEM_TEMPLATE = """你是《炉石传说》酒馆战棋的高分教练�
 - 黑暗之赐：每个选项的属性已经算上了赐福。比较"随从本身 + 赐福"对现在阵容的价值；圣盾、复生、风怒这类关键词放在主力随从身上最值。
 - 饰品：看它在接下来几个回合能带来多少收益；和方向配合、现在就能用上的优先；要花铸币的饰品要考虑这回合剩多少铸币、会不会耽误升本。
 - 英雄技能的升级选项：选和自己的阵容、打法最契合的；几个选项差不多时选收益最稳定的。
+- 选项后面带"本版本战绩"时，把它当主要参考，再结合铸币价、当前方向和场面决定；差距很小（饰品差不到 0.1 名）就按上面的办法判断；没带战绩就按上面的办法判断。
 - 不知道的事不要编：没有给出的数据不要假装知道。
 
 只输出一个 json 对象，格式：
@@ -154,6 +162,19 @@ OPPONENTS_TITLE = (
 NO_OPPONENTS = "（还没有对手的信息）"
 POOL_LINE_TITLE = "卡池估计（还能刷到的张数）："
 SPELLS_TITLE = "【酒馆法术】"
+# 本版本战绩好的随从（本版本统计设计文档第 8 节）：标题自带说明，招募的系统提示一个字不改
+STATS_BLOCK_TITLE = (
+    "【本版本战绩好的随从（数据来自 Firestone，{period}，{mmr}。"
+    '"+N"：打出它的玩家比同回合没打的平均名次好 N，全部随从的中位数约 {median}；'
+    "这是统计不是结论，要结合方向和场面，不要只按它买）】"
+)
+STATS_PER_TIER = 3  # 每个酒馆等级列几张
+# 黑暗之赐的随从只比较随从本身：赐福不在统计里
+STATS_MINION_KINDS = {
+    ChoiceKind.TRIPLE: "本版本战绩",
+    ChoiceKind.DISCOVER: "本版本战绩",
+    ChoiceKind.DARK_GIFT: "随从本身的本版本战绩",
+}
 
 
 @dataclass(frozen=True)
@@ -229,6 +250,47 @@ def card_pool_block(cards: CardDB, tribes: frozenset[str]) -> str:
         + (f"：{c.text}" if c.text else "")
         for c in spells
     ] or ["（无）"]
+    return "\n".join(lines)
+
+
+def _impact(impact: float) -> str:
+    return f"{impact:+.2f}"
+
+
+def pool_card_median(cards: CardDB, stats: MetaStats) -> str | None:
+    """卡池随从（1~6 本，不分种族）里样本够的回合修正值的中位数，写成"+0.4"；一张都没有时为
+    None。衍生物、法术、7 本的牌不算：提示词里"+N"说的只是这些随从。"""
+    values = []
+    for card in cards.pool_minions():
+        stat = stats.card(card.card_id) if card.tier and _in_tavern(card) else None
+        if stat is not None and not stat.low:
+            values.append(stat.impact)
+    return f"{statistics.median(values):+.1f}" if values else None
+
+
+def build_stats_block(cards: CardDB, tribes: frozenset[str], stats: MetaStats | None) -> str | None:
+    """本版本战绩好的随从：本局种族里（和卡池块一样）、1~6 本、有统计且不是样本少的卡池随从，
+    每个等级取回合修正值最高的 STATS_PER_TIER 张。只随本局种族变，放在卡池块后面，和它一起组成
+    稳定的前缀。没有随从统计、一张都不够时为 None。"""
+    if stats is None or not stats.cards:
+        return None
+    by_tier: dict[int, list[tuple[float, str]]] = {}
+    for card in cards.pool_minions():
+        if not card.tier or not _in_tavern(card) or not in_lobby(card, tribes):
+            continue
+        stat = stats.card(card.card_id)
+        if stat is None or stat.low:
+            continue
+        by_tier.setdefault(card.tier, []).append((stat.impact, card.name))
+    if not by_tier:
+        return None
+    median = pool_card_median(cards, stats) or "?"  # 块里有牌时总有中位数
+    title = STATS_BLOCK_TITLE.format(period=stats.period_text, mmr=stats.mmr_text, median=median)
+    lines = [title]
+    for tier in sorted(by_tier):
+        # 一样高时按卡池的顺序（卡牌 ID）
+        best = sorted(by_tier[tier], key=lambda pair: -pair[0])[:STATS_PER_TIER]
+        lines.append(f"{tier}本：" + "、".join(f"{name} {_impact(i)}" for i, name in best))
     return "\n".join(lines)
 
 
@@ -484,11 +546,13 @@ def build_user_message(
     memory: AIMemory | None = None,
     all_opponents: bool = True,
     opponents_block: str | None = None,
+    stats_block: str | None = None,
 ) -> str:
-    """本局卡池 + 空行 + 对手 + 空行 + 局面；有记忆时末尾加一行之前的判断。不附规则建议
-    （AI 曾经照抄）。卡池块和对手块在前：跨回合的缓存前缀（系统提示 + 卡池块）不变，
-    对手块同一回合内不变。opponents_block：调度器这一回合已经生成的对手块；
-    None 时按 state 现生成。"""
+    """本局卡池 + 空行 +（本版本战绩好的随从 + 空行）+ 对手 + 空行 + 局面；有记忆时末尾加一行
+    之前的判断。不附规则建议（AI 曾经照抄）。卡池块、战绩块和对手块在前：跨回合的缓存前缀
+    （系统提示 + 卡池块 + 战绩块）只随本局种族变，对手块同一回合内不变。opponents_block：
+    调度器这一回合已经生成的对手块；None 时按 state 现生成。stats_block：build_stats_block 的
+    结果；None 时没有这一块。"""
     me = state.me
     assert me is not None
     w = _Writer(cards)
@@ -520,15 +584,13 @@ def build_user_message(
         lines.append(pool)
     if memory is not None:
         lines.append(_memory_line(memory, state.turn))
-    return "\n\n".join(
-        (
-            card_pool_block(cards, state.tribes),
-            opponents_block
-            if opponents_block is not None
-            else build_opponents_block(state, cards, all_opponents),
-            "\n".join(lines),
-        )
-    )
+    if opponents_block is None:
+        opponents_block = build_opponents_block(state, cards, all_opponents)
+    blocks = [card_pool_block(cards, state.tribes)]
+    if stats_block is not None:
+        blocks.append(stats_block)
+    blocks += [opponents_block, "\n".join(lines)]
+    return "\n\n".join(blocks)
 
 
 def _hero_power_part(dbf: int | None, cards: CardDB) -> str:
@@ -540,9 +602,33 @@ def _hero_power_part(dbf: int | None, cards: CardDB) -> str:
     return f"技能 {power.name}（{cost} 金）{text}"
 
 
-def build_hero_message(state: GameState, cards: CardDB, rerolled: bool = False) -> str:
+def _hero_stats_line(stats: MetaStats) -> str:
+    median = stats.hero_median
+    basis = f"全部英雄的中位数约 {median:.1f}，" if median is not None else ""
+    return (
+        f"本版本战绩：数据来自 Firestone，{stats.period_text} {stats.games} 局，{stats.mmr_text}，"
+        f"{stats.date_text} 更新。平均名次越小越强，只在这几个英雄之间比较（{basis}不要拿 4.5 当"
+        '基准）；标了"样本少"的不可靠。'
+    )
+
+
+def _hero_stats_part(card_id: str, stats: MetaStats) -> str:
+    stat = stats.hero(card_id)
+    if stat is None:
+        return "本版本：没有数据"
+    if stat.low or stat.rank is None:
+        return f"本版本：第 {stat.average_position:.2f} 名（样本少，只有 {stat.data_points} 局）"
+    return (
+        f"本版本：第 {stat.average_position:.2f} 名，被选率 {pct(stat.pick_rate)}，"
+        f"{stats.hero_total} 个英雄里第 {stat.rank}（{stat.data_points} 局）"
+    )
+
+
+def build_hero_message(
+    state: GameState, cards: CardDB, rerolled: bool = False, stats: MetaStats | None = None
+) -> str:
     """选英雄的局面消息：本局机制、备选英雄的护甲和技能。不放本局卡池（种族还不知道）。
-    rerolled：玩家重新随机过英雄。"""
+    rerolled：玩家重新随机过英雄。stats：本版本统计（有时多一行说明、每个英雄多一段战绩）。"""
     select = state.hero_select
     assert select is not None
     w = _Writer(cards)
@@ -551,12 +637,16 @@ def build_hero_message(state: GameState, cards: CardDB, rerolled: bool = False) 
     mechanics = _mechanics_line(state, cards)
     if mechanics is not None:
         lines.append(mechanics)
-    lines += ["本局种族：未知（选英雄时还看不到）", "备选英雄："]
-    lines += [
-        f"  [#{h.entity_id}] {w.name(h.card_id)} | {armor_zh(h.armor)} | "
-        + _hero_power_part(h.hero_power_dbf, cards)
-        for h in select.offered
-    ]
+    lines.append("本局种族：未知（选英雄时还看不到）")
+    if stats is not None:
+        lines.append(_hero_stats_line(stats))
+    lines.append("备选英雄：")
+    for h in select.offered:
+        parts = [f"  [#{h.entity_id}] {w.name(h.card_id)}", armor_zh(h.armor)]
+        if stats is not None:
+            parts.append(_hero_stats_part(h.card_id, stats))
+        parts.append(_hero_power_part(h.hero_power_dbf, cards))
+        lines.append(" | ".join(parts))
     return "\n".join(lines)
 
 
@@ -594,9 +684,57 @@ def _choice_option_line(option: ChoiceOption, w: _Writer) -> str:
     return head + (f"{name}：{text}" if text else name)
 
 
-def build_choice_message(state: GameState, cards: CardDB, memory: AIMemory | None = None) -> str:
+def _option_stats(
+    option: ChoiceOption, kind: ChoiceKind, cards: CardDB, stats: MetaStats
+) -> tuple[str, str] | None:
+    """(选项行末尾的战绩, 它属于哪类说明："trinket" / "minion")；没有、样本少（随从）时为 None。"""
+    if option.card_type == "BATTLEGROUND_TRINKET":
+        trinket = stats.trinket(option.card_id)
+        if trinket is None:
+            return None
+        if trinket.low:
+            text = f"第 {trinket.average_placement:.2f} 名（样本少，{trinket.data_points} 局）"
+        else:
+            text = (
+                f"第 {trinket.average_placement:.2f} 名，被选率 {pct(trinket.pick_rate)}"
+                f"（{trinket.data_points} 局）"
+            )
+        return f"本版本：{text}", "trinket"
+    label = STATS_MINION_KINDS.get(kind)
+    if label is None or option.card_type != "MINION":
+        return None
+    card = stats.card(cards.normal_id(option.card_id))
+    if card is None or card.low:
+        return None
+    return f"{label} {_impact(card.impact)}", "minion"
+
+
+def _choice_stats_line(stats: MetaStats, used: set[str], cards: CardDB) -> str:
+    parts = []
+    if "trinket" in used:
+        parts.append("饰品写平均名次（越小越强，只在这几个之间比较）和被选率")
+    if "minion" in used:
+        median = pool_card_median(cards, stats)
+        parts.append(
+            '随从写"+N"，表示打出它的玩家比同回合没打的平均名次好 N'
+            + (f"（中位数约 {median}）" if median is not None else "")
+        )
+    return (
+        f"本版本战绩：数据来自 Firestone，{stats.period_text}，{stats.mmr_text}，"
+        f"{stats.date_text} 更新。" + "；".join(parts) + "。"
+    )
+
+
+def build_choice_message(
+    state: GameState,
+    cards: CardDB,
+    memory: AIMemory | None = None,
+    stats: MetaStats | None = None,
+) -> str:
     """游戏弹出的"选一个"：标题、回合、本局种族和机制、场面、手牌和选项。不放本局卡池
-    （选项就那么几张，发卡池只会更慢）；有记忆时末尾加一行之前的判断（只读，不会被改写）。"""
+    （选项就那么几张，发卡池只会更慢）；有记忆时末尾加一行之前的判断（只读，不会被改写）。
+    stats：本版本统计——饰品写平均名次和被选率，三连、发现、黑暗之赐的随从写回合修正后的
+    战绩；有任何一个选项带战绩时"选项："之前加一行说明。"""
     choice, me = state.choice, state.me
     assert choice is not None and me is not None
     w = _Writer(cards)
@@ -612,8 +750,18 @@ def build_choice_message(state: GameState, cards: CardDB, memory: AIMemory | Non
         lines.append(_trinkets_line(me.trinkets, w))
     lines += w.section(f"场面（已用 {len(me.board)}/7）：", me.board)
     lines += w.section("手牌：", me.hand)
+    options = [_choice_option_line(option, w) for option in choice.options]
+    if stats is not None:
+        used: set[str] = set()
+        for i, option in enumerate(choice.options):
+            found = _option_stats(option, choice.kind, cards, stats)
+            if found is not None:
+                options[i] += f" | {found[0]}"
+                used.add(found[1])
+        if used:
+            lines.append(_choice_stats_line(stats, used, cards))
     lines.append("选项：")
-    lines += [_choice_option_line(option, w) for option in choice.options]
+    lines += options
     if choice.kind == ChoiceKind.TRINKET:
         lines.append(f"铸币 {me.gold}；饰品的铸币价会从这回合的铸币里扣")
     if memory is not None:

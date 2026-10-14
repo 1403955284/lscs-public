@@ -10,19 +10,21 @@ from typing import TYPE_CHECKING
 from lscs.advisor.context import MINION, TurnContext, build_context, hero_power_used
 from lscs.advisor.display import AdviceSink
 from lscs.advisor.hero_rules import rule_hero_pick
-from lscs.advisor.models import Action, Advice, HeroAdvice, Lane, Plan, PositionAdvice
+from lscs.advisor.models import Action, Advice, HeroAdvice, Lane, Plan, PositionAdvice, StatsNote
 from lscs.advisor.opponents import summarize_opponents
 from lscs.advisor.pool import PoolEstimator, PoolNote, PoolView, pool_notes
 from lscs.advisor.positioning import plan_positions, validate_position
 from lscs.advisor.rules import rule_plans
 from lscs.advisor.rules_config import RulesConfig
+from lscs.advisor.stats_note import hero_note, trinket_note
 from lscs.advisor.validate import validate_plan
 from lscs.llm.notices import TIMEOUT
-from lscs.state.models import Event, EventType, GameState, Phase
+from lscs.state.models import ChoiceKind, Event, EventType, GameState, Phase
 
 if TYPE_CHECKING:
     from lscs.cards.db import CardDB
     from lscs.llm.scheduler import AIResult, LLMScheduler
+    from lscs.stats.model import MetaStats
 
 log = logging.getLogger(__name__)
 
@@ -89,11 +91,14 @@ class AdviceRunner:
         pool: PoolEstimator | None = None,
         cards: CardDB | None = None,
         positioning: bool = True,
+        stats: Callable[[], MetaStats | None] | None = None,
     ) -> None:
         """pool：查过卡牌库的卡池估计；没有卡牌数据时为 None，"还剩约 N 张"都不显示。
         cards：卡牌数据，站位建议要看卡牌说明（亡语、进击、复仇、劈砍）；为 None 时不提示站位。
-        positioning：config.toml 的 [positioning] enabled。"""
+        positioning：config.toml 的 [positioning] enabled。
+        stats：取本版本统计（StatsStore.get，还没准备好时返回 None）；统计关闭时为 None。"""
         self._rules = rules
+        self._stats = stats
         self._name = name
         self._display = display
         self._scheduler = scheduler
@@ -247,17 +252,46 @@ class AdviceRunner:
     def _advise_choice(self, state: GameState, types: set[EventType], events: list[Event]) -> None:
         """游戏弹出了一组新的选项：先交给显示端列出来（面板），AI 的推荐稍后由调度器给出；
         选完了：调度器作废还没回来的请求。没有规则版本（拿不准就不乱猜）。"""
-        if EventType.CHOICE_OFFERED in types and state.choice is not None:
+        choice = state.choice
+        if EventType.CHOICE_OFFERED in types and choice is not None:
+            if choice.kind == ChoiceKind.TRINKET:  # 其他种类的选项不出条目（随从的数字不显示）
+                stats = self._current_stats()
+                if stats is not None:
+                    self._show_stats(state, lambda: trinket_note(choice, stats))
             self._display.show_choice(state, None)
         if self._scheduler is not None:
             self._scheduler.observe_choice(state, events)
+
+    def _current_stats(self) -> MetaStats | None:
+        """本版本统计：关闭、还没准备好、取的时候出错都是 None（出错只记日志）。"""
+        if self._stats is None:
+            return None
+        try:
+            return self._stats()
+        except Exception:
+            log.warning("取本版本统计时出错", exc_info=True)
+            return None
+
+    def _show_stats(self, state: GameState, make: Callable[[], StatsNote | None]) -> None:
+        """整理并显示本版本统计的条目；出错只记日志，建议照常。"""
+        try:
+            note = make()
+        except Exception:
+            log.warning("整理本版本统计时出错", exc_info=True)
+            return
+        if note is not None:
+            self._display.show_stats(state, note)
 
     def _advise_hero(self, state: GameState) -> None:
         select = state.hero_select
         if select is None:
             return
+        # 统计在这时还没准备好（watch 刚启动）就按没有统计处理，之后不回头重画
+        stats = self._current_stats()
+        if stats is not None:
+            self._show_stats(state, lambda: hero_note(select, stats))
         try:
-            advice = rule_hero_pick(select)
+            advice = rule_hero_pick(select, stats)
         except Exception:
             self._rules_error(state.turn, hero=True)  # AI 照常调用
             return

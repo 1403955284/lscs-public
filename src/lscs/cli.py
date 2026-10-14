@@ -44,6 +44,8 @@ from lscs.review.reviewer import GameReviewer
 from lscs.state.models import Event, GameState
 from lscs.state.pool import load_pool_config
 from lscs.state.tracker import StateTracker
+from lscs.stats.model import MetaStats
+from lscs.stats.store import StatsStore, start_text
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_POOL = PROJECT_ROOT / "strategy" / "current" / "pool.toml"
@@ -52,6 +54,8 @@ DEFAULT_GUIDE = PROJECT_ROOT / "strategy" / "current" / "guide.md"
 DEFAULT_HEROES = PROJECT_ROOT / "strategy" / "current" / "heroes.md"  # 可选：当月英雄强度资料
 RECORDINGS_DIR = PROJECT_ROOT / "recordings"
 REVIEW_BASE = PROJECT_ROOT  # [review] dir 是相对路径时相对它（测试里换成临时目录）
+# 本版本统计的缓存目录；None 表示和卡牌数据同一个缓存目录（测试里换成临时目录）
+STATS_CACHE_DIR: Path | None = None
 POLL_INTERVAL = 0.2  # watch 默认的轮询间隔（秒）
 OVERLAY_REPLAY_SPEED = 20.0  # replay --overlay 没填 --speed 时的倍速（不等待的话面板一闪而过）
 RECOMMENDED_OUTPUT_TOKENS = 1500  # 快速建议要写分析和 JSON，800 容易截断
@@ -133,6 +137,30 @@ def _load_cards():
         return None
 
 
+def _stats_store(sync: bool) -> StatsStore | None:
+    """config.toml 的 [stats]（本版本统计设计文档第 5.5 节）：打开时创建、打印一行、开始准备
+    （sync：replay / review 同步准备，watch 在后台）；关闭（默认）时返回 None，不打印。
+    config.toml 有误时打印原因，这次没有统计，其他照常。"""
+    try:
+        cfg = load_config(DEFAULT_CONFIG).stats
+    except ConfigError as exc:
+        print(f"{exc}（这次没有本版本统计）", flush=True)
+        return None
+    if not cfg.enabled:
+        return None
+    from lscs.cards.fetch import default_cache_dir
+
+    store = StatsStore(cfg, STATS_CACHE_DIR if STATS_CACHE_DIR is not None else default_cache_dir())
+    print(start_text(cfg, sync), flush=True)
+    store.start(sync)
+    return store
+
+
+def _stats_getter(store: StatsStore | None) -> Callable[[], MetaStats | None] | None:
+    """交给运行器和调度器的取统计的函数；统计关闭时为 None。"""
+    return store.get if store is not None else None
+
+
 def _namer(args: argparse.Namespace) -> Namer:
     if not args.names:
         return _identity
@@ -179,9 +207,9 @@ def _load_rules() -> RulesConfig | None:
         return None
 
 
-def _build_scheduler(cards, sync: bool):
+def _build_scheduler(cards, sync: bool, stats: Callable[[], MetaStats | None] | None = None):
     """按 config.toml 创建大模型调度器；不能用 AI 时打印原因并返回 None。
-    config.toml 有误时抛出 ConfigError。"""
+    config.toml 有误时抛出 ConfigError。stats：取本版本统计的函数（统计关闭时为 None）。"""
     from lscs.llm.prompt import load_guide
     from lscs.llm.provider import OpenAICompatProvider
     from lscs.llm.record import Recorder
@@ -245,6 +273,7 @@ def _build_scheduler(cards, sync: bool):
         load_guide(DEFAULT_GUIDE),
         heroes_note=heroes,
         recorder=Recorder(RECORDINGS_DIR),
+        stats=stats,
         **extra,
     )
 
@@ -442,10 +471,11 @@ def _cmd_replay(args: argparse.Namespace) -> int:
         rules = _load_rules()
         if rules is None:
             return 1
+        stats = _stats_getter(_stats_store(sync=True))
         scheduler = None
         if args.ai:
             try:
-                scheduler = _build_scheduler(cards, sync=True)
+                scheduler = _build_scheduler(cards, sync=True, stats=stats)
             except ConfigError as exc:
                 print(exc)
                 return 1
@@ -472,6 +502,7 @@ def _cmd_replay(args: argparse.Namespace) -> int:
             pool=_pool_estimator(cards, args),
             cards=cards,
             positioning=_positioning(cards),
+            stats=stats,
         )
         if model is not None:
             handlers.append(model.on_update)  # 先更新面板的回合，再出建议
@@ -565,10 +596,11 @@ def _cmd_watch(args: argparse.Namespace) -> int:
         return 1
     cards = _load_cards()
     name = cards.name if cards is not None else _identity
+    stats = _stats_getter(_stats_store(sync=False))  # 卡牌数据之后、在后台：从不阻塞
     scheduler = None
     if not args.no_ai:
         try:
-            scheduler = _build_scheduler(cards, sync=False)
+            scheduler = _build_scheduler(cards, sync=False, stats=stats)
         except ConfigError as exc:
             print(exc)
             return 1
@@ -584,6 +616,7 @@ def _cmd_watch(args: argparse.Namespace) -> int:
         pool=_pool_estimator(cards, args),
         cards=cards,
         positioning=_positioning(cards),
+        stats=stats,
     )
     print(f"正在监听 {install / 'Logs'}，按 Ctrl+C 退出。")
     handlers = [_timeline(name, args.verbose)]
@@ -660,10 +693,11 @@ def _cmd_review(args: argparse.Namespace) -> int:
         return 1
     cards = _load_cards()  # 复盘是给人看的：总是显示中文卡名
     name = cards.name if cards is not None else _identity
+    stats = _stats_getter(_stats_store(sync=True))
     scheduler = None
     if args.ai:
         try:
-            scheduler = _build_scheduler(cards, sync=True)
+            scheduler = _build_scheduler(cards, sync=True, stats=stats)
         except ConfigError as exc:
             print(exc)
             return 1
@@ -684,7 +718,9 @@ def _cmd_review(args: argparse.Namespace) -> int:
     )
     assert reviewer is not None
     # 建议只交给复盘记下来，不打印
-    runner = AdviceRunner(rules, name, reviewer.tap, scheduler, pool=_pool_estimator(cards, args))
+    runner = AdviceRunner(
+        rules, name, reviewer.tap, scheduler, pool=_pool_estimator(cards, args), stats=stats
+    )
     handlers: list[UpdateHandler] = [runner.on_update]
     if scheduler is not None:
         handlers.append(lambda _state, _events: runner.tick())

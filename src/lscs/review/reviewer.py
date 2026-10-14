@@ -25,7 +25,7 @@ from datetime import datetime
 from pathlib import Path
 
 from lscs.advisor.display import AdviceSink
-from lscs.advisor.models import Advice, ChoiceAdvice, HeroAdvice, Lane, PositionAdvice
+from lscs.advisor.models import Advice, ChoiceAdvice, HeroAdvice, Lane, PositionAdvice, StatsNote
 from lscs.advisor.opponents import OpponentOverview
 from lscs.advisor.rules_config import RulesConfig
 from lscs.cards.db import CardDB
@@ -133,6 +133,9 @@ class AdviceCollector:
 
     def show_position(self, state: GameState, advice: PositionAdvice | None) -> None:
         pass  # 复盘不评站位（站位建议设计文档第 10 节）
+
+    def show_stats(self, state: GameState, note: StatsNote) -> None:
+        pass  # 复盘不用本版本统计（本版本统计设计文档第 13 节）
 
 
 @dataclass(frozen=True)

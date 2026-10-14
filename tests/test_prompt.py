@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from factory import hand_minion, make_state, minion, power, shop_minion
-from helpers import FIXTURES, TEST_POOL
+from helpers import FIXTURES, NEEDS_STATS_FIXTURES, TEST_POOL
 
 from lscs.advisor.context import build_context
 from lscs.advisor.rules_config import load_rules_config
@@ -575,9 +575,10 @@ EXPECTED_HERO_SYSTEM = """你是《炉石传说》酒馆战棋的高分教练，
 
 【怎么判断】
 - 护甲：官方用起始护甲做平衡——越强的英雄给的护甲越少，护甲最少的英雄通常就是当前版本最强的。这是最可靠的强度信号，默认按它选；只有技能明显不适合新手、或明显依赖本局没有的条件时才偏离。
+- 局面里给了"本版本战绩"（平均名次、被选率、排名）时，以它为主、护甲为辅：平均名次差 0.1 以上就是明显差距，差不到 0.1 再看技能是否适合新手；没给战绩就按护甲。
 - 技能：看技能描述。新手优先选"每回合都有稳定收益、不需要复杂操作"的技能（加属性、给铸币、减费、免费刷新），少选要靠特定种族、特定卡或精细计算才强的技能。
 - 本局种族在选英雄时还看不到，所以依赖某个种族的技能要打折扣；只有本局机制（如神明）是已知的，可以结合它判断。
-- 不知道的事不要编：没有给出的数据（如胜率榜）不要假装知道。
+- 不知道的事不要编：没有给出的数据不要假装知道。
 
 只输出一个 json 对象，格式：
 {"pick": 89, "reason": "为什么选它，30 字以内，会显示在游戏画面上", "heroes": [{"entity_id": 90, "comment": "一句点评，15 字以内"}, {"entity_id": 91, "comment": "..."}], "confidence": 0.7}
@@ -692,6 +693,7 @@ EXPECTED_CHOICE_SYSTEM = """你是《炉石传说》酒馆战棋的高分教练�
 - 黑暗之赐：每个选项的属性已经算上了赐福。比较"随从本身 + 赐福"对现在阵容的价值；圣盾、复生、风怒这类关键词放在主力随从身上最值。
 - 饰品：看它在接下来几个回合能带来多少收益；和方向配合、现在就能用上的优先；要花铸币的饰品要考虑这回合剩多少铸币、会不会耽误升本。
 - 英雄技能的升级选项：选和自己的阵容、打法最契合的；几个选项差不多时选收益最稳定的。
+- 选项后面带"本版本战绩"时，把它当主要参考，再结合铸币价、当前方向和场面决定；差距很小（饰品差不到 0.1 名）就按上面的办法判断；没带战绩就按上面的办法判断。
 - 不知道的事不要编：没有给出的数据不要假装知道。
 
 只输出一个 json 对象，格式：
@@ -746,8 +748,17 @@ CHOICE_CARDS = CardDB(
             "name": "摧心招募者",
             "type": "MINION",
             "text": "发动（0）：弃一张牌以随机获取一张畸变怪。",
+            "techLevel": 4,
+            "isBattlegroundsPoolMinion": True,
         },
-        {"id": "BG36_356", "name": "泰瑞尔", "type": "MINION", "text": "发动（1）：…"},
+        {
+            "id": "BG36_356",
+            "name": "泰瑞尔",
+            "type": "MINION",
+            "text": "发动（1）：…",
+            "techLevel": 6,
+            "isBattlegroundsPoolMinion": True,
+        },
         {
             "id": "BG36_MidGameEffect_000t13",
             "name": "鹰身人之爪",
@@ -763,7 +774,7 @@ CHOICE_CARDS = CardDB(
 )
 
 
-def choice_message(choice, memory=None, **state_kwargs):
+def choice_message(choice, memory=None, stats=None, **state_kwargs):
     from factory import choice_state
 
     from lscs.llm.prompt import build_choice_message
@@ -777,7 +788,7 @@ def choice_message(choice, memory=None, **state_kwargs):
         tribes=frozenset({"ABERRATION", "MURLOC"}),
     )
     kwargs.update(state_kwargs)
-    return build_choice_message(choice_state(choice, **kwargs), CHOICE_CARDS, memory)
+    return build_choice_message(choice_state(choice, **kwargs), CHOICE_CARDS, memory, stats)
 
 
 def test_choice_message_for_a_dark_gift():
@@ -1054,3 +1065,335 @@ def test_an_empty_captured_board_in_the_opponents_block():
         "★ 第 2 名 布莱恩 | 血量 20+0 | 酒馆 3 本 | 威胁 35 | 第 5 回合见到空场",
         "▶ 第 8 名 布莱恩 | 已淘汰，这回合打它的残影 | 第 5 回合见到空场",
     ]
+
+
+# ---- 本版本统计（本版本统计设计文档第 6.4、7.2、8 节） ----
+
+STATS_HEROES = [
+    (92, "TB_BaconShop_HERO_91", 17, 64486),
+    (89, "BG21_HERO_000", 10, 73941),
+    (90, "BG99_HERO_LOW", 0, 105432),  # 样本少
+    (15, "UNKNOWN_HERO", 12, None),  # 没有数据
+]
+
+
+@NEEDS_STATS_FIXTURES
+def test_hero_message_with_stats():
+    from helpers import fixture_stats
+
+    text = build_hero_message(hero_state(STATS_HEROES), HERO_CARDS, stats=fixture_stats())
+    assert text.splitlines() == [
+        "选英雄（4 选 1）",
+        "本局机制：亚煞极（神明。）",
+        "本局种族：未知（选英雄时还看不到）",
+        "本版本战绩：数据来自 Firestone，本补丁 938474 局，全部玩家，10-14 更新。平均名次越小越强，"
+        "只在这几个英雄之间比较（全部英雄的中位数约 4.0，不要拿 4.5 当基准）；"
+        '标了"样本少"的不可靠。',
+        "备选英雄：",
+        "  [#92] 了不起的杰弗里斯 | 护甲 17 | 本版本：第 4.04 名，被选率 27%，10 个英雄里第 7（5221 局）"
+        " | 技能 三个愿望（3 金）：如果你有两个相同的随从，找到第三个。",
+        "  [#89] 凯瑞尔·罗姆 | 护甲 10 | 本版本：第 3.67 名，被选率 28%，10 个英雄里第 2（11258 局）"
+        " | 技能 定罪（0 金）：随机使1个友方随从获得+1/+1。",
+        "  [#90] BG99_HERO_LOW | 护甲 未知 | 本版本：第 4.20 名（样本少，只有 400 局） | 技能 未知",
+        "  [#15] UNKNOWN_HERO | 护甲 12 | 本版本：没有数据 | 技能 未知",
+    ]
+
+
+def test_hero_message_without_stats_is_unchanged():
+    assert build_hero_message(hero_state(), HERO_CARDS, stats=None) == build_hero_message(
+        hero_state(), HERO_CARDS
+    )
+    assert "本版本" not in build_hero_message(hero_state(), HERO_CARDS)
+
+
+def trinket_message(stats, last="BG30_MagicItem_420"):
+    from factory import choice_option, make_choice
+
+    from lscs.llm.prompt import build_choice_message
+
+    choice = make_choice(
+        [
+            choice_option(3027, "BG35_MagicItem_890", 0, card_type="BATTLEGROUND_TRINKET", cost=4),
+            choice_option(3026, "BG36_MagicItem_402", 1, card_type="BATTLEGROUND_TRINKET", cost=4),
+            choice_option(3029, "BG99_MagicItem_LOW", 2, card_type="BATTLEGROUND_TRINKET", cost=2),
+            choice_option(3028, last, 3, card_type="BATTLEGROUND_TRINKET", cost=1),
+        ],
+        choice_id=6,
+        kind="trinket",
+        source="BG30_Trinket_1st",
+    )
+    from factory import choice_state
+
+    state = choice_state(choice, gold=10, tier=4, turn=6, tribes=frozenset())
+    return build_choice_message(state, CHOICE_CARDS, None, stats)
+
+
+@NEEDS_STATS_FIXTURES
+def test_choice_message_for_trinkets_with_stats():
+    from helpers import fixture_stats
+
+    lines = trinket_message(fixture_stats()).splitlines()
+    start = lines.index("选项：")
+    assert lines[start - 1] == (
+        "本版本战绩：数据来自 Firestone，本补丁，全部玩家，10-14 更新。"
+        "饰品写平均名次（越小越强，只在这几个之间比较）和被选率。"
+    )
+    assert lines[start + 1 :] == [
+        "  [#3027] 左 1 沉没的船锚（4 金）：随机获取2张悬赏令。 | 本版本：第 4.06 名，被选率 15%（6508 局）",
+        "  [#3026] 左 2 BG36_MagicItem_402（4 金） | 本版本：第 3.89 名，被选率 27%（8835 局）",
+        "  [#3029] 左 3 BG99_MagicItem_LOW（2 金） | 本版本：第 3.50 名（样本少，300 局）",
+        "  [#3028] 左 4 麦迪文之书（1 金） | 本版本：第 3.95 名，被选率 18%（8575 局）",
+        "铸币 10；饰品的铸币价会从这回合的铸币里扣",
+    ]
+
+
+@NEEDS_STATS_FIXTURES
+def test_choice_message_without_stats_or_without_data_is_unchanged():
+    from helpers import fixture_stats
+
+    plain = trinket_message(None, last="UNKNOWN_TRINKET")
+    assert "本版本" not in plain
+    # 一个选项都查不到时不加说明行
+    from factory import choice_option, make_choice
+
+    choice = make_choice(
+        [choice_option(1, "UNKNOWN_TRINKET", 0, card_type="BATTLEGROUND_TRINKET", cost=1)],
+        choice_id=6,
+        kind="trinket",
+        source="BG30_Trinket_1st",
+    )
+    with_stats = choice_message(choice, stats=fixture_stats())
+    assert with_stats == choice_message(choice)
+
+
+@NEEDS_STATS_FIXTURES
+def test_minion_options_carry_their_turn_adjusted_stats():
+    from factory import choice_option, make_choice
+    from helpers import fixture_stats
+
+    stats = fixture_stats()
+    gift = make_choice(
+        [
+            choice_option(6931, "BG36_312", 0, 6, 2, tier=4, races=("ABERRATION",)),
+            # 金色按普通卡查
+            choice_option(6932, "BG36_356_G", 1, 32, 32, tier=6).model_copy(
+                update={"golden": True}
+            ),
+            choice_option(6933, "BGS_061", 2, 3, 1, tier=1, races=("PIRATE",)),  # 没有数据
+        ]
+    )
+    lines = choice_message(gift, stats=stats).splitlines()
+    start = lines.index("选项：")
+    assert lines[start - 1] == (
+        "本版本战绩：数据来自 Firestone，本补丁，全部玩家，10-14 更新。"
+        # 中位数只算卡池随从（这里是摧心招募者 +0.64、泰瑞尔 +0.29）
+        '随从写"+N"，表示打出它的玩家比同回合没打的平均名次好 N（中位数约 +0.5）。'
+    )
+    assert lines[start + 1].endswith(" | 随从本身的本版本战绩 +0.64")  # 赐福不在统计里
+    assert lines[start + 2].endswith(" | 随从本身的本版本战绩 +0.29")
+    assert lines[start + 3] == "  [#6933] 左 3 海盗无赖 3/1 | 1 本 | 海盗"
+    triple = make_choice(
+        [
+            choice_option(9723, "BG36_312", 0, 6, 2, tier=4),
+            choice_option(9725, "BG99_LOW", 1, 1, 1),
+        ],
+        kind="triple",
+        source="TB_BaconShop_Triples_01",
+    )
+    lines = choice_message(triple, stats=stats).splitlines()
+    assert lines[-2].endswith(" | 本版本战绩 +0.64")
+    assert "本版本" not in lines[-1]  # 样本少的不写
+
+
+@NEEDS_STATS_FIXTURES
+def test_hero_power_options_get_no_stats():
+    from factory import choice_option, make_choice
+    from helpers import fixture_stats
+
+    choice = make_choice(
+        [
+            choice_option(677, "BG21_HERO_000p_t1", 0, card_type="SPELL"),
+            choice_option(678, "BG36_312", 1, 6, 2),  # 就算查得到
+        ],
+        choice_id=2,
+        kind="hero_power",
+        source="BG21_HERO_000p",
+    )
+    assert choice_message(choice, stats=fixture_stats()) == choice_message(choice)
+
+
+STATS_CARDS = CardDB(
+    [
+        {
+            "id": "T1A",
+            "name": "甲",
+            "type": "MINION",
+            "techLevel": 1,
+            "races": ["BEAST"],
+            "isBattlegroundsPoolMinion": True,
+        },
+        {
+            "id": "T1B",
+            "name": "乙",
+            "type": "MINION",
+            "techLevel": 1,
+            "isBattlegroundsPoolMinion": True,
+        },
+        {
+            "id": "T1C",
+            "name": "丙",
+            "type": "MINION",
+            "techLevel": 1,
+            "isBattlegroundsPoolMinion": True,
+        },
+        {
+            "id": "T1D",
+            "name": "丁",
+            "type": "MINION",
+            "techLevel": 1,
+            "isBattlegroundsPoolMinion": True,
+        },
+        {
+            "id": "T2A",
+            "name": "戊",
+            "type": "MINION",
+            "techLevel": 2,
+            "isBattlegroundsPoolMinion": True,
+        },
+        {
+            "id": "T2M",
+            "name": "鱼",
+            "type": "MINION",
+            "techLevel": 2,
+            "races": ["MURLOC"],
+            "isBattlegroundsPoolMinion": True,
+        },
+        {
+            "id": "T2X",
+            "name": "全",
+            "type": "MINION",
+            "techLevel": 2,
+            "races": ["ALL"],
+            "isBattlegroundsPoolMinion": True,
+        },
+        {
+            "id": "T3L",
+            "name": "己",
+            "type": "MINION",
+            "techLevel": 3,
+            "isBattlegroundsPoolMinion": True,
+        },
+        {
+            "id": "T3A",
+            "name": "庚",
+            "type": "MINION",
+            "techLevel": 3,
+            "isBattlegroundsPoolMinion": True,
+        },
+        {
+            "id": "T7A",
+            "name": "辛",
+            "type": "MINION",
+            "techLevel": 7,
+            "isBattlegroundsPoolMinion": True,
+        },
+        {"id": "TOK", "name": "衍生物", "type": "MINION", "techLevel": 1},
+        {
+            "id": "DUO",
+            "name": "双人",
+            "type": "MINION",
+            "techLevel": 1,
+            "isBattlegroundsPoolMinion": True,
+            "isBattlegroundsDuosExclusive": True,
+        },
+    ]
+)
+STATS_BLOCK_TITLE = (
+    '【本版本战绩好的随从（数据来自 Firestone，本补丁，全部玩家。"+N"：打出它的玩家比同回合没打的'
+    "平均名次好 N，全部随从的中位数约 +0.4；这是统计不是结论，要结合方向和场面，不要只按它买）】"
+)
+
+
+def card_stats(**impacts):
+    """按卡牌 ID 给回合修正值；played 少于 2000 的写成 (impact, played)。"""
+    from datetime import UTC, datetime
+
+    from lscs.stats.model import CardStat, MetaStats
+
+    cards = {}
+    for card_id, value in impacts.items():
+        impact, played = value if isinstance(value, tuple) else (value, 50000)
+        cards[card_id] = CardStat(card_id=card_id, played=played, impact=impact, low=played < 2000)
+    return MetaStats(
+        updated=datetime(2026, 10, 14, 0, 10, tzinfo=UTC),
+        period="last-patch",
+        mmr=100,
+        games=938474,
+        hero_total=116,
+        heroes={},
+        trinkets={},
+        cards=cards,
+    )
+
+
+BLOCK_STATS = card_stats(
+    T1A=0.55,
+    T1B=0.38,
+    T1C=0.38,
+    T1D=0.1,  # 1 本只取前三
+    T2A=0.5,
+    T2M=0.9,  # 鱼人不在本局
+    T2X=0.2,  # 全种族总在
+    T3L=(0.99, 1500),  # 样本少
+    T3A=0.3,
+    T7A=0.99,  # 7 本不进
+    TOK=0.99,  # 不在卡池
+    DUO=0.99,  # 双人模式专属
+)
+
+
+def test_stats_block_lists_the_best_three_per_tier_in_the_lobby():
+    from lscs.llm.prompt import build_stats_block
+
+    block = build_stats_block(STATS_CARDS, frozenset({"BEAST", "PIRATE"}), BLOCK_STATS)
+    assert block.splitlines() == [
+        STATS_BLOCK_TITLE,
+        "1本：甲 +0.55、乙 +0.38、丙 +0.38",
+        "2本：戊 +0.50、全 +0.20",
+        "3本：庚 +0.30",
+    ]
+    # 种族还不知道时只有中立和全种族
+    assert "甲" not in build_stats_block(STATS_CARDS, frozenset(), BLOCK_STATS)
+
+
+@NEEDS_STATS_FIXTURES
+def test_no_stats_block_without_card_stats():
+    from helpers import fixture_stats
+
+    from lscs.llm.prompt import build_stats_block
+
+    tribes = frozenset({"BEAST"})
+    assert build_stats_block(STATS_CARDS, tribes, None) is None
+    assert build_stats_block(STATS_CARDS, tribes, fixture_stats(cards=False)) is None
+    assert build_stats_block(STATS_CARDS, tribes, card_stats(T7A=0.9)) is None  # 一张都不够
+
+
+def test_stats_block_sits_between_the_pool_and_the_opponents(mini_lines):
+    state = recruit_state(mini_lines, 2)
+    ctx = build_context(state, RULES.buy_cost_for(state.me.hero_card_id))
+    text = build_user_message(state, ctx, CARDS, stats_block="【战绩块】\n1本：甲 +0.55")
+    pool, block, opponents, situation = text.split("\n\n", 3)
+    assert (pool, opponents) == (POOL_TURN_2, OPPONENTS_TURN_2)
+    assert block == "【战绩块】\n1本：甲 +0.55"
+    assert situation.startswith("第 2 回合（招募）")
+    assert build_user_message(state, ctx, CARDS, stats_block=None) == build_user_message(
+        state, ctx, CARDS
+    )
+
+
+def test_card_median_counts_only_tavern_pool_minions():
+    from lscs.llm.prompt import build_stats_block
+
+    # 衍生物、7 本、双人模式专属、样本少的（都是 +0.99）不算：中位数是 +0.38 → "+0.4"
+    block = build_stats_block(STATS_CARDS, frozenset({"BEAST"}), BLOCK_STATS)
+    assert "全部随从的中位数约 +0.4；" in block.splitlines()[0]

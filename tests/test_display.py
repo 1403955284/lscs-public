@@ -1,4 +1,5 @@
 from factory import hand_spell, make_state, minion, power, shop_minion, shop_spell
+from helpers import NEEDS_STATS_FIXTURES
 
 from lscs.advisor.display import AdviceDisplay, DisplayGroup, describe_action, format_plan
 from lscs.advisor.models import Action, Advice, HeroAdvice, HeroComment, Plan
@@ -723,3 +724,144 @@ def test_position_memory_resets_for_a_new_game():
     out.clear()
     display.show_position(pos_state("D", "SP", turn=2), position((1, 2), turn=2))
     assert out == []
+
+
+# ---- 本版本统计（本版本统计设计文档第 6.3、7.1 节） ----
+
+STAT_NAMES = {
+    "TB_BaconShop_HERO_91": "了不起的杰弗里斯",
+    "BG21_HERO_000": "凯瑞尔·罗姆",
+    "BG28_HERO_800": "泰瑟兰·血望者",
+    "BG33_HERO_001": "洛，在世传奇",
+    "BG99_HERO_LOW": "样本少的英雄",
+    "BG35_MagicItem_890": "沉没的船锚",
+    "BG36_MagicItem_402": "精神鞭笞者肖像",
+    "BG30_MagicItem_703": "神秘魔方",
+    "BG30_MagicItem_420": "麦迪文之书",
+}
+
+
+def stat_name(card_id):
+    return STAT_NAMES.get(card_id, card_id)
+
+
+def stat_heroes(heroes):
+    select = HeroSelect(
+        offered=tuple(
+            HeroOption(entity_id=e, card_id=c, position=i, armor=a, health=30, hero_power_dbf=None)
+            for i, (e, c, a) in enumerate(heroes, start=1)
+        )
+    )
+    state = make_state(turn=0, phase=Phase.HERO_SELECT, hero="TB_BaconShop_HERO_PH")
+    return state.model_copy(update={"hero_select": select})
+
+
+USER_HEROES = (
+    (92, "TB_BaconShop_HERO_91", 17),
+    (89, "BG21_HERO_000", 10),
+    (90, "BG28_HERO_800", 18),
+    (91, "BG33_HERO_001", 19),
+)
+STATS_SOURCE = "数据来自 Firestone · 本补丁 · 全部玩家 · 10-14 更新"
+
+
+@NEEDS_STATS_FIXTURES
+def test_show_stats_for_heroes_sorted_best_first():
+    from helpers import fixture_stats
+
+    from lscs.advisor.stats_note import hero_note
+
+    state = stat_heroes(USER_HEROES)
+    out = []
+    AdviceDisplay(stat_name, out.append).show_stats(
+        state, hero_note(state.hero_select, fixture_stats())
+    )
+    assert out == [
+        f"  📊 本版本战绩（{STATS_SOURCE}）：",
+        "          ▲ 凯瑞尔·罗姆 第 3.67 名 · 选 28% · 第 2/10",
+        "            洛，在世传奇 第 3.91 名 · 选 29% · 第 4/10",
+        "            泰瑟兰·血望者 第 3.99 名 · 选 15% · 第 5/10",
+        "            了不起的杰弗里斯 第 4.04 名 · 选 27% · 第 7/10",
+    ]
+
+
+@NEEDS_STATS_FIXTURES
+def test_show_stats_low_sample_and_missing_heroes():
+    from helpers import fixture_stats
+
+    from lscs.advisor.stats_note import hero_note
+
+    heroes = ((1, "BG99_HERO_LOW", 15), (2, "UNKNOWN_HERO", 12), (3, "BG28_HERO_800", 18))
+    state = stat_heroes(heroes)
+    note = hero_note(state.hero_select, fixture_stats())
+    assert note.best == 3 and [r.entity_id for r in note.rows] == [1, 3]
+    out = []
+    AdviceDisplay(stat_name, out.append).show_stats(state, note)
+    # 查不到的英雄不列；样本少的照样列，不标 ▲
+    assert out[1:] == [
+        "          ▲ 泰瑟兰·血望者 第 3.99 名 · 选 15% · 第 5/10",
+        "            样本少的英雄 第 4.20 名（样本少）",
+    ]
+
+
+def trinket_choice():
+    from factory import choice_option, make_choice
+
+    trinkets = (
+        (3027, "BG35_MagicItem_890", 4),
+        (3026, "BG36_MagicItem_402", 4),
+        (3025, "BG30_MagicItem_703", 5),
+        (3028, "BG30_MagicItem_420", 1),
+    )
+    options = [
+        choice_option(e, c, i, card_type="BATTLEGROUND_TRINKET", cost=cost)
+        for i, (e, c, cost) in enumerate(trinkets)
+    ]
+    return make_choice(options, choice_id=6, kind="trinket", source="BG30_Trinket_1st")
+
+
+@NEEDS_STATS_FIXTURES
+def test_show_stats_for_trinkets_with_their_price():
+    from factory import choice_state
+    from helpers import fixture_stats
+
+    from lscs.advisor.stats_note import trinket_note
+
+    choice = trinket_choice()
+    state = choice_state(choice, turn=6)
+    out = []
+    AdviceDisplay(stat_name, out.append).show_stats(state, trinket_note(choice, fixture_stats()))
+    # 平均名次相同（3.95）时按画面顺序
+    assert out == [
+        f"  📊 饰品本版本战绩（{STATS_SOURCE}）：",
+        "          ▲ 精神鞭笞者肖像（4 金）第 3.89 名 · 选 27%",
+        "            神秘魔方（5 金）第 3.95 名 · 选 30%",
+        "            麦迪文之书（1 金）第 3.95 名 · 选 18%",
+        "            沉没的船锚（4 金）第 4.06 名 · 选 15%",
+    ]
+
+
+@NEEDS_STATS_FIXTURES
+def test_display_group_forwards_show_stats_and_the_review_tap_ignores_it():
+    from factory import choice_state
+    from helpers import fixture_stats
+
+    from lscs.advisor.stats_note import trinket_note
+    from lscs.review.reviewer import AdviceCollector
+
+    seen = []
+
+    class Panel:
+        def show_stats(self, state, note):
+            seen.append(note)
+
+    class Broken:
+        def show_stats(self, state, note):
+            raise RuntimeError("坏了")
+
+    choice = trinket_choice()
+    note = trinket_note(choice, fixture_stats())
+    collector = AdviceCollector()
+    DisplayGroup(Broken(), collector, Panel()).show_stats(choice_state(choice), note)
+    assert seen == [note]
+    assert collector.logs == {} and collector.ai_choices == {}

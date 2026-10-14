@@ -15,8 +15,9 @@ from lscs.advisor.models import (
     Lane,
     Plan,
     PositionAdvice,
+    StatsNote,
 )
-from lscs.advisor.names import minion_label, tribe_zh
+from lscs.advisor.names import choice_option_text, minion_label, tribe_zh
 from lscs.advisor.opponents import (
     OpponentOverview,
     OpponentSummary,
@@ -271,6 +272,17 @@ class AdviceSink(Protocol):
     def ai_summary(self, calls: int, input_tokens: int, output_tokens: int) -> None: ...
     def show_review(self, state: GameState, review: GameReview) -> None: ...
     def show_position(self, state: GameState, advice: PositionAdvice | None) -> None: ...
+    def show_stats(self, state: GameState, note: StatsNote) -> None: ...
+
+
+def stats_labels(state: GameState, note: StatsNote, name: Namer) -> dict[int, str]:
+    """条目对应的名字：备选英雄写名字，饰品写"名字（N 金）"。"""
+    if note.kind == "hero":
+        select = state.hero_select
+        offered = select.offered if select is not None else ()
+        return {h.entity_id: name(h.card_id) for h in offered}
+    options = state.choice.options if state.choice is not None else ()
+    return {o.entity_id: choice_option_text(o, name) for o in options}
 
 
 class AdviceDisplay:
@@ -398,6 +410,19 @@ class AdviceDisplay:
             first = f"AI（{seconds}）：选 {pick} —— {advice.reason}"
         self._block("🤖 ", [first, *hero_comment_lines(state, advice, self._name)])
 
+    def show_stats(self, state: GameState, note: StatsNote) -> None:
+        """本版本统计（本版本统计设计文档第 6.3、7.1 节）：署名一行，下面每个条目一行，按平均
+        名次从好到差，战绩最好的前面 ▲（只是战绩，不是推荐）。"""
+        what = "本版本战绩" if note.kind == "hero" else "饰品本版本战绩"
+        self._out(f"  📊 {what}（{note.source}）：")
+        labels = stats_labels(state, note, self._name)
+        ranked = sorted(enumerate(note.rows), key=lambda pair: (pair[1].score, pair[0]))
+        for _, row in ranked:
+            label = labels.get(row.entity_id, f"#{row.entity_id}")
+            mark = "▲ " if row.entity_id == note.best else "  "
+            gap = "" if label.endswith("）") else " "  # "神秘魔方（5 金）第 3.95 名"
+            self._out(f"{INDENT}{mark}{label}{gap}{row.text}")
+
     def show_choice(self, state: GameState, advice: ChoiceAdvice | None) -> None:
         """advice 为 None 表示游戏刚弹出一组选项：不打印（选项那一行由时间线打印）。"""
         if advice is None:
@@ -473,3 +498,6 @@ class DisplayGroup:
 
     def show_position(self, state: GameState, advice: PositionAdvice | None) -> None:
         self._each("show_position", state, advice)
+
+    def show_stats(self, state: GameState, note: StatsNote) -> None:
+        self._each("show_stats", state, note)

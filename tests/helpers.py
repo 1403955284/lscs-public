@@ -59,3 +59,29 @@ def _real_cards_path():
 # 本机缓存的完整卡牌数据（lscs 第一次运行时下载）；没有时跳过依赖它的测试
 REAL_CARDS = _real_cards_path()
 NEEDS_REAL_CARDS = pytest.mark.skipif(not REAL_CARDS.exists(), reason="没有缓存的卡牌数据")
+
+STATS_DIR = FIXTURES / "stats"  # 裁剪过的 Firestone 统计（trim_stats.py 生成）
+STATS_FILES = ("hero-stats.json", "trinket-stats.json", "card-stats.json")
+# 统计夹具是 Firestone 的数据，不放进公开仓库（scripts/export_public.py）；没有时跳过依赖它的测试
+NEEDS_STATS_FIXTURES = pytest.mark.skipif(
+    not all((STATS_DIR / name).exists() for name in STATS_FILES),
+    reason="没有本版本统计的夹具（公开版不带）",
+)
+
+
+def fixture_stats(cards: bool = True, **cfg):
+    """夹具里的本版本统计（MetaStats）；cfg 是 [stats] 的设置（默认全部玩家、本补丁）。
+    时间按 UTC 显示，结果和机器的时区无关。"""
+    from datetime import UTC
+
+    from lscs.config import StatsConfig
+    from lscs.stats.model import load_meta_stats
+
+    card = STATS_DIR / "card-stats.json" if cards else None
+    return load_meta_stats(
+        STATS_DIR / "hero-stats.json",
+        STATS_DIR / "trinket-stats.json",
+        card,
+        StatsConfig(enabled=True, cards=cards, **cfg),
+        tz=UTC,
+    )

@@ -1,7 +1,7 @@
 import json
 
 import pytest
-from helpers import NEEDS_USER_LOG
+from helpers import NEEDS_STATS_FIXTURES, NEEDS_USER_LOG
 
 from lscs import __version__
 from lscs.cli import main
@@ -1436,3 +1436,131 @@ def test_watch_passes_cards_and_the_positioning_switch(monkeypatch, tmp_path, mi
     assert main(["watch", "--no-ai", "--no-overlay"]) == 0
     assert "站位建议：需要卡牌数据，本次关闭" in capsys.readouterr().out
     assert made[-1]["positioning"] is False
+
+
+# ---- 本版本统计（本版本统计设计文档第 5.5 节） ----
+
+
+class FakeStatsStore:
+    """代替 StatsStore：只记下怎么创建、怎么开始的，不下载。"""
+
+    def __init__(self, made, stats=None):
+        self.made, self.stats, self.started = made, stats, []
+
+    def __call__(self, cfg, cache_dir, **kwargs):
+        self.made.append((cfg, cache_dir))
+        return self
+
+    def start(self, sync=False):
+        self.started.append(sync)
+
+    def get(self):
+        return self.stats
+
+
+def _stats_on(monkeypatch, tmp_path, text="[stats]\nenabled = true\n", stats=None):
+    import lscs.cli
+
+    config = tmp_path / "config.toml"
+    config.write_text(text, encoding="utf-8")
+    monkeypatch.setattr(lscs.cli, "DEFAULT_CONFIG", config)
+    store = FakeStatsStore([], stats)
+    monkeypatch.setattr(lscs.cli, "StatsStore", store)
+    return store
+
+
+def test_stats_are_off_by_default(monkeypatch, capsys):
+    from helpers import MINI_LOG
+
+    import lscs.cli
+
+    def refuse(*_args, **_kwargs):
+        raise AssertionError("默认关闭时不该创建")
+
+    monkeypatch.setattr(lscs.cli, "StatsStore", refuse)
+    made = _spy_runner(monkeypatch)
+    assert main(["replay", str(MINI_LOG), "--advice"]) == 0
+    assert "版本统计" not in capsys.readouterr().out
+    assert made[-1]["stats"] is None
+
+
+def test_replay_prepares_stats_synchronously_when_enabled(monkeypatch, tmp_path, capsys):
+    from helpers import MINI_LOG
+
+    import lscs.cli
+
+    store = _stats_on(monkeypatch, tmp_path)
+    made = _spy_runner(monkeypatch)
+    assert main(["replay", str(MINI_LOG), "--advice"]) == 0
+    out = capsys.readouterr().out
+    assert made[-1]["stats"] == store.get  # 运行器每次要用时再取（watch 里可能还没准备好）
+    assert "版本统计：开启（数据来自 Firestone，全部玩家，本补丁），正在准备…" in out
+    assert out.index("版本统计：开启") < out.index("  📋 规则：")
+    assert store.started == [True]
+    cfg, cache_dir = store.made[0]
+    assert cfg.enabled and cache_dir == lscs.cli.STATS_CACHE_DIR  # 测试里是临时目录
+    assert main(["replay", str(MINI_LOG)]) == 0  # 不出建议：不需要统计
+    assert len(store.made) == 1
+
+
+def test_watch_prepares_stats_in_the_background(monkeypatch, tmp_path, capsys):
+    import lscs.cli
+
+    store = _stats_on(monkeypatch, tmp_path)
+    made = _spy_runner(monkeypatch)
+    _mini_cards(monkeypatch)
+    install = tmp_path / "hs"
+    (install / "Logs").mkdir(parents=True)
+    monkeypatch.setattr(lscs.cli, "_install_dir", lambda args: install)
+    monkeypatch.setattr(lscs.cli, "watch", lambda *args, **kwargs: None)
+    assert main(["watch", "--no-ai", "--no-overlay"]) == 0
+    assert "版本统计：开启（数据来自 Firestone，全部玩家，本补丁），正在后台准备…" in (
+        capsys.readouterr().out
+    )
+    assert store.started == [False]
+    assert made[-1]["stats"] == store.get
+
+
+def test_review_prepares_stats_synchronously(monkeypatch, tmp_path, capsys):
+    from helpers import MINI_LOG
+
+    store = _stats_on(monkeypatch, tmp_path, '[stats]\nenabled = true\nperiod = "past-seven"\n')
+    made = _spy_runner(monkeypatch)
+    _mini_cards(monkeypatch)
+    assert main(["review", str(MINI_LOG)]) == 0
+    assert made[-1]["stats"] == store.get
+    assert "版本统计：开启（数据来自 Firestone，全部玩家，最近 7 天），正在准备…" in (
+        capsys.readouterr().out
+    )
+    assert store.started == [True]
+
+
+def test_broken_stats_config_is_reported_and_advice_goes_on(monkeypatch, tmp_path, capsys):
+    from helpers import MINI_LOG
+
+    store = _stats_on(monkeypatch, tmp_path, "[stats]\nmmr_percentile = 30\n")
+    assert main(["replay", str(MINI_LOG), "--advice"]) == 0
+    out = capsys.readouterr().out
+    assert "stats.mmr_percentile" in out and "（这次没有本版本统计）" in out
+    assert "  📋 规则：" in out and store.made == []
+
+
+@NEEDS_STATS_FIXTURES
+def test_replay_with_ai_sends_the_stats_to_the_hero_lane(monkeypatch, tmp_path, capsys):
+    from helpers import MINI_LOG, fixture_stats
+
+    import lscs.cli
+
+    _ai_cli_setup(
+        monkeypatch, tmp_path, [MINI_HERO], extra="deep_analysis = false\n[stats]\nenabled = true\n"
+    )
+    store = FakeStatsStore([], fixture_stats())
+    monkeypatch.setattr(lscs.cli, "StatsStore", store)
+    assert main(["replay", str(MINI_LOG), "--ai"]) == 0
+    out = capsys.readouterr().out
+    # 米尔豪斯在夹具里：终端有 📊 块，规则按统计推荐（只有一个备选），AI 的消息里有战绩
+    assert "  📊 本版本战绩（数据来自 Firestone · 本补丁 · 全部玩家 · 10-14 更新）：" in out
+    assert "  📋 规则：选 米尔豪斯·法力风暴（这几个英雄里它本版本平均名次最好" in out
+    record = next((tmp_path / "recordings").glob("llm-*.jsonl")).read_text(encoding="utf-8")
+    hero = json.loads(record.splitlines()[0])
+    assert hero["lane"] == "hero" and "本版本：第 4.08 名，被选率 10%" in hero["user"]
