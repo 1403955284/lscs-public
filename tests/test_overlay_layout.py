@@ -65,8 +65,20 @@ def test_rows_on_a_wide_screen_stay_in_the_content_area():
 def test_four_choices_use_the_choice4_row():
     three = slot_rect(LAYOUT, "choice", 0, 3, FULL_HD)
     four = slot_rect(LAYOUT, "choice", 0, 4, FULL_HD)
-    assert three.width == round(0.33 * 1080) and four.width == round(0.28 * 1080)
-    assert center(four)[0] == pytest.approx(960 - 1.5 * 0.34 * 1080, abs=1)
+    assert three.width == round(0.33 * 1080) and four.width == round(0.235 * 1080)
+    assert center(four)[0] == pytest.approx(960 - 1.5 * 0.254 * 1080, abs=1)
+
+
+def test_calibrated_against_the_trinket_shop_screenshot():
+    """用户 2026-10-15 的饰品商店截图：窗口模式，客户区 2340×1301（标题栏 31 像素高）。
+    四张饰品的费用圆圈中心 x 量得 690、1017、1345、1680，卡面上沿（含费用圆圈）约 395、
+    下沿约 835。商店本身比画面中心偏右约 15 像素，所以 x 放宽到 ±20。"""
+    client = Rect(0, 31, 2340, 1301)
+    cards = [slot_rect(LAYOUT, "choice", i, 4, client) for i in range(4)]
+    assert [center(r)[0] for r in cards] == pytest.approx([690, 1017, 1345, 1680], abs=20)
+    for rect in cards:
+        assert rect.y == pytest.approx(395, abs=15)
+        assert rect.y + rect.height == pytest.approx(835, abs=15)
 
 
 def test_buttons_are_circles_in_the_content_area():

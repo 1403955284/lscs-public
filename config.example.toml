@@ -53,7 +53,7 @@ cards = true                   # 把本版本战绩好的随从发给 AI（只�
 
 [highlight]
 # 游戏画面上的高亮：在"下一步"指的那张牌或按钮的四个角画浅金色的括号（只在 Windows 上显示）。
-# 商店、场面和四个按钮按两张招募阶段截图（2560×1440、2559×1369）校准过；选项和选英雄两排还是估计的。
+# 商店、场面、四个按钮和饰品（4 个选项）都按截图校准过；3 个选项和选英雄两排还是估计的。
 # 对不准时用 uv run lscs highlight-test 对照截图再校准。
 # x 是内容区宽度的比例，y 和尺寸是内容区高度的比例（内容区：客户区里居中的最大 16:9 矩形）。
 enabled = true                 # false 只关高亮，面板的"下一步"照常
@@ -74,10 +74,10 @@ choice_y = 0.5                 # 弹出的 2~3 个选项（发现、黑暗之赐
 choice_pitch = 0.42
 choice_width = 0.33
 choice_height = 0.5
-choice4_y = 0.5                # 弹出的 4 个选项（饰品）
-choice4_pitch = 0.34
-choice4_width = 0.28
-choice4_height = 0.44
+choice4_y = 0.45               # 弹出的 4 个选项（饰品商店；按截图校准过）
+choice4_pitch = 0.254
+choice4_width = 0.235
+choice4_height = 0.34
 hero_y = 0.47                  # 选英雄
 hero_pitch = 0.36
 hero_width = 0.27

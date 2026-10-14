@@ -5,8 +5,9 @@
 比例（卡牌跟着高度缩放）。一排 count 个槽位以内容区中心对称排开：
 中心 x = 内容区中心 + (index - (count - 1) / 2) × pitch × 高度。
 
-商店、场面和四个按钮按用户的两张招募阶段截图（2560×1440、2559×1369）校准过（2026-10-12）；选项、
-选英雄两排还是按 16:9 估计的。按钮半径为 0 表示还没校准、不画框。用 lscs highlight-test 对照截图
+商店、场面和四个按钮按用户的两张招募阶段截图（2560×1440、2559×1369）校准过（2026-10-12），饰品
+（4 个选项）那一排按饰品商店的截图（2340×1301 客户区）校准过（2026-10-15）；3 个选项和选英雄两排
+还是按 16:9 估计的。按钮半径为 0 表示还没校准、不画框。用 lscs highlight-test 对照截图
 校准后改这里和 config.example.toml；config.toml 的 [highlight] 可以覆盖每一个数。
 """
 
@@ -63,7 +64,7 @@ class HighlightLayout:
     shop: RowSpec = RowSpec(y=0.367, pitch=0.128, width=0.11, height=0.15)
     board: RowSpec = RowSpec(y=0.55, pitch=0.128, width=0.11, height=0.15)
     choice: RowSpec = RowSpec(y=0.50, pitch=0.42, width=0.33, height=0.50)  # 2~3 个选项
-    choice4: RowSpec = RowSpec(y=0.50, pitch=0.34, width=0.28, height=0.44)  # 4 个选项（饰品）
+    choice4: RowSpec = RowSpec(y=0.45, pitch=0.254, width=0.235, height=0.34)  # 4 个选项（饰品）
     hero: RowSpec = RowSpec(y=0.47, pitch=0.36, width=0.27, height=0.46)  # 选英雄
     upgrade: ButtonSpec = ButtonSpec(x=0.412, y=0.175, radius=0.05)
     refresh: ButtonSpec = ButtonSpec(x=0.588, y=0.175, radius=0.05)

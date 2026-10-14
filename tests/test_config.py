@@ -389,3 +389,18 @@ def test_stats_section_in_the_example_file():
     assert "\nenabled = false" in section and "Firestone" in section
     assert "\nmmr_percentile = 100 " in section and '\nperiod = "last-patch" ' in section
     assert "\ncards = true " in section
+
+
+def test_old_trinket_row_values_are_reported():
+    from lscs.config import HighlightConfig, old_highlight_values
+
+    old = HighlightConfig(
+        choice4_y=0.5, choice4_pitch=0.34, choice4_width=0.28, choice4_height=0.44
+    )
+    assert old_highlight_values(old) == [
+        "choice4_y = 0.5",
+        "choice4_pitch = 0.34",
+        "choice4_width = 0.28",
+        "choice4_height = 0.44",
+    ]
+    assert old_highlight_values(HighlightConfig()) == []

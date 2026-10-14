@@ -103,10 +103,10 @@ class HighlightConfig(BaseModel):
     choice_pitch: Ratio = 0.42
     choice_width: Ratio = 0.33
     choice_height: Ratio = 0.50
-    choice4_y: Ratio = 0.50
-    choice4_pitch: Ratio = 0.34
-    choice4_width: Ratio = 0.28
-    choice4_height: Ratio = 0.44
+    choice4_y: Ratio = 0.45
+    choice4_pitch: Ratio = 0.254
+    choice4_width: Ratio = 0.235
+    choice4_height: Ratio = 0.34
     hero_y: Ratio = 0.47
     hero_pitch: Ratio = 0.36
     hero_width: Ratio = 0.27
@@ -134,6 +134,11 @@ OLD_HIGHLIGHT_TEMPLATE: dict[str, str | float | tuple[float, float, float]] = {
     "refresh": (0.19, 0.43, 0.045),
     "freeze": (0.81, 0.43, 0.045),
     "hero_power": (0.585, 0.82, 0.06),
+    # 饰品（4 个选项）那一排：2026-10-15 按截图校准之前的估计值
+    "choice4_y": 0.5,
+    "choice4_pitch": 0.34,
+    "choice4_width": 0.28,
+    "choice4_height": 0.44,
 }
 
 
