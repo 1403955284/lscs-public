@@ -193,14 +193,14 @@ wheels = [
 
 [[package]]
 name = "hearthstone"
-version = "9.21.1"
+version = "9.22.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "requests" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/39/74/b32ef1fe04bd51aaa77da89b17b2099a23b36e52fbd1568406a0b8cf9ba6/hearthstone-9.21.1.tar.gz", hash = "sha256:2acca0deca4dd8f7fbfa1dc8dcd7a128066e92d87a85e831b5104686885bee50", size = 56929, upload-time = "2026-09-23T19:01:16.79Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/1d/6b/dc4f44cbfebb96689a6b4e5498996394d744bed6069bf01d88cec90a8b27/hearthstone-9.22.0.tar.gz", hash = "sha256:55a662f746afc6d157d05293a714dbbe2d60e64eec21b6ae9b3fa6a2035f628b", size = 57396, upload-time = "2026-10-13T17:56:42.029Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ec/22/263043a2f421cce3abcf3cace34b5e0d835bac321404f0fadb90fa8bd360/hearthstone-9.21.1-py3-none-any.whl", hash = "sha256:4bc6e9c38925d6b9a88e5d0535f36640f63455bfa5702e911db1f54f2d432161", size = 50987, upload-time = "2026-09-23T19:01:15.323Z" },
+    { url = "https://files.pythonhosted.org/packages/d4/55/d767ad2699c7d8f3597172ed00679512808d374d24df98f86b944103300c/hearthstone-9.22.0-py3-none-any.whl", hash = "sha256:005acf683beebb479fc706fccd3a1d0c51268e504abdf570329387656fafda0f", size = 51446, upload-time = "2026-10-13T17:56:40.326Z" },
 ]
 
 [[package]]
@@ -387,7 +387,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "hearthstone", specifier = ">=9.21" },
+    { name = "hearthstone", specifier = ">=9.22" },
     { name = "hslog", specifier = ">=1.20" },
     { name = "openai", specifier = ">=3.28.0" },
     { name = "pydantic", specifier = ">=2.7" },

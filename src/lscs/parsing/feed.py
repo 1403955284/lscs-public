@@ -20,6 +20,7 @@ from dataclasses import dataclass
 
 from hearthstone.enums import GameTag
 from hslog import LogParser, packets
+from hslog.exceptions import NoSuchEnum
 from hslog.player import PlayerReference
 
 log = logging.getLogger(__name__)
@@ -143,6 +144,8 @@ class PowerFeed:
     def __init__(self) -> None:
         self.errors = 0  # 解析失败的行数（跨对局累计）
         self.dropped = 0  # 无法确定实体 ID 而丢弃的变化数（跨对局累计）
+        # 游戏更新后 hearthstone 库还不认识的标签名：这些行跳过、不算出错，每个只提醒一次
+        self.unknown_tags: set[str] = set()
         self._reset()
 
     def _reset(self) -> None:
@@ -173,9 +176,16 @@ class PowerFeed:
             self._reset()
         try:
             self._parser.read_line(line)
-        except Exception:
-            self.errors += 1
-            log.warning("无法解析日志行: %r", line, exc_info=True)
+        except Exception as exc:
+            # 不认识的标签名（TAG_CHANGE、实体下面的 tag= 行、BLOCK_START 的 TriggerKeyword）：
+            # hslog 在改动解析状态之前就抛出，跳过这一行即可。BLOCK_START 因此没打开时，对应的
+            # BLOCK_END 会提前关掉上一层，但这里只按顺序取数据包、不用块的嵌套，不受影响。
+            # 已知标签的新取值（如新的区域、卡牌类型）可能影响状态，照常算出错。
+            if isinstance(exc, NoSuchEnum) and exc.enum is GameTag:
+                self._unknown_tag(str(exc.value))
+            else:
+                self.errors += 1
+                log.warning("无法解析日志行: %r", line, exc_info=True)
         changes = self._drain()
         m = _GAME_META.search(line)
         if m:
@@ -183,6 +193,16 @@ class PowerFeed:
         elif _OPTIONS_START.search(line):
             changes.append(OptionsStarted())
         return changes
+
+    def _unknown_tag(self, name: str) -> None:
+        if name in self.unknown_tags:
+            return
+        self.unknown_tags.add(name)
+        log.warning(
+            "日志里有程序还不认识的标签 %s（游戏更新了），这些行已跳过，不影响建议；"
+            "更新 lscs 后会消失",
+            name,
+        )
 
     def _drain(self) -> list[PowerChange]:
         out: list[PowerChange] = []

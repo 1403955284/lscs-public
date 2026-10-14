@@ -109,6 +109,57 @@ def test_bad_line_counts_error_and_keeps_going():
     assert feed.feed(P + "TAG_CHANGE Entity=10 tag=ATK value=1") == [TagSet(10, GameTag.ATK, 1)]
 
 
+def test_unknown_tag_name_is_skipped_quietly(caplog):
+    """游戏更新后日志里会出现 hearthstone 库还不认识的标签（如 THO_DEFEATED_ALLY）：
+    这些行跳过，不算解析出错，每个标签只提醒一次、不打印调用栈。"""
+    feed = PowerFeed()
+    feed_all(feed, HEADER)
+    unknown = P + "TAG_CHANGE Entity=10 tag=NOT_A_REAL_TAG_XYZ value=0"
+    assert feed.feed(unknown) == []
+    assert feed.feed(unknown) == []
+    assert feed.errors == 0
+    assert feed.unknown_tags == {"NOT_A_REAL_TAG_XYZ"}
+    warnings = [r for r in caplog.records if "NOT_A_REAL_TAG_XYZ" in r.getMessage()]
+    assert len(warnings) == 1 and warnings[0].exc_info is None
+    assert feed.feed(P + "TAG_CHANGE Entity=10 tag=ATK value=1") == [TagSet(10, GameTag.ATK, 1)]
+
+
+def test_unknown_tag_inside_full_entity_keeps_the_other_tags():
+    feed = PowerFeed()
+    feed_all(feed, HEADER)
+    lines = [
+        P + "FULL_ENTITY - Creating ID=11 CardID=BG21_029",
+        P + "    tag=NOT_A_REAL_TAG_XYZ value=0",
+        P + "    tag=ATK value=4",
+    ]
+    out = [change for line in lines for change in feed.feed(line)]
+    out += feed.feed(P + "TAG_CHANGE Entity=10 tag=ATK value=1")
+    assert TagSet(11, GameTag.ATK, 4) in out
+    assert feed.errors == 0
+
+
+def test_block_with_an_unknown_trigger_keyword_is_skipped():
+    feed = PowerFeed()
+    feed_all(feed, HEADER)
+    lines = [
+        P + "BLOCK_START BlockType=TRIGGER Entity=10 EffectCardId=System.String[] "
+        "EffectIndex=0 Target=0 SubOption=-1 TriggerKeyword=NOT_A_KEYWORD",
+        P + "    TAG_CHANGE Entity=10 tag=ATK value=5",
+        P + "BLOCK_END",
+        P + "TAG_CHANGE Entity=10 tag=ATK value=6",
+    ]
+    out = [change for line in lines for change in feed.feed(line)]
+    assert out == [TagSet(10, GameTag.ATK, 5), TagSet(10, GameTag.ATK, 6)]
+    assert feed.errors == 0 and feed.unknown_tags == {"NOT_A_KEYWORD"}
+
+
+def test_unknown_value_of_a_known_enum_tag_is_still_an_error():
+    feed = PowerFeed()
+    feed_all(feed, HEADER)
+    assert feed.feed(P + "TAG_CHANGE Entity=10 tag=ZONE value=NOT_A_ZONE") == []
+    assert feed.errors == 1
+
+
 def test_hide_entity_with_unresolved_entity_is_dropped():
     feed = PowerFeed()
     feed_all(feed, HEADER)
