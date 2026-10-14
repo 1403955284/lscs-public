@@ -60,6 +60,11 @@ POLL_INTERVAL = 0.2  # watch 默认的轮询间隔（秒）
 OVERLAY_REPLAY_SPEED = 20.0  # replay --overlay 没填 --speed 时的倍速（不等待的话面板一闪而过）
 RECOMMENDED_OUTPUT_TOKENS = 1500  # 快速建议要写分析和 JSON，800 容易截断
 RECOMMENDED_CALLS_PER_GAME = 100  # 一局大约 60~70 次调用
+# watch 启动时说明"⚔ 本场已定"是剧透不是预测；where：有面板时"棋盘顶部和这里"，否则"这里"
+COMBAT_RESULT_NOTICE = (
+    "战斗一开始，{where}会先显示这场的真实结果（日志比画面快，不是预测）；"
+    "不想被剧透把 config.toml 的 [combat_result] enabled 改成 false。"
+)
 log = logging.getLogger(__name__)
 
 
@@ -178,9 +183,11 @@ def _pool_estimator(cards, args: argparse.Namespace):
     return PoolEstimator(cards, load_pool_config(Path(args.pool)).copies)
 
 
-def _timeline(name: Namer, verbose: bool) -> UpdateHandler:
+def _timeline(name: Namer, verbose: bool, combat_result: bool = True) -> UpdateHandler:
+    """combat_result：打不打"⚔ 本场已定"那一行（watch 按 [combat_result]，replay 总是打）。"""
+
     def on_update(state: GameState, events: list[Event]) -> None:
-        for line in describe(state, events, name, verbose=verbose):
+        for line in describe(state, events, name, verbose=verbose, combat_result=combat_result):
             print(line, flush=True)
 
     return on_update
@@ -319,6 +326,7 @@ def _displays(
         ai_enabled=ai,
         choice_ai=ai and scheduler.choice_advice,
         opponents=overlay.overlay.opponents,
+        combat_result=overlay.combat_result.enabled,
     )
     return model, DisplayGroup(terminal, model)
 
@@ -326,12 +334,13 @@ def _displays(
 def _run_overlay(
     work: overlay_app.Work, model: OverlayModel, cfg: AppConfig, finished_text: str
 ) -> None:
+    window = functools.partial(
+        overlay_app.create_tk_window,
+        highlight=cfg.highlight,
+        banner=cfg.combat_result.enabled,  # 棋盘顶部的战斗结果横幅画在高亮窗口上
+    )
     overlay_app.run_with_overlay(
-        work,
-        model,
-        cfg.overlay,
-        create_window=functools.partial(overlay_app.create_tk_window, highlight=cfg.highlight),
-        finished_text=finished_text,
+        work, model, cfg.overlay, create_window=window, finished_text=finished_text
     )
 
 
@@ -591,6 +600,7 @@ def _cmd_watch(args: argparse.Namespace) -> int:
         return 1
     try:
         overlay = None if args.no_overlay else _overlay_config(explicit=False)
+        combat_result = load_config(DEFAULT_CONFIG).combat_result.enabled
     except ConfigError as exc:
         print(exc)
         return 1
@@ -619,7 +629,10 @@ def _cmd_watch(args: argparse.Namespace) -> int:
         stats=stats,
     )
     print(f"正在监听 {install / 'Logs'}，按 Ctrl+C 退出。")
-    handlers = [_timeline(name, args.verbose)]
+    if combat_result:
+        where = "棋盘顶部和这里" if overlay is not None else "这里"
+        print(COMBAT_RESULT_NOTICE.format(where=where), flush=True)
+    handlers = [_timeline(name, args.verbose, combat_result=combat_result)]
     if model is not None:
         handlers.append(model.on_update)  # 先更新面板的回合，再出建议
     handlers.append(runner.on_update)

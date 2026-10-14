@@ -52,7 +52,8 @@ def test_replay_without_dump_prints_summary(capsys):
     from helpers import MINI_LOG
 
     assert main(["replay", str(MINI_LOG)]) == 0
-    assert capsys.readouterr().out == "回放完成：11 次状态更新，最终阶段 GAME_OVER。\n"
+    # 第 12 次是战斗结算（STEP 变成 MAIN_CLEANUP）那一组
+    assert capsys.readouterr().out == "回放完成：12 次状态更新，最终阶段 GAME_OVER。\n"
 
 
 def test_watch_loop_reads_new_lines(tmp_path, mini_lines):
@@ -707,7 +708,7 @@ def test_watch_falls_back_to_terminal_when_overlay_cannot_start(
 ):
     import lscs.overlay.app
 
-    def no_tk(_cfg, highlight=None):
+    def no_tk(_cfg, highlight=None, banner=False):
         raise ImportError("No module named '_tkinter'")
 
     monkeypatch.setattr(lscs.overlay.app, "create_tk_window", no_tk)
@@ -722,7 +723,7 @@ def test_watch_falls_back_to_terminal_when_overlay_cannot_start(
 def test_watch_no_overlay_flag_keeps_terminal_only(monkeypatch, tmp_path, mini_lines, capsys):
     import lscs.overlay.app
 
-    def must_not_open(_cfg, highlight=None):
+    def must_not_open(_cfg, highlight=None, banner=False):
         raise AssertionError("不该打开面板")
 
     monkeypatch.setattr(lscs.overlay.app, "create_tk_window", must_not_open)
@@ -756,7 +757,7 @@ def test_watch_warns_about_old_highlight_values(
 ):
     import lscs.overlay.app
 
-    def no_tk(_cfg, highlight=None):
+    def no_tk(_cfg, highlight=None, banner=False):
         raise ImportError("No module named '_tkinter'")
 
     monkeypatch.setattr(lscs.overlay.app, "create_tk_window", no_tk)
@@ -782,7 +783,7 @@ def test_watch_without_old_highlight_values_or_highlight_prints_no_warning(
 ):
     import lscs.overlay.app
 
-    def no_tk(_cfg, highlight=None):
+    def no_tk(_cfg, highlight=None, banner=False):
         raise ImportError("No module named '_tkinter'")
 
     monkeypatch.setattr(lscs.overlay.app, "create_tk_window", no_tk)
@@ -806,7 +807,7 @@ def test_replay_overlay_warns_about_old_highlight_values(monkeypatch, tmp_path, 
 def test_watch_overlay_disabled_in_config(monkeypatch, tmp_path, mini_lines, capsys):
     import lscs.overlay.app
 
-    monkeypatch.setattr(lscs.overlay.app, "create_tk_window", lambda _cfg, highlight=None: 1 / 0)
+    monkeypatch.setattr(lscs.overlay.app, "create_tk_window", lambda _cfg, **_kwargs: 1 / 0)
     argv, calls = _watch_setup(monkeypatch, tmp_path, mini_lines, "[overlay]\nenabled = false\n")
     assert main(argv) == 0
     out = capsys.readouterr().out
@@ -819,6 +820,51 @@ def test_watch_with_broken_overlay_config_fails(monkeypatch, tmp_path, mini_line
     assert main(argv) == 1
     assert "overlay.position" in capsys.readouterr().out
     assert calls == []
+
+
+COMBAT_LINE = "[T 1] ⚔ 本场已定：输 · 你掉 3 血（剩 27）"
+
+
+def test_watch_reveals_the_combat_result_and_explains_it(monkeypatch, tmp_path, mini_lines, capsys):
+    from lscs.cli import COMBAT_RESULT_NOTICE
+
+    argv, _calls = _watch_setup(monkeypatch, tmp_path, mini_lines)
+    assert main([*argv, "--no-overlay"]) == 0
+    out = capsys.readouterr().out
+    notice = COMBAT_RESULT_NOTICE.format(where="这里")  # 没有面板：只有终端这一行
+    assert notice in out and "不是预测" in notice and "[combat_result] enabled" in notice
+    assert out.index("正在监听") < out.index(notice)
+    assert COMBAT_LINE in out
+    assert out.index("[T 1] 战斗结束") < out.index(COMBAT_LINE) < out.index("[T 2] 招募开始")
+
+
+def test_watch_without_combat_result_keeps_quiet(monkeypatch, tmp_path, mini_lines, capsys):
+    text = "[combat_result]\nenabled = false\n"
+    argv, _calls = _watch_setup(monkeypatch, tmp_path, mini_lines, text)
+    assert main([*argv, "--no-overlay"]) == 0
+    out = capsys.readouterr().out
+    assert "⚔" not in out and "真实结果" not in out
+    assert "[T 1] 战斗结束 | 对手阵容" in out  # 时间线其余照常，只是不写打完以后的血量
+    assert "战斗结束 我方血量" not in out
+
+
+def test_watch_with_broken_combat_result_config_fails(monkeypatch, tmp_path, mini_lines, capsys):
+    argv, calls = _watch_setup(monkeypatch, tmp_path, mini_lines, "[combat_result]\nenabled = 3\n")
+    assert main([*argv, "--no-overlay"]) == 1
+    assert "combat_result.enabled" in capsys.readouterr().out
+    assert calls == []
+
+
+def test_replay_always_prints_the_combat_result(monkeypatch, tmp_path, capsys):
+    from helpers import MINI_LOG
+
+    import lscs.cli
+
+    config = tmp_path / "config.toml"
+    config.write_text("[combat_result]\nenabled = false\n", encoding="utf-8")
+    monkeypatch.setattr(lscs.cli, "DEFAULT_CONFIG", config)
+    assert main(["replay", str(MINI_LOG), "--dump"]) == 0  # 录像没有剧透问题
+    assert COMBAT_LINE in capsys.readouterr().out
 
 
 def test_watch_with_overlay_feeds_panel_and_stops_on_ctrl_c(
@@ -845,20 +891,75 @@ def test_watch_with_overlay_feeds_panel_and_stops_on_ctrl_c(
 
     highlights = []
 
-    def create(_cfg, highlight=None):
-        highlights.append(highlight)
+    def create(_cfg, highlight=None, banner=False):
+        highlights.append((highlight, banner))
         return FakeWindow()
 
     monkeypatch.setattr(lscs.overlay.app, "create_tk_window", create)
     argv, calls = _watch_setup(monkeypatch, tmp_path, mini_lines, "[highlight]\nshop_y = 0.3\n")
     assert main(argv) == 0
-    assert highlights[0].shop_y == 0.3  # config.toml 的 [highlight] 交给面板窗口
+    assert highlights[0][0].shop_y == 0.3  # config.toml 的 [highlight] 交给面板窗口
+    assert highlights[0][1] is True  # [combat_result] 默认开：高亮窗口画战斗结果的横幅
     out = capsys.readouterr().out
     assert "悬浮面板已打开（测试）" in out
     assert "📋 规则：① 买 刷新畸体 1/4（商店里身材最好，有嘲讽）" in out  # 终端照常
     assert calls[0]["thread"] == "lscs-watch" and calls[0]["stop"] is not None
     assert seen[-1].title == "对局结束 · 第 5 名"
     assert seen[-1].version > 1
+
+
+def test_combat_result_switch_reaches_the_panel_model():
+    from factory import make_state
+
+    from lscs.cli import _displays
+    from lscs.config import AppConfig, CombatResultConfig
+    from lscs.state.models import CombatResult, Event, EventType, Phase
+
+    result = CombatResult(
+        turn=1,
+        opponent_id=3,
+        opponent_hero="X",
+        outcome="loss",
+        ghost=False,
+        lost=3,
+        dealt=0,
+        my_health=27,
+        my_armor=0,
+        opponent_health=30,
+        opponent_armor=0,
+        me_dead=False,
+        opponent_dead=False,
+    )
+    state = make_state(turn=1, phase=Phase.COMBAT).model_copy(update={"last_combat": result})
+    events = [Event(type=EventType.COMBAT_RESULT, turn=1)]
+    for enabled in (True, False):
+        cfg = AppConfig(combat_result=CombatResultConfig(enabled=enabled))
+        model, _display = _displays(lambda c: c, cfg, None)
+        model.on_update(state, events)
+        assert (model.snapshot().banner is not None) is enabled
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_combat_result_switch_reaches_the_window(
+    monkeypatch, tmp_path, mini_lines, capsys, enabled
+):
+    import lscs.overlay.app
+    from lscs.cli import COMBAT_RESULT_NOTICE
+
+    banners = []
+
+    def no_tk(_cfg, highlight=None, banner=False):
+        banners.append(banner)
+        raise ImportError("No module named '_tkinter'")
+
+    monkeypatch.setattr(lscs.overlay.app, "create_tk_window", no_tk)
+    text = None if enabled else "[combat_result]\nenabled = false\n"
+    argv, _calls = _watch_setup(monkeypatch, tmp_path, mini_lines, text)
+    assert main(argv) == 0
+    assert banners == [enabled]
+    out = capsys.readouterr().out
+    assert (COMBAT_RESULT_NOTICE.format(where="棋盘顶部和这里") in out) is enabled
+    assert ("⚔" in out) is enabled
 
 
 def test_replay_with_overlay_previews_and_closes_when_done(monkeypatch, tmp_path, capsys):
@@ -888,9 +989,7 @@ def test_replay_with_overlay_previews_and_closes_when_done(monkeypatch, tmp_path
                 assert time.monotonic() < deadline
                 time.sleep(0.005)
 
-    monkeypatch.setattr(
-        lscs.overlay.app, "create_tk_window", lambda _cfg, highlight=None: FakeWindow()
-    )
+    monkeypatch.setattr(lscs.overlay.app, "create_tk_window", lambda _cfg, **_kwargs: FakeWindow())
     assert main(["replay", str(MINI_LOG), "--overlay", "--speed", "1000"]) == 0
     out = capsys.readouterr().out
     assert "[T 1] 招募开始" in out  # --overlay 隐含 --advice，并且显示中文卡名

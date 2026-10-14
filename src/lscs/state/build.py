@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Collection, Mapping
+from dataclasses import dataclass
 
 from hearthstone.enums import CardType, GameTag, PlayState, Race, State, Step, Zone
 
@@ -30,6 +31,7 @@ from lscs.state.models import (
     Choice,
     ChoiceKind,
     ChoiceOption,
+    CombatResult,
     GameState,
     HandCard,
     HeroOption,
@@ -443,6 +445,84 @@ def opponents(store: EntityStore, last_boards: LastBoards) -> dict[int, Opponent
     return result
 
 
+@dataclass(frozen=True)
+class CombatStart:
+    """COMBAT_STARTED 时记下的起点（提前显示战斗结果设计文档第 3.2 节）。"""
+
+    raw_turn: int  # 游戏 TURN（偶数）：结算点必须还在同一个 TURN 里
+    turn: int  # 酒馆回合
+    opponent_id: int | None
+    opponent_hero: str | None  # 排行榜上找不到这个对手时 None
+    my_health: int
+    my_armor: int
+    opponent_health: int | None  # 排行榜上的；对手未知时 None
+    opponent_armor: int | None
+    ghost: bool  # 对手开打前已淘汰（残影）
+
+
+def _my_hit_points(store: EntityStore) -> tuple[int, int]:
+    """我方英雄（我方玩家实体的 HERO_ENTITY）的 (血量, 护甲)，和 player_view 一个算法。"""
+    hero = store.tag(store.player_entity(me_player_id(store)), GameTag.HERO_ENTITY)
+    if not hero:
+        return 0, 0
+    return _current_health(store, hero), store.tag(hero, GameTag.ARMOR, 0) or 0
+
+
+def _opponent(store: EntityStore, opponent_id: int | None) -> OpponentView | None:
+    """排行榜上的对手英雄（build.opponents 选的那个实体）；不知道是谁时 None。"""
+    if opponent_id is None:
+        return None
+    return opponents(store, {}).get(opponent_id)
+
+
+def combat_start(store: EntityStore, opponent_id: int | None, hero_card: str) -> CombatStart:
+    """战斗开始（Bob 的英雄换成对手英雄）时双方的有效血量。hero_card 是战斗里对手英雄的卡牌 ID。"""
+    health, armor = _my_hit_points(store)
+    opp = _opponent(store, opponent_id)
+    return CombatStart(
+        raw_turn=raw_turn(store),
+        turn=bg_turn(store),
+        opponent_id=opponent_id,
+        opponent_hero=hero_card if opp is not None else None,
+        my_health=health,
+        my_armor=armor,
+        opponent_health=opp.health if opp is not None else None,
+        opponent_armor=opp.armor if opp is not None else None,
+        ghost=opp is not None and opp.health + opp.armor <= 0,
+    )
+
+
+def combat_result(store: EntityStore, start: CombatStart) -> CombatResult:
+    """结算点（STEP 变成 MAIN_CLEANUP / FINAL_WRAPUP）时再读一遍双方的血量：掉血是有效血量之差
+    （回血、加甲不算负数）。赢没赢看我方玩家实体的 BACON_WON_LAST_COMBAT（打残影赢了也是 1），
+    对手掉了血也算赢；没赢时我方掉了血是输，没掉是平。不查卡牌库、不看 PLAYSTATE。"""
+    health, armor = _my_hit_points(store)
+    lost = max(start.my_health + start.my_armor - health - armor, 0)
+    opp = _opponent(store, start.opponent_id) if start.opponent_health is not None else None
+    dealt = 0
+    if opp is not None and not start.ghost:
+        before = start.opponent_health + (start.opponent_armor or 0)
+        dealt = max(before - opp.health - opp.armor, 0)
+    me = store.player_entity(me_player_id(store))
+    won = store.tag(me, GameTag.BACON_WON_LAST_COMBAT, 0) == 1 or dealt > 0
+    outcome = "win" if won else ("loss" if lost > 0 else "tie")
+    return CombatResult(
+        turn=start.turn,
+        opponent_id=start.opponent_id,
+        opponent_hero=start.opponent_hero,
+        outcome=outcome,
+        ghost=start.ghost,
+        lost=lost,
+        dealt=dealt,
+        my_health=health,
+        my_armor=armor,
+        opponent_health=opp.health if opp is not None else None,
+        opponent_armor=opp.armor if opp is not None else None,
+        me_dead=health + armor <= 0,
+        opponent_dead=opp is not None and not start.ghost and opp.health + opp.armor <= 0,
+    )
+
+
 def held_minions(
     me: PlayerView | None, opponents: Mapping[int, OpponentView]
 ) -> list[Minion | HandCard]:
@@ -467,7 +547,9 @@ def build_state(
     tribes_confidence: TribesConfidence,
     pool_config: PoolConfig,
     uncertain: bool,
+    last_combat: CombatResult | None = None,
 ) -> GameState:
+    """last_combat：追踪器记下的本局最近一场战斗结果（快照只读）。"""
     phase = phase_of(store)
     if phase == Phase.WAITING:
         return GameState(seq=seq, uncertain=uncertain)
@@ -501,4 +583,5 @@ def build_state(
         global_dbfs=global_dbfs(store),
         hero_select=hero_select(store) if phase == Phase.HERO_SELECT else None,
         choice=choice(store) if phase == Phase.RECRUIT else None,
+        last_combat=last_combat,
     )

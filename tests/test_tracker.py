@@ -34,6 +34,7 @@ def test_event_sequence(run_log, mini_lines):
         EventType.RECRUIT_STARTED,
         EventType.COMBAT_STARTED,
         EventType.COMBAT_ENDED,
+        EventType.COMBAT_RESULT,  # STEP 变成 MAIN_CLEANUP：结果结算了
         EventType.RECRUIT_STARTED,
         EventType.GAME_ENDED,
     ]
@@ -97,6 +98,7 @@ def test_second_game_in_same_log_starts_fresh(run_log, mini_lines):
     state, _ = updates[second_start]
     assert state.tribes == frozenset()
     assert all(o.last_board == () for o in state.opponents.values())
+    assert state.last_combat is None
 
 
 def test_non_battlegrounds_game_emits_nothing(run_log, mini_lines):
@@ -297,3 +299,101 @@ def test_mini_log_offers_its_single_hero(run_log, mini_lines):
     assert event.data == {"count": 1, "changed": 0}
     assert offered(state) == [(14, "TB_BaconShop_HERO_49", 0, 0)]
     assert state.hero_select.reroll is False
+
+
+# ---- 战斗结果（提前显示战斗结果设计文档第 3 节）----
+
+CLEANUP = "TAG_CHANGE Entity=GameEntity tag=STEP value=MAIN_CLEANUP"
+FIRST_ATTACK = "TAG_CHANGE Entity=31 tag=ATTACKING value=1"
+POWER_LINE = "D {ts} GameState.DebugPrintPower() - {body}"
+
+
+def _index_with(updates, event_type):
+    return next(
+        i for i, (_, events) in enumerate(updates) if event_type in {e.type for e in events}
+    )
+
+
+def _insert_after(lines, marker, *bodies):
+    i = next(i for i, line in enumerate(lines) if marker in line)
+    ts = lines[i].split(" ", 2)[1]
+    extra = [POWER_LINE.format(ts=ts, body=body) for body in bodies]
+    return lines[: i + 1] + extra + lines[i + 1 :]
+
+
+def test_combat_result_settles_at_main_cleanup_in_its_own_update(run_log, mini_lines):
+    updates = run_log(mini_lines)
+    ended = _index_with(updates, EventType.COMBAT_ENDED)
+    settled = _index_with(updates, EventType.COMBAT_RESULT)
+    assert settled == ended + 1  # Bob 的英雄换回来之后，STEP 变成 MAIN_CLEANUP 那一组
+    state, events = updates[settled]
+    assert [e.type for e in events] == [EventType.COMBAT_RESULT]
+    assert events[0].turn == 1
+    assert events[0].data == {"opponent": 3, "outcome": "loss", "lost": 3, "dealt": 0}
+    assert (state.phase, state.turn) == (Phase.COMBAT, 1)
+    result = state.last_combat
+    assert (result.turn, result.my_health, result.my_armor) == (1, 27, 0)
+    assert (result.ghost, result.me_dead, result.opponent_dead) == (False, False, False)
+    assert (result.opponent_id, result.opponent_hero) == (3, "TB_BaconShop_HERO_75")
+    assert (result.opponent_health, result.opponent_armor) == (30, 0)
+    assert all(s.last_combat is None for s, _ in updates[:settled])
+    assert event_types(updates).count(EventType.COMBAT_RESULT) == 1
+
+
+def test_no_result_without_main_cleanup(run_log, mini_lines):
+    updates = run_log([line for line in mini_lines if CLEANUP not in line])
+    assert EventType.COMBAT_RESULT not in event_types(updates)
+    assert all(s.last_combat is None for s, _ in updates)
+
+
+def test_won_last_combat_tag_makes_it_a_win(run_log, mini_lines):
+    lines = _insert_after(
+        mini_lines, FIRST_ATTACK, "TAG_CHANGE Entity=2 tag=BACON_WON_LAST_COMBAT value=1"
+    )
+    state, event = first_with(run_log(lines), EventType.COMBAT_RESULT)
+    assert event.data == {"opponent": 3, "outcome": "win", "lost": 3, "dealt": 0}
+    assert state.last_combat.outcome == "win"
+
+
+def test_final_wrapup_also_settles(run_log, mini_lines):
+    lines = [line.replace("value=MAIN_CLEANUP", "value=FINAL_WRAPUP") for line in mini_lines]
+    _, event = first_with(run_log(lines), EventType.COMBAT_RESULT)
+    assert event.data["outcome"] == "loss"
+
+
+def test_result_settles_once_per_combat(run_log, mini_lines):
+    lines = _insert_after(
+        mini_lines, CLEANUP, "TAG_CHANGE Entity=GameEntity tag=STEP value=MAIN_NEXT"
+    )
+    lines = _insert_after(lines, "tag=STEP value=MAIN_NEXT", CLEANUP)
+    assert event_types(run_log(lines)).count(EventType.COMBAT_RESULT) == 1
+
+
+def test_combat_without_cleanup_before_the_next_turn_has_no_result(run_log, mini_lines):
+    # 日志有缺口：没等到 MAIN_CLEANUP 就到了下一回合；下一回合的 MAIN_CLEANUP 不算这一场的
+    lines = [line for line in mini_lines if CLEANUP not in line]
+    lines = _insert_after(lines, "tag=TURN value=3", CLEANUP)
+    assert EventType.COMBAT_RESULT not in event_types(run_log(lines))
+
+
+def test_recruit_keeps_the_previous_combat_result(run_log, mini_lines):
+    updates = run_log(mini_lines)
+    state, _ = next(
+        (s, ev)
+        for s, ev in updates
+        if any(e.type == EventType.RECRUIT_STARTED and e.turn == 2 for e in ev)
+    )
+    assert state.phase == Phase.RECRUIT and state.turn == 2
+    assert state.last_combat is not None and state.last_combat.turn == 1  # 上一场的，不是本回合的
+    final, _ = updates[-1]
+    assert final.phase == Phase.GAME_OVER and final.last_combat.turn == 1
+
+
+def test_new_game_clears_the_combat_result(run_log, mini_lines):
+    updates = run_log(mini_lines + mini_lines)
+    starts = [
+        i for i, (_, ev) in enumerate(updates) if any(e.type == EventType.GAME_STARTED for e in ev)
+    ]
+    assert updates[starts[1] - 1][0].last_combat is not None
+    assert updates[starts[1]][0].last_combat is None
+    assert event_types(updates).count(EventType.COMBAT_RESULT) == 2

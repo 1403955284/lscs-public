@@ -27,6 +27,8 @@
 对手一览（对手一览与卡池估计设计文档第 7 节）：招募时最下面的"对手"区两行（▶ 下一个对手、
 ★ 最强威胁），面板超高时最先去掉；战斗中整个面板列出所有对手。规则区多一行"对子"，
 要找的牌后面写池里还剩约几张。
+
+战斗结果的横幅（overlay.banner）：面板不显示，只放进快照给画面高亮窗口画。
 """
 
 from __future__ import annotations
@@ -56,6 +58,7 @@ from lscs.advisor.positioning import where_text
 from lscs.advisor.runner import remaining_plan
 from lscs.llm.notices import AUTH_DISABLED, BUDGET_EXHAUSTED
 from lscs.llm.parse import MAX_ACTIONS  # 每个方案最多显示几步：和 AI 回答的上限一致
+from lscs.overlay.banner import Banner, BannerTracker
 from lscs.overlay.geometry import STEP_SEP
 from lscs.review.report import CIRCLED as REVIEW_NUMBERS
 from lscs.review.report import GameReview, saved_text
@@ -150,6 +153,7 @@ class OverlayView:
     choice: tuple[Line, ...] = ()  # "选择"区：游戏正弹着"选一个"时才有
     opponents: tuple[Line, ...] = ()  # "对手"区：招募时两行，战斗中列出所有对手
     review: tuple[Line, ...] = ()  # "复盘"区：对局结束后的关键时刻、下局重点和文件路径
+    banner: Banner | None = None  # 棋盘顶部的战斗结果：画面高亮窗口画，面板不画
 
 
 def slots_text(row: Row, index: int, count: int) -> str:
@@ -423,10 +427,14 @@ class OverlayModel:
         ai_enabled: bool = True,
         choice_ai: bool = True,
         opponents: bool = True,
+        combat_result: bool = True,
+        clock: Callable[[], float] | None = None,
     ) -> None:
         """choice_ai：弹出选项时会不会调用 AI（config.toml 的 choice_advice）。
-        opponents：显示对手一览（config.toml 的 [overlay] opponents）。"""
+        opponents：显示对手一览（config.toml 的 [overlay] opponents）。
+        combat_result、clock：战斗结果的横幅（[combat_result]，见 overlay.banner）。"""
         self._name = name
+        self._banners = BannerTracker(combat_result, clock)
         self._opponents_enabled = opponents
         self._ai_enabled = ai_enabled
         self._choice_enabled = ai_enabled and choice_ai
@@ -468,6 +476,7 @@ class OverlayModel:
             if any(e.type == EventType.HEROES_OFFERED for e in events):
                 self._hero_ai = ()  # 新的一组备选（重随）：上一组的推荐、错误和提示都不再显示
                 self._stats_note = None
+            self._banners.on_update(events)
             if state.choice is None or any(e.type == EventType.CHOICE_OFFERED for e in events):
                 self._choice_ai = ()  # 选完了，或者换了一组
                 if self._stats_note is not None and self._stats_note.kind == "trinket":
@@ -1048,7 +1057,7 @@ class OverlayModel:
         )
 
     def _commit(self) -> None:
-        content = self._build()
+        content = replace(self._build(), banner=self._banners.current(self._state, self._name))
         if content != self._content:
             self._content = content
             self._version += 1

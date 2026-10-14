@@ -14,9 +14,11 @@ HS = r"C:\Program Files (x86)\Hearthstone\Hearthstone.exe"
 class FakeShow:
     def __init__(self):
         self.calls = []
+        self.banners = []
 
-    def __call__(self, frames, client, seconds, preview, cfg, focus):
+    def __call__(self, frames, client, seconds, preview, cfg, focus, banner):
         self.calls.append((frames, client, seconds, preview, cfg, focus))
+        self.banners.append(banner)
 
 
 class Clock:
@@ -166,8 +168,8 @@ def test_show_tk_gives_focus_back_after_drawing(monkeypatch):
         def __init__(self, _root, _cfg, _preview):
             api.foreground = 0x999  # 第一次显示时抢走焦点
 
-        def draw(self, frames, client):
-            order.append(("draw", len(frames), client))
+        def draw(self, frames, client, banner=None):
+            order.append(("draw", len(frames), client, banner))
 
         def destroy(self):
             pass
@@ -181,5 +183,20 @@ def test_show_tk_gives_focus_back_after_drawing(monkeypatch):
     api.SetForegroundWindow = focus
     monkeypatch.setattr(tkinter, "Tk", FakeRoot)
     client = Rect(0, 0, 1920, 1080)
-    calibrate.show_tk([], client, 1, False, HighlightConfig(), 1, make_window=FakeHighlight)
-    assert order == [("draw", 0, client), ("focus", 1), "timer", "mainloop", "destroy"]
+    banner = calibrate.SAMPLE_BANNER
+    calibrate.show_tk([], client, 1, False, HighlightConfig(), 1, banner, make_window=FakeHighlight)
+    assert order == [("draw", 0, client, banner), ("focus", 1), "timer", "mainloop", "destroy"]
+
+
+def test_a_sample_banner_is_always_drawn(monkeypatch):
+    """不管 --rows 选了什么，棋盘顶部都画一条样例横幅，截图时能一起核对它的位置。"""
+    FakeWin32Api(windows=[FakeWindow(1, pid=10)], paths={10: HS}).install(monkeypatch)
+    for rows in (CALIBRATION_ROWS, ["hero"]):
+        show = FakeShow()
+        ok, out = run(show, rows=rows)
+        assert ok and show.banners == [calibrate.SAMPLE_BANNER]
+        assert any("样例横幅" in line for line in out)
+    banner = calibrate.SAMPLE_BANNER
+    assert banner.text == "本场已定：赢 · 洛卡拉掉 5 血"
+    assert (banner.tone, banner.expires_at) == ("win", None)
+    assert "横幅" in calibrate.SCREENSHOT_HINT and "本场已定" in calibrate.SCREENSHOT_HINT

@@ -1,6 +1,7 @@
 """悬浮面板窗口（tkinter）：画出 OverlayView，贴到炉石窗口上，按前台窗口显示或隐藏。
 Windows 上贴靠炉石时，再开一个画面高亮窗口（overlay.highlight）盖在炉石客户区上，
-给"下一步"画框；它和面板同一个 Tk、同一个主循环，面板在它上面，面板隐藏时它清空。
+给"下一步"画框、战斗中在棋盘顶部画战斗结果的横幅（OverlayView.banner，面板自己不画）；
+它和面板同一个 Tk、同一个主循环，面板在它上面，面板隐藏时它清空。
 
 面板右上角贴着拖动标签（overlay.grip，第三个 Toplevel，不穿透、不抢焦点）：按住它把面板拖走，
 松手后按炉石客户区的比例记在 overlay-position.json（overlay.position），双击恢复默认位置。
@@ -14,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import time
 import tkinter as tk
 import tkinter.font as tkfont
 from collections.abc import Callable
@@ -22,6 +24,7 @@ from typing import Protocol
 
 from lscs.config import HighlightConfig, OverlayConfig
 from lscs.overlay import geometry, position, win32
+from lscs.overlay.banner import Banner
 from lscs.overlay.geometry import Anchor, Drag, Layout, Rect
 from lscs.overlay.grip import GripWindow
 from lscs.overlay.model import NextStep, OverlayModel, OverlayView, condense
@@ -47,6 +50,7 @@ SIDES = {"right": "右下角", "left": "左下角", "top": "顶部"}
 DOCK_FAILURE_LIMIT = 5  # 贴靠炉石连续失败几次后改用普通置顶窗口
 FALLBACK_HINT = "面板已移到屏幕右上角；不需要面板可以用 --no-overlay 关闭"
 HIGHLIGHT_ON = "游戏里会用金色框标出下一步要点的牌或按钮。"
+BANNER_ON = "战斗一开始棋盘顶部会显示这场的真实结果。"
 HIGHLIGHT_OFF_PLAIN = "画面高亮已关闭：面板无法贴靠炉石"
 HIGHLIGHT_ONLY_WINDOWS = "画面高亮只在 Windows 上显示。"
 DRAGGED_HERE = '显示在上次拖到的位置（双击面板上的"≡ 拖动"恢复默认）'
@@ -67,10 +71,25 @@ class HighlightLike(Protocol):
     @property
     def hwnd(self) -> int | None: ...  # Windows 上的窗口句柄（预览时为 None）
 
-    def show(self, step: NextStep | None, client: Rect | None) -> bool | None:
+    def show(
+        self, step: NextStep | None, client: Rect | None, banner: Banner | None = None
+    ) -> bool | None:
         """返回 True 表示 Tk 重建了高亮的顶层窗口（新的句柄）：面板要重新放到它上面。"""
 
     def destroy(self) -> None: ...
+
+
+def highlight_inputs(
+    view: OverlayView | None, *, steps: bool, banner: bool, now: float
+) -> tuple[NextStep | None, Banner | None]:
+    """交给画面高亮的 (下一步, 横幅)：steps 是 [highlight] enabled，banner 是 [combat_result]
+    enabled；对局结束那场的横幅过了 expires_at 就不画（定位每 500 毫秒一次，最多晚半秒清掉）。"""
+    if view is None:
+        return None, None
+    shown = view.banner if banner else None
+    if shown is not None and shown.expires_at is not None and now >= shown.expires_at:
+        shown = None
+    return (view.next_step if steps else None), shown
 
 
 def _tk_highlight(root: tk.Misc, cfg: HighlightConfig) -> HighlightLike:
@@ -102,14 +121,21 @@ class OverlayWindow:
         highlight: HighlightConfig | None = None,
         make_highlight: HighlightFactory = _tk_highlight,
         position_path: Path | None = None,
+        banner: bool = False,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        """highlight：config.toml 的 [highlight]；None 或关闭时不画画面高亮。
+        """highlight：config.toml 的 [highlight]；None 时不开画面高亮窗口。
+        banner：在高亮窗口上画战斗结果的横幅（config.toml 的 [combat_result]）。[highlight] 关掉
+        但要横幅时照样开高亮窗口，只是不画"下一步"；两个都关才不开。clock 判断横幅到期没有。
         position_path：拖到的位置存在哪（lscs watch 用 position.DEFAULT_PATH）；None 时不读不写，
         拖动只在这次有效。"""
         self._cfg = cfg
         self._out = out
         self._position_path = position_path
-        self._highlight_cfg = highlight if highlight is not None and highlight.enabled else None
+        self._steps = highlight is not None and highlight.enabled  # 画"下一步"
+        self._banner = highlight is not None and banner  # 画战斗结果的横幅
+        self._highlight_cfg = highlight if self._steps or self._banner else None
+        self._clock = clock
         self._make_highlight = make_highlight
         self._highlight: HighlightLike | None = None
         previous = None
@@ -214,7 +240,7 @@ class OverlayWindow:
             log.warning("画面高亮无法开启", exc_info=True)
             self._highlight = None
             return f"画面高亮无法开启（{_reason(exc)}），只显示面板。"
-        return HIGHLIGHT_ON
+        return (HIGHLIGHT_ON if self._steps else "") + (BANNER_ON if self._banner else "")
 
     def _open_grip(self) -> str:
         """创建拖动标签（放在屏幕外），返回加在状态行后面的说明（成功时为空）。
@@ -269,9 +295,11 @@ class OverlayWindow:
         """client 为 None：面板隐藏了，高亮也清空。画错不影响面板，同一种错误只记一次。"""
         if self._highlight is None:
             return
-        step = self._view.next_step if self._view is not None else None
+        step, banner = highlight_inputs(
+            self._view, steps=self._steps, banner=self._banner, now=self._clock()
+        )
         try:
-            if self._highlight.show(step, client):
+            if self._highlight.show(step, client, banner):
                 self._lift_panel()  # 高亮换了新的顶层窗口：面板和标签重新放到它上面
         except Exception:
             self._report("画面高亮出错")

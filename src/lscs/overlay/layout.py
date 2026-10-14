@@ -30,6 +30,12 @@ CALIBRATION_ROWS = (*ROWS, "buttons")
 DEFAULT_CALIBRATION_ROWS = ("shop", "board", "buttons")
 # highlight-test 每排画几个
 CALIBRATION_SLOTS = {"shop": 7, "board": 7, "choice": 3, "choice4": 4, "hero": 4}
+# 战斗结果的横幅（提前显示战斗结果设计文档第 2.4、5.3 节）：内容区顶部正中，只压到对手手牌扇形
+# （牌背）的下半截，不碰对手头像（顶在约 0.08 H）、名字、排行榜和按钮
+BANNER_FONT, BANNER_FONT_MIN = 0.026, 14  # 字号：内容区高度的 2.6%，最少 14 像素
+BANNER_TOP = 0.012  # 框的上边离内容区顶部
+BANNER_HEIGHT = 1.6  # 框高 = 字号 × 1.6
+BANNER_MAX_WIDTH = 0.5  # 框最宽是内容区宽度的一半（文字左右各留一个字号）
 CALIBRATION_LABELS = {
     "shop": "商店",
     "board": "场面",
@@ -191,6 +197,29 @@ def calibration_frames(
             for i in range(count)
         ]
     return frames
+
+
+def banner_font_px(client: Rect, aspect: float) -> int:
+    """横幅的字号：内容区高度的 2.6%（1440 → 37，720 → 19），最少 14 像素。"""
+    return max(BANNER_FONT_MIN, round(BANNER_FONT * content_rect(client, aspect).height))
+
+
+def banner_text_width(client: Rect, aspect: float, font_px: int) -> int:
+    """横幅里的文字最多多宽：框最宽半个内容区，减去左右各一个字号。"""
+    return round(BANNER_MAX_WIDTH * content_rect(client, aspect).width) - 2 * font_px
+
+
+def banner_box(client: Rect, aspect: float, text_width: int, font_px: int) -> Rect:
+    """横幅的框（和 client 同一个坐标系）：上边在内容区顶部往下 1.2% 高度，高 1.6 个字号，
+    宽是文字宽加左右各一个字号（最多半个内容区），在内容区里水平居中。"""
+    content = content_rect(client, aspect)
+    width = min(text_width + 2 * font_px, round(BANNER_MAX_WIDTH * content.width))
+    return Rect(
+        content.x + (content.width - width) // 2,
+        content.y + round(BANNER_TOP * content.height),
+        width,
+        round(BANNER_HEIGHT * font_px),
+    )
 
 
 def parameter_lines(layout: HighlightLayout) -> list[str]:

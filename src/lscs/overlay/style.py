@@ -28,6 +28,11 @@ CORNER = 0.015  # 细线框（style = "frame"）和校准框的圆角半径
 DIM = 0.45  # 呼吸时的暗色：高亮颜色往 DARK 混 45%
 PULSE_MS = 200  # 呼吸时每隔多久切换一次
 PULSE_TOGGLES = 6  # 切换几次：暗 3 次，最后回到原色，共约 1.2 秒
+# 战斗结果横幅的边框和字：赢淡绿、输橙色、平浅灰（和面板的"复盘"标签、警告、标题同色）；
+# 底色是 BADGE_FILL（实心深色：色键窗口不能半透明，字画在深色上，边缘不出色键杂边）
+BANNER_COLORS = {"win": "#9fd3a0", "loss": "#ff9f43", "tie": "#d4d4dc"}
+BANNER_RING = 2  # 横幅边框的宽度
+BANNER_RADIUS = 0.3  # 横幅的圆角半径 = 框高 × 0.3
 
 Point = tuple[float, float]
 Polyline = tuple[Point, ...]

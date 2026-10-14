@@ -10,9 +10,12 @@ from lscs.parsing.feed import GameStarted, OptionsStarted, PowerChange, TagSet
 from lscs.state.build import (
     BOB_HERO_PREFIX,
     HERO_PLACEHOLDER,
+    CombatStart,
     bg_turn,
     bob_player_id,
     build_state,
+    combat_result,
+    combat_start,
     me_player_id,
     minion,
     opponents,
@@ -21,7 +24,7 @@ from lscs.state.build import (
     sorted_zone,
 )
 from lscs.state.entities import EntityStore
-from lscs.state.models import Event, EventType, GameState, Minion, Phase
+from lscs.state.models import CombatResult, Event, EventType, GameState, Minion, Phase
 from lscs.state.pool import PoolConfig
 from lscs.state.tribes import TribeInference
 
@@ -53,6 +56,9 @@ class StateTracker:
         self._pending: list[Event] = []
         self._in_combat = False
         self._combat_opponent: int | None = None
+        # 这一场战斗开始时的双方血量；结算（STEP 变成 MAIN_CLEANUP / FINAL_WRAPUP）后清空
+        self._combat_start: CombatStart | None = None
+        self._last_combat: CombatResult | None = None  # 本局最近一场结算过的结果
         self._board_captured = True
         self._uncertain = False
         self._awaiting_options = False
@@ -91,6 +97,7 @@ class StateTracker:
             tribes_confidence=self._tribes.confidence,
             pool_config=self._pool_config,
             uncertain=self._uncertain,
+            last_combat=self._last_combat,
         )
         before, after = _diff_events(self._state, new, self._heroes_offered, self._picked())
         if any(e.type == EventType.HEROES_OFFERED for e in before):
@@ -123,6 +130,17 @@ class StateTracker:
             ):
                 self._pending.append(Event(type=EventType.RECRUIT_STARTED, turn=bg_turn(store)))
                 self._awaiting_options = True
+            start = self._combat_start
+            if start is None:
+                return
+            if change.tag == GameTag.TURN and raw_turn(store) != start.raw_turn:
+                self._combat_start = None  # 日志有缺口：没等到结算就换了回合，这一场没有结果
+            elif (
+                change.tag == GameTag.STEP
+                and change.value in (Step.MAIN_CLEANUP, Step.FINAL_WRAPUP)
+                and raw_turn(store) == start.raw_turn
+            ):
+                self._settle_combat(start)
             return
         if change.tag != GameTag.HERO_ENTITY:
             return
@@ -143,6 +161,7 @@ class StateTracker:
     def _start_combat(self, hero_card: str) -> None:
         self._in_combat = True
         self._combat_opponent = self._identify_opponent(hero_card)
+        self._combat_start = combat_start(self._store, self._combat_opponent, hero_card)
         self._board_captured = False
         self._pending.append(
             Event(
@@ -166,6 +185,24 @@ class StateTracker:
         )
         self._in_combat = False
         self._combat_opponent = None
+
+    def _settle_combat(self, start: CombatStart) -> None:
+        """整场战斗在日志里已经写完（比画面动画早几十秒）：算出结果，每场只结算一次。"""
+        result = combat_result(self._store, start)
+        self._last_combat = result
+        self._combat_start = None
+        self._pending.append(
+            Event(
+                type=EventType.COMBAT_RESULT,
+                turn=result.turn,
+                data={
+                    "opponent": result.opponent_id,
+                    "outcome": result.outcome,
+                    "lost": result.lost,
+                    "dealt": result.dealt,
+                },
+            )
+        )
 
     def _identify_opponent(self, hero_card: str) -> int | None:
         for player_id, opp in opponents(self._store, {}).items():

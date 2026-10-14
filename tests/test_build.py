@@ -393,3 +393,143 @@ def test_held_minions_skip_eliminated_opponents():
     }
     assert held_minions(me, opponents) == [mine, in_hand, alive]
     assert held_minions(None, opponents) == [alive]
+
+
+# ---- 战斗结果（提前显示战斗结果设计文档第 3.2 节）----
+
+COMBAT_STARTS = "Entity=3 tag=HERO_ENTITY value=40"
+SETTLES = "tag=STEP value=MAIN_CLEANUP"
+OPPONENT_HERO = "TB_BaconShop_HERO_75"
+
+
+def start_of_combat(mini_lines, *changes, opponent=3):
+    from lscs.state.build import combat_start
+
+    store = store_until(mini_lines, COMBAT_STARTS)
+    for change in changes:
+        store.apply(change)
+    return combat_start(store, opponent, OPPONENT_HERO)
+
+
+def settle(mini_lines, start, *changes):
+    from lscs.state.build import combat_result
+
+    store = store_until(mini_lines, SETTLES)
+    for change in changes:
+        store.apply(change)
+    return combat_result(store, start)
+
+
+def test_combat_start_and_result_in_the_mini_log(mini_lines):
+    from lscs.state.build import CombatStart
+    from lscs.state.models import CombatResult
+
+    start = start_of_combat(mini_lines)
+    assert start == CombatStart(
+        raw_turn=2,
+        turn=1,
+        opponent_id=3,
+        opponent_hero=OPPONENT_HERO,
+        my_health=30,
+        my_armor=0,
+        opponent_health=30,
+        opponent_armor=0,
+        ghost=False,
+    )
+    assert settle(mini_lines, start) == CombatResult(
+        turn=1,
+        opponent_id=3,
+        opponent_hero=OPPONENT_HERO,
+        outcome="loss",
+        ghost=False,
+        lost=3,
+        dealt=0,
+        my_health=27,
+        my_armor=0,
+        opponent_health=30,
+        opponent_armor=0,
+        me_dead=False,
+        opponent_dead=False,
+    )
+
+
+def test_damage_to_the_opponent_is_a_win_even_without_the_tag(mini_lines):
+    from lscs.parsing.feed import TagSet
+
+    start = start_of_combat(mini_lines, TagSet(12, GameTag.ARMOR, 4))
+    assert (start.opponent_health, start.opponent_armor) == (30, 4)
+    # 先扣护甲再扣血：30+4 → 27
+    result = settle(mini_lines, start, TagSet(12, GameTag.DAMAGE, 3), TagSet(12, GameTag.ARMOR, 0))
+    assert (result.outcome, result.dealt, result.lost) == ("win", 7, 3)
+    assert (result.opponent_health, result.opponent_armor, result.opponent_dead) == (27, 0, False)
+
+
+def test_armor_counts_and_healing_is_not_negative_damage(mini_lines):
+    from lscs.parsing.feed import TagSet
+
+    start = start_of_combat(mini_lines, TagSet(14, GameTag.ARMOR, 5))
+    assert (start.my_health, start.my_armor) == (30, 5)
+    armored = settle(mini_lines, start, TagSet(14, GameTag.ARMOR, 2))
+    assert (armored.lost, armored.my_health, armored.my_armor) == (6, 27, 2)
+    healed = settle(mini_lines, start, TagSet(14, GameTag.DAMAGE, 0), TagSet(14, GameTag.ARMOR, 9))
+    assert (healed.lost, healed.outcome) == (0, "tie")
+
+
+def test_tie_when_nobody_takes_damage(mini_lines):
+    from lscs.parsing.feed import TagSet
+
+    result = settle(mini_lines, start_of_combat(mini_lines), TagSet(14, GameTag.DAMAGE, 0))
+    assert (result.outcome, result.lost, result.dealt) == ("tie", 0, 0)
+
+
+def test_ghost_opponent(mini_lines):
+    from lscs.parsing.feed import TagSet
+
+    gone = TagSet(12, GameTag.DAMAGE, 30)  # 对手 3 开打前已经淘汰
+    start = start_of_combat(mini_lines, gone)
+    assert start.ghost and start.opponent_health == 0
+    won = settle(
+        mini_lines,
+        start,
+        gone,
+        TagSet(14, GameTag.DAMAGE, 0),
+        TagSet(2, GameTag.BACON_WON_LAST_COMBAT, 1),
+    )
+    assert (won.outcome, won.ghost, won.lost, won.dealt) == ("win", True, 0, 0)
+    assert (won.opponent_health, won.opponent_dead) == (0, False)  # 残影不算"对手被淘汰"
+    # 残影也能打赢我：按输处理，写掉血
+    lost = settle(mini_lines, start, gone)
+    assert (lost.outcome, lost.ghost, lost.lost) == ("loss", True, 3)
+
+
+def test_eliminations(mini_lines):
+    from lscs.parsing.feed import TagSet
+
+    start = start_of_combat(mini_lines)
+    killed = settle(
+        mini_lines,
+        start,
+        TagSet(14, GameTag.DAMAGE, 0),
+        TagSet(12, GameTag.DAMAGE, 38),
+        TagSet(2, GameTag.BACON_WON_LAST_COMBAT, 1),
+    )
+    assert (killed.outcome, killed.dealt, killed.opponent_health) == ("win", 38, -8)
+    assert killed.opponent_dead and not killed.me_dead
+    dead = settle(mini_lines, start, TagSet(14, GameTag.DAMAGE, 44))
+    assert (dead.outcome, dead.lost, dead.my_health) == ("loss", 44, -14)
+    assert dead.me_dead and not dead.opponent_dead
+
+
+def test_unknown_opponent_only_measures_my_side(mini_lines):
+    from lscs.parsing.feed import TagSet
+
+    start = start_of_combat(mini_lines, opponent=None)
+    assert (start.opponent_id, start.opponent_hero, start.opponent_health) == (None, None, None)
+    assert start.ghost is False
+    result = settle(mini_lines, start, TagSet(12, GameTag.DAMAGE, 5))
+    assert (result.outcome, result.lost, result.dealt) == ("loss", 3, 0)
+    assert result.opponent_health is None and result.opponent_armor is None
+    assert not result.opponent_dead
+    # 对手编号认出来了但排行榜上没有这个人：一样当作不知道
+    missing = start_of_combat(mini_lines, opponent=9)
+    assert (missing.opponent_id, missing.opponent_hero, missing.opponent_health) == (9, None, None)

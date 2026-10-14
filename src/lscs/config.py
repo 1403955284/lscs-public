@@ -193,6 +193,15 @@ class PositioningConfig(BaseModel):
     enabled: bool = True  # 买完牌后提示把哪个随从拖到最左 / 最右，附一句为什么
 
 
+class CombatResultConfig(BaseModel):
+    """提前显示战斗结果（提前显示战斗结果设计文档第 6 节）：日志比画面快几十秒，战斗一开始就在
+    终端和棋盘顶部写出这场的真实结果。是剧透，不是预测；不想被剧透就关掉。"""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    enabled: bool = True
+
+
 class StatsConfig(BaseModel):
     """本版本统计（本版本统计设计文档第 10 节）：Firestone 的公开数据，非官方，默认关闭。"""
 
@@ -211,6 +220,7 @@ class AppConfig(BaseModel):
     overlay: OverlayConfig = OverlayConfig()
     review: ReviewConfig = ReviewConfig()
     positioning: PositioningConfig = PositioningConfig()
+    combat_result: CombatResultConfig = CombatResultConfig()
     stats: StatsConfig = StatsConfig()
     highlight: HighlightConfig = HighlightConfig()
 

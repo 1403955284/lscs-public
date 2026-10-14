@@ -114,6 +114,16 @@ def test_dimmed_blends_toward_the_dark_under_stroke():
     assert dimmed("#000000", 1.0) == "#281e0a"
 
 
+def test_banner_colors_match_the_panel():
+    pytest.importorskip("tkinter")
+    from lscs.overlay import window
+    from lscs.overlay.style import BANNER_COLORS
+
+    # 赢淡绿、输橙色、平浅灰：和面板的"复盘"标签、警告、标题同色
+    assert BANNER_COLORS == {"win": window.REVIEW_TAG, "loss": window.WARN, "tie": window.TITLE}
+    assert BANNER_COLORS == {"win": "#9fd3a0", "loss": "#ff9f43", "tie": "#d4d4dc"}
+
+
 def test_rounded_points_clamp_the_radius():
     points = rounded_points(0, 0, 10, 40, 30)  # 半径超过短边的一半：按一半算
     assert len(points) == 24

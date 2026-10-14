@@ -194,3 +194,43 @@ def test_eliminated_opponents_return_their_minions_to_the_pool(updates):
 def test_next_opponent_during_combat_is_the_current_one(updates):
     state = next(s for s, _ in updates if s.phase == Phase.COMBAT and s.turn == 5)
     assert state.next_opponent_id == 6
+
+
+# ---- 战斗结果（提前显示战斗结果设计文档第 2.3 节）----
+
+
+def combat_results(updates):
+    return [
+        (i, state, event)
+        for i, (state, events) in enumerate(updates)
+        for event in events
+        if event.type == EventType.COMBAT_RESULT
+    ]
+
+
+def test_every_combat_result_matches_the_review(updates):
+    found = combat_results(updates)
+    assert [e.turn for _, _, e in found] == list(range(1, 17))
+    by_outcome = {"win": set(), "loss": set(), "tie": set()}
+    for _, _, event in found:
+        by_outcome[event.data["outcome"]].add(event.turn)
+    assert by_outcome["loss"] == set()
+    assert by_outcome["tie"] == {6, 7, 10, 14}
+    dealt = {e.turn: e.data["dealt"] for *_, e in found if e.data["dealt"]}
+    assert dealt == {1: 2, 2: 4, 3: 3, 4: 6, 5: 6, 8: 12, 9: 12, 11: 11, 12: 12, 13: 17, 16: 9}
+    ghosts = {e.turn for _, s, e in found if s.last_combat.ghost}
+    assert ghosts == {15} and 15 in by_outcome["win"]  # 打残影赢了也是赢
+    assert all(e.data["lost"] == 0 for *_, e in found)
+    assert {e.turn for _, s, e in found if s.last_combat.opponent_dead} == {11, 12, 16}
+
+
+def test_last_combat_result_comes_before_game_ended(updates):
+    index, state, event = combat_results(updates)[-1]
+    assert event.turn == 16
+    assert (state.phase, state.turn) == (Phase.COMBAT, 16)  # 对手死、对局结束：结果还在战斗中
+    ended = next(
+        i
+        for i, (_, events) in enumerate(updates)
+        if any(e.type == EventType.GAME_ENDED for e in events)
+    )
+    assert ended > index

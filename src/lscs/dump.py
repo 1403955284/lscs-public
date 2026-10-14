@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from lscs.advisor.names import armor_zh, choice_option_text, choice_title, minion_label
+from lscs.advisor.names import (
+    armor_zh,
+    choice_option_text,
+    choice_title,
+    combat_result_line,
+    minion_label,
+)
 from lscs.state.models import Event, EventType, GameState, Minion, TribesConfidence
 
 Namer = Callable[[str], str]
@@ -15,6 +21,7 @@ KEY_EVENTS = (
     EventType.RECRUIT_STARTED,
     EventType.COMBAT_STARTED,
     EventType.COMBAT_ENDED,
+    EventType.COMBAT_RESULT,
     EventType.GAME_ENDED,
     EventType.CHOICE_OFFERED,
 )
@@ -33,8 +40,14 @@ def _list(items: list[str]) -> str:
 
 
 def describe(
-    state: GameState, events: list[Event], name: Namer = _identity, verbose: bool = False
+    state: GameState,
+    events: list[Event],
+    name: Namer = _identity,
+    verbose: bool = False,
+    combat_result: bool = True,
 ) -> list[str]:
+    """combat_result：战斗一开始就写出这场的真实结果（config.toml 的 [combat_result]）。关掉时
+    "战斗结束"那一行也不写血量：那时日志里的血量已经是打完以后的，比画面早 20~70 秒。"""
     lines: list[str] = []
     for event in events:
         if not verbose and event.type not in KEY_EVENTS:
@@ -78,8 +91,15 @@ def describe(
             case EventType.COMBAT_ENDED:
                 opp = state.opponents.get(event.data.get("opponent"))  # type: ignore[arg-type]
                 board = [_minion(m, name) for m in opp.last_board] if opp else []
-                health = me.health if me is not None else "-"
-                lines.append(f"{prefix} 战斗结束 我方血量 {health} | 对手阵容: {_list(board)}")
+                if combat_result:
+                    health = me.health if me is not None else "-"
+                    lines.append(f"{prefix} 战斗结束 我方血量 {health} | 对手阵容: {_list(board)}")
+                else:  # 不剧透：不写打完以后的血量
+                    lines.append(f"{prefix} 战斗结束 | 对手阵容: {_list(board)}")
+            case EventType.COMBAT_RESULT:
+                result = state.last_combat
+                if combat_result and result is not None and result.turn == event.turn:
+                    lines.append(f"{prefix} {combat_result_line(result, name)}")
             case EventType.GAME_ENDED:
                 lines.append(f"{prefix} 对局结束 名次 {event.data.get('place')}")
             case EventType.CHOICE_OFFERED if state.choice is not None:

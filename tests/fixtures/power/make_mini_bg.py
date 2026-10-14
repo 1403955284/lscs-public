@@ -7,7 +7,8 @@
 - 10 占位英雄 → 选择 14 米尔豪斯；15 英雄技能
 - 12/13 排行榜上的两个对手（PlayerID 3、4）
 - 第 1 回合：商店 30 小鬼、31 海盗、32 元素（嘲讽）；买下 31 并打出；冻结剩下两张
-- 第 1 场战斗：对手 3（复制英雄 40），阵容 41 金色小鬼 + 42 元素；我掉 3 血
+- 第 1 场战斗：对手 3（复制英雄 40），阵容 41 金色小鬼 + 42 元素；我掉 3 血，
+  Bob 的英雄换回来之后 STEP 变成 MAIN_CLEANUP（战斗结果在这时结算）
 - 第 2 回合：商店 50 纳迦（2 本）、51 酒馆法术；升本费用降到 4
 - 结束：我第 5 名
 """
@@ -157,6 +158,9 @@ GROUPS: dict[str, list[str]] = {
         "TAG_CHANGE Entity=3 tag=HERO_ENTITY value=11",
         "TAG_CHANGE Entity=40 tag=ZONE value=SETASIDE",
         "TAG_CHANGE Entity=42 tag=ZONE value=SETASIDE",
+    ],
+    "10:00:51.0000000": [  # 战斗结算完（MAIN_CLEANUP）：结果在这里定下
+        "TAG_CHANGE Entity=GameEntity tag=STEP value=MAIN_CLEANUP",
     ],
     "10:01:00.0000000": [  # 第 2 回合
         "TAG_CHANGE Entity=GameEntity tag=TURN value=3",

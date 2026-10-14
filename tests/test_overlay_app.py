@@ -257,5 +257,42 @@ def test_watch_window_remembers_its_position_in_the_project_file(monkeypatch):
     monkeypatch.setattr(window, "OverlayWindow", FakeOverlayWindow)
     cfg, highlight = OverlayConfig(), HighlightConfig()
     app.create_tk_window(cfg, highlight=highlight)
-    assert created == [(cfg, {"highlight": highlight, "position_path": position.DEFAULT_PATH})]
+    path = position.DEFAULT_PATH
+    assert created == [(cfg, {"highlight": highlight, "banner": False, "position_path": path})]
     assert position.DEFAULT_PATH.name == "overlay-position.json"
+    app.create_tk_window(cfg, highlight=highlight, banner=True)  # [combat_result] 交给窗口
+    assert created[-1][1]["banner"] is True
+
+
+def _banner(expires_at=None):
+    from lscs.overlay.banner import Banner
+
+    return Banner("本场已定：赢 · 洛卡拉掉 5 血", "win", expires_at)
+
+
+def test_highlight_gets_the_step_and_the_banner_by_their_switches():
+    import pytest
+
+    pytest.importorskip("tkinter")
+    from lscs.overlay.model import NextStep, OverlayView
+    from lscs.overlay.window import highlight_inputs
+
+    step = NextStep("▶ 刷新商店")
+    view = OverlayView(title="t", next_step=step, banner=_banner())
+    assert highlight_inputs(view, steps=True, banner=True, now=0) == (step, _banner())
+    # [highlight] enabled = false 但开着横幅：高亮窗口照样开，只是不画"下一步"
+    assert highlight_inputs(view, steps=False, banner=True, now=0) == (None, _banner())
+    assert highlight_inputs(view, steps=True, banner=False, now=0) == (step, None)
+    assert highlight_inputs(None, steps=True, banner=True, now=0) == (None, None)
+
+
+def test_banner_past_its_deadline_is_not_drawn():
+    import pytest
+
+    pytest.importorskip("tkinter")
+    from lscs.overlay.model import OverlayView
+    from lscs.overlay.window import highlight_inputs
+
+    view = OverlayView(title="对局结束 · 第 3 名", banner=_banner(expires_at=120.0))
+    assert highlight_inputs(view, steps=True, banner=True, now=119.5) == (None, view.banner)
+    assert highlight_inputs(view, steps=True, banner=True, now=120.0) == (None, None)

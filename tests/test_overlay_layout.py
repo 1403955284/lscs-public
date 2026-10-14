@@ -245,3 +245,59 @@ def test_parameter_lines_use_the_config_names():
     assert "upgrade = [0.412, 0.175, 0.05]" in lines
     assert lines[-1] == "hero_power = [0.593, 0.78, 0.055]"
     assert "freeze = [0.646, 0.175, 0]" in parameter_lines(UNCALIBRATED)  # 半径 0：还没校准
+
+
+# ---- 战斗结果的横幅（提前显示战斗结果设计文档第 5.3 节）----
+
+
+def test_banner_on_the_first_screenshot_2560x1440():
+    from lscs.overlay.layout import banner_box, banner_font_px
+
+    client = Rect(0, 0, 2560, 1440)
+    px = banner_font_px(client, LAYOUT.aspect)
+    assert px == 37
+    box = banner_box(client, LAYOUT.aspect, 500, px)
+    assert (box.y, box.bottom) == (17, 76)  # 对手头像框顶在约 120~130 像素
+    assert box.width == 500 + 2 * 37
+    assert box.x + box.width / 2 == pytest.approx(1280, abs=1)  # 居中
+    assert box.bottom < 0.08 * 1440  # 只压到手牌扇形的下半截
+
+
+def test_banner_on_the_second_screenshot_2559x1369():
+    from lscs.overlay.layout import banner_box, banner_font_px
+
+    client = Rect(0, 0, 2559, 1369)
+    px = banner_font_px(client, LAYOUT.aspect)
+    assert px == 36
+    box = banner_box(client, LAYOUT.aspect, 400, px)
+    assert (box.y, box.bottom) == (16, 74)
+    assert box.x + box.width / 2 == pytest.approx(62 + 2434 / 2, abs=1)  # 内容区居中
+    assert box.bottom < 0.08 * 1369
+
+
+@pytest.mark.parametrize("height", [360, 480, 720, 1080, 2160])
+def test_banner_stays_above_the_opponent_portrait(height):
+    from lscs.overlay.layout import banner_box, banner_font_px
+
+    client = Rect(30, 40, round(height * 16 / 9), height)
+    px = banner_font_px(client, LAYOUT.aspect)
+    assert px >= 14  # 小窗口里也看得清
+    box = banner_box(client, LAYOUT.aspect, 300, px)
+    assert box.y >= client.y and box.bottom - client.y < 0.09 * height
+    assert box.height == round(1.6 * px)
+
+
+def test_banner_font_follows_the_height():
+    from lscs.overlay.layout import banner_font_px
+
+    assert banner_font_px(Rect(0, 0, 1280, 720), LAYOUT.aspect) == 19
+    assert banner_font_px(Rect(0, 0, 2560, 1080), LAYOUT.aspect) == 28  # 21:9：按内容区高度
+
+
+def test_banner_width_is_capped_at_half_the_content_width():
+    from lscs.overlay.layout import banner_box, banner_text_width
+
+    client = Rect(0, 0, 2560, 1440)
+    assert banner_text_width(client, LAYOUT.aspect, 37) == 1280 - 2 * 37
+    box = banner_box(client, LAYOUT.aspect, 5000, 37)
+    assert box.width == 1280 and box.x == 640

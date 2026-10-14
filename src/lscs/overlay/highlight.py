@@ -6,7 +6,9 @@
 - 预览（preview=True，非 Windows 上的 lscs highlight-test）：深色背景的普通置顶窗口；
 - 隐藏时只清空画布（整窗透明，鼠标也穿过去），不 withdraw；
 - 换到新目标时"呼吸"约 1.2 秒（style.Breathing，用 after 定时器、只改线条颜色、不重建图形）；
-  换目标、隐藏、销毁时取消定时器，回调里的异常只记日志。
+  换目标、隐藏、销毁时取消定时器，回调里的异常只记日志；
+- 战斗中在棋盘顶部正中画一条战斗结果的横幅（提前显示战斗结果设计文档第 5.3 节）：深色圆角框，
+  边框和字用结果的颜色，画在框之后（最上层），不呼吸。
 
 几何和呼吸的状态机都在 overlay.style（纯函数），这里只管画。只在主线程使用。出错时抛出异常，
 由调用方（OverlayWindow、highlight-test）决定怎么处理。
@@ -21,12 +23,24 @@ from functools import partial
 
 from lscs.config import HighlightConfig
 from lscs.overlay import win32
-from lscs.overlay.geometry import Rect
-from lscs.overlay.layout import Frame, HighlightLayout, content_rect, step_frames
+from lscs.overlay.banner import Banner
+from lscs.overlay.geometry import Rect, clip, wrap
+from lscs.overlay.layout import (
+    Frame,
+    HighlightLayout,
+    banner_box,
+    banner_font_px,
+    banner_text_width,
+    content_rect,
+    step_frames,
+)
 from lscs.overlay.model import NextStep
 from lscs.overlay.style import (
     BADGE_FILL,
     BADGE_RING,
+    BANNER_COLORS,
+    BANNER_RADIUS,
+    BANNER_RING,
     CORNER,
     DARK,
     PULSE_MS,
@@ -65,7 +79,7 @@ class HighlightWindow:
         self._preview = preview
         self._hwnd: int | None = None
         self._client: Rect | None = None  # 窗口现在的位置（炉石客户区）
-        self._drawn: tuple | None = None  # 画布上现在画的 (框, 位置)
+        self._drawn: tuple | None = None  # 画布上现在画的 (框, 位置, 横幅)
         self._fonts: dict[int, tkfont.Font] = {}
         self._top = tk.Toplevel(root)
         self._breathing: Breathing | None = None
@@ -128,25 +142,28 @@ class HighlightWindow:
 
     # ---- 显示 ----
 
-    def show(self, step: NextStep | None, client: Rect | None) -> bool:
+    def show(
+        self, step: NextStep | None, client: Rect | None, banner: Banner | None = None
+    ) -> bool:
         """client 是炉石客户区（屏幕坐标）；None 表示面板隐藏了：清空，整窗透明。
-        返回 True 表示 Tk 重建了顶层窗口（见 draw）。"""
+        banner：棋盘顶部的战斗结果（None 不画）。返回 True 表示 Tk 重建了顶层窗口（见 draw）。"""
         if client is None:
             return self.draw([], None)
-        return self.draw(step_frames(self._layout, step, client), client)
+        return self.draw(step_frames(self._layout, step, client), client, banner)
 
-    def draw(self, frames: list[Frame], client: Rect | None) -> bool:
-        """把框画在 client 上（框的坐标和 client 同一个坐标系）；client 为 None 时只清空。
-        返回 True 表示 Tk 重建了顶层窗口（新的句柄，样式已经重新加上）。"""
+    def draw(self, frames: list[Frame], client: Rect | None, banner: Banner | None = None) -> bool:
+        """把框（和横幅）画在 client 上（框的坐标和 client 同一个坐标系）；client 为 None 时
+        只清空。返回 True 表示 Tk 重建了顶层窗口（新的句柄，样式已经重新加上）。"""
         if client is not None and client != self._client:
             self._top.geometry(f"{client.width}x{client.height}+{client.x}+{client.y}")
             self._client = client
         rebuilt = self._apply_style() if not self._preview else False
-        key = (tuple(frames), client)
+        shown = (banner.text, banner.tone) if banner is not None and client is not None else None
+        key = (tuple(frames), client, shown)  # 文字或位置变了才重画；到期时间不算
         if key == self._drawn:
             return rebuilt
         self._drawn = key
-        if self._breathing is not None:  # 先定下这次用原色还是暗色；校准框不呼吸
+        if self._breathing is not None:  # 先定下这次用原色还是暗色；校准框和横幅不呼吸
             steps = tuple(f for f in frames if not f.calibration) if client is not None else ()
             self._breathing.show(steps)
         self._canvas.delete("all")
@@ -154,6 +171,8 @@ class HighlightWindow:
             height = content_rect(client, self._layout.aspect).height
             for frame in frames:
                 self._draw_frame(frame, client, height)
+            if banner is not None:
+                self._draw_banner(banner, client)
         return rebuilt
 
     def _font(self, px: int) -> tkfont.Font:
@@ -203,6 +222,29 @@ class HighlightWindow:
                 anchor="center",
                 justify="center",
             )
+
+    def _draw_banner(self, banner: Banner, client: Rect) -> None:
+        """棋盘顶部正中的战斗结果：深色圆角框，边框和粗体字用结果的颜色。文字比半个内容区还宽
+        时截掉末尾加"…"（现有的写法都放得下）。"""
+        aspect = self._layout.aspect
+        px = banner_font_px(client, aspect)
+        font = self._font(px)
+        limit = max(banner_text_width(client, aspect, px), 1)
+        text = clip(wrap(banner.text, limit, font.measure), 1, limit, font.measure)[0]
+        box = banner_box(client, aspect, font.measure(text), px)
+        x0, y0 = box.x - client.x, box.y - client.y
+        x1, y1 = x0 + box.width, y0 + box.height
+        color = BANNER_COLORS.get(banner.tone, self._color)
+        self._canvas.create_polygon(
+            rounded_points(x0, y0, x1, y1, BANNER_RADIUS * box.height),
+            smooth=True,
+            fill=BADGE_FILL,
+            outline=color,
+            width=BANNER_RING,
+        )
+        self._canvas.create_text(
+            (x0 + x1) / 2, (y0 + y1) / 2, text=text, fill=color, font=font, anchor="center"
+        )
 
     def _draw_corners(self, rect: Rect, widths: Strokes, color: str, height: int) -> None:
         """四个角的括号：先画四条深色衬底，再在上面画颜色线（方头、尖角，看起来是实心的 L）。"""

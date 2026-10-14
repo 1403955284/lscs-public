@@ -147,6 +147,7 @@ D 10:00:50.0000000 GameState.DebugPrintPower() - TAG_CHANGE Entity=14 tag=DAMAGE
 D 10:00:50.0000000 GameState.DebugPrintPower() - TAG_CHANGE Entity=3 tag=HERO_ENTITY value=11
 D 10:00:50.0000000 GameState.DebugPrintPower() - TAG_CHANGE Entity=40 tag=ZONE value=SETASIDE
 D 10:00:50.0000000 GameState.DebugPrintPower() - TAG_CHANGE Entity=42 tag=ZONE value=SETASIDE
+D 10:00:51.0000000 GameState.DebugPrintPower() - TAG_CHANGE Entity=GameEntity tag=STEP value=MAIN_CLEANUP
 D 10:01:00.0000000 GameState.DebugPrintPower() - TAG_CHANGE Entity=GameEntity tag=TURN value=3
 D 10:01:00.0000000 GameState.DebugPrintPower() - TAG_CHANGE Entity=2 tag=RESOURCES value=4
 D 10:01:00.0000000 GameState.DebugPrintPower() - TAG_CHANGE Entity=2 tag=RESOURCES_USED value=0

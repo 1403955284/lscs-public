@@ -270,3 +270,71 @@ def test_opponent_tavern_tiers_are_live(updates):
     assert [recruit(updates, t).opponents[1].tavern_tier for t in range(1, 14)] == [1] * 13
     tiers = [recruit(updates, t).opponents[2].tavern_tier for t in range(1, 14)]
     assert tiers == sorted(tiers) and tiers[-1] == 6
+
+
+# ---- 战斗结果（提前显示战斗结果设计文档第 2.3 节）----
+
+
+def combat_results(updates):
+    """[(更新的序号, 快照, COMBAT_RESULT 事件), ...]"""
+    return [
+        (i, state, event)
+        for i, (state, events) in enumerate(updates)
+        for event in events
+        if event.type == EventType.COMBAT_RESULT
+    ]
+
+
+def test_every_combat_result_matches_the_review(updates):
+    found = combat_results(updates)
+    assert [e.turn for _, _, e in found] == list(range(1, 14))
+    outcomes = "".join({"win": "W", "loss": "L", "tie": "T"}[e.data["outcome"]] for *_, e in found)
+    assert outcomes == "LLWWWLTLLWWWL"
+    assert [s.last_combat.turn for _, s, _ in found] == list(range(1, 14))
+    assert [e.turn for _, s, e in found if s.last_combat.ghost] == [4, 10]
+    assert [e.data["lost"] for *_, e in found] == [2, 2, 0, 0, 0, 2, 0, 15, 15, 0, 0, 0, 18]
+    dealt = {e.turn: e.data["dealt"] for *_, e in found if e.data["dealt"]}
+    assert dealt == {3: 5, 5: 7, 11: 10, 12: 15}
+
+
+def test_combat_results_arrive_after_combat_ended_and_before_the_next_recruit(updates):
+    found = combat_results(updates)
+    for index, state, event in found[:-1]:
+        assert (state.phase, state.turn) == (Phase.COMBAT, event.turn)
+        ended = max(
+            i
+            for i, (_, events) in enumerate(updates[:index])
+            if any(e.type == EventType.COMBAT_ENDED and e.turn == event.turn for e in events)
+        )
+        recruit_index = next(
+            i
+            for i, (_, events) in enumerate(updates)
+            if any(e.type == EventType.RECRUIT_STARTED and e.turn == event.turn + 1 for e in events)
+        )
+        assert ended < index < recruit_index
+        assert updates[ended][0].seq < state.seq < updates[recruit_index][0].seq
+
+
+def test_turn_5_opponent_damage_is_known_at_the_result(updates):
+    # 复盘按 COMBAT_ENDED 那次 flush 读到的还是 36；结算点已经是 29，不用等下一回合
+    _, state, _ = combat_results(updates)[4]
+    opp = state.opponents[8]
+    assert opp.health + opp.armor == 29
+    assert (state.last_combat.opponent_health, state.last_combat.opponent_armor) == (29, 0)
+
+
+def test_opponent_eliminated_on_turn_12(updates):
+    _, state, _ = combat_results(updates)[11]
+    result = state.last_combat
+    assert result.opponent_dead and not result.me_dead
+    assert (result.opponent_id, result.opponent_health) == (1, -8)
+
+
+def test_eliminated_on_turn_13_settles_at_final_wrapup(updates):
+    index, state, _ = combat_results(updates)[12]
+    result = state.last_combat
+    assert result.me_dead and not result.opponent_dead
+    assert (result.my_health, result.my_armor, result.lost) == (-14, 0, 18)
+    assert (state.phase, state.turn) == (Phase.GAME_OVER, 13)
+    types = [e.type for e in updates[index][1]]
+    assert types.index(EventType.COMBAT_RESULT) < types.index(EventType.GAME_ENDED)

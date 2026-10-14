@@ -1799,3 +1799,73 @@ def test_trinket_stats_cleared_with_a_new_group_or_once_chosen():
     assert model.snapshot().choice == ()
     model.on_update(choice_state(turn=6, seq=5).model_copy(update={"choice": other.choice}), [])
     assert "Firestone" not in model.snapshot().choice[0].text
+
+
+# ---- 战斗结果的横幅：面板模型只把它放进快照（规则见 test_overlay_banner.py）----
+
+
+def combat_result(turn=10, **overrides):
+    from lscs.state.models import CombatResult
+
+    values = dict(
+        turn=turn,
+        opponent_id=2,
+        opponent_hero="H2",
+        outcome="win",
+        ghost=False,
+        lost=0,
+        dealt=5,
+        my_health=30,
+        my_armor=6,
+        opponent_health=30,
+        opponent_armor=9,
+        me_dead=False,
+        opponent_dead=False,
+    )
+    values.update(overrides)
+    return CombatResult(**values)
+
+
+def settled(result):
+    return [Event(type=EventType.COMBAT_RESULT, turn=result.turn)]
+
+
+def test_banner_rides_along_and_the_combat_view_does_not_change():
+    from dataclasses import replace
+
+    from lscs.overlay.banner import Banner
+
+    model = OverlayModel(name)
+    model.on_update(COMBAT_10, [Event(type=EventType.COMBAT_STARTED, turn=10)])
+    before = model.snapshot()
+    assert before.banner is None  # 结算之前没有横幅
+    result = combat_result()
+    model.on_update(COMBAT_10.model_copy(update={"last_combat": result, "seq": 6}), settled(result))
+    after = model.snapshot()
+    assert after.banner == Banner("本场已定：赢 · 洛卡拉掉 5 血", "win")
+    assert after.version == before.version + 1
+    assert replace(after, banner=None, version=0) == replace(before, version=0)  # 面板一字不变
+    assert after.title == "第 10 回合 · 战斗中 · 对手 詹迪斯"
+    for level in range(3):
+        assert condense(after, level).banner == after.banner
+
+
+def test_banner_switch_and_clock_reach_the_banner():
+    result = combat_result()
+    off = OverlayModel(name, combat_result=False)
+    off.on_update(COMBAT_10.model_copy(update={"last_combat": result}), settled(result))
+    assert off.snapshot().banner is None
+    now = [100.0]
+    model = OverlayModel(name, clock=lambda: now[0])
+    dead = combat_result(
+        turn=13, outcome="loss", lost=18, dealt=0, my_health=-14, my_armor=0, me_dead=True
+    )
+    over = make_state(turn=13, phase=Phase.GAME_OVER).model_copy(
+        update={"last_combat": dead, "final_place": 3}
+    )
+    model.on_update(over, [*settled(dead), Event(type=EventType.GAME_ENDED, turn=13)])
+    view = model.snapshot()
+    assert view.title == "对局结束 · 第 3 名" and view.banner.expires_at == 120.0
+    now[0] = 120.0
+    model.on_update(over.model_copy(update={"seq": 2}), [])
+    assert model.snapshot().banner is None

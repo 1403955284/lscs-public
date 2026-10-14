@@ -548,6 +548,97 @@ def test_highlight_is_off_when_disabled_or_off_windows():
         window._release()
 
 
+def test_banner_alone_still_opens_the_highlight_and_expires(monkeypatch):
+    """[highlight] enabled = false 但开着战斗结果的横幅：照样开高亮窗口，"下一步"总是 None；
+    对局结束那场的横幅过了 20 秒就传 None（定位的定时器自己清掉，不用等新的状态）。"""
+    tk = pytest.importorskip("tkinter")
+    from factory import make_state
+    from fake_win32 import FakeWin32Api, FakeWindow
+
+    from lscs.config import HighlightConfig
+    from lscs.overlay.geometry import Rect
+    from lscs.overlay.window import BANNER_ON, HIGHLIGHT_ON, OverlayWindow
+    from lscs.state.models import CombatResult
+
+    hs = r"C:\Program Files (x86)\Hearthstone\Hearthstone.exe"
+    api = FakeWin32Api(
+        windows=[FakeWindow(1, pid=10, size=(1600, 900), origin=(100, 50))], paths={10: hs}
+    ).install(monkeypatch)
+    api.foreground = 1
+    calls = []
+
+    class FakeHighlight:
+        hwnd = 0x999
+
+        def __init__(self, _root, cfg):
+            calls.append(("open", cfg.enabled))
+
+        def show(self, step, client, banner=None):
+            calls.append((step, client, banner))
+            return False
+
+        def destroy(self):
+            pass
+
+    now = [100.0]
+    try:
+        window = OverlayWindow(
+            OverlayConfig(),
+            out=lambda _l: None,
+            highlight=HighlightConfig(enabled=False),
+            make_highlight=FakeHighlight,
+            banner=True,
+            clock=lambda: now[0],
+        )
+    except tk.TclError as exc:
+        pytest.skip(f"没有图形界面：{exc}")
+    assert calls == [("open", False)]
+    assert window.status.endswith(BANNER_ON) and HIGHLIGHT_ON not in window.status
+    model = OverlayModel(lambda c: NAMES.get(c, c), clock=lambda: now[0])
+    dead = CombatResult(
+        turn=3,
+        opponent_id=3,
+        opponent_hero="H3",
+        outcome="loss",
+        ghost=False,
+        lost=18,
+        dealt=0,
+        my_health=-14,
+        my_armor=0,
+        opponent_health=35,
+        opponent_armor=0,
+        me_dead=True,
+        opponent_dead=False,
+    )
+    over = make_state(turn=3, phase=Phase.GAME_OVER).model_copy(
+        update={"last_combat": dead, "final_place": 3}
+    )
+    model.on_update(
+        over,
+        [Event(type=EventType.COMBAT_RESULT, turn=3), Event(type=EventType.GAME_ENDED, turn=3)],
+    )
+    seen = []
+    polls = [0]
+
+    def keep_running():
+        polls[0] += 1
+        shown = [c for c in calls[1:] if c[1] is not None]
+        if not seen and shown and shown[-1][2] is not None:
+            seen.append(shown[-1])
+            now[0] = 120.5  # 过了 20 秒
+        elif seen and shown and shown[-1][2] is None:
+            seen.append(shown[-1])
+        return len(seen) < 2 and polls[0] < 60
+
+    window.run(model, keep_running)
+    assert len(seen) == 2, calls
+    step, client, banner = seen[0]
+    assert step is None and client == Rect(100, 50, 1600, 900)
+    assert (banner.text, banner.expires_at) == ("本场已定：输 · 你掉 18 血 · 你被淘汰", 120.0)
+    assert seen[1][0] is None and seen[1][2] is None
+    assert all(c[0] is None for c in calls[1:])  # [highlight] 关着：从不画"下一步"
+
+
 def test_highlight_test_preview_window_draws_once(monkeypatch):
     pytest.importorskip("tkinter")
     from lscs.config import HighlightConfig
@@ -558,9 +649,9 @@ def test_highlight_test_preview_window_draws_once(monkeypatch):
     drawn = []
     real = calibrate.show_tk
 
-    def show(frames, client, seconds, preview, cfg, focus):
-        drawn.append((len(frames), preview))
-        real(frames, client, seconds, preview, cfg, focus)
+    def show(frames, client, seconds, preview, cfg, focus, banner):
+        drawn.append((len(frames), preview, banner.text))
+        real(frames, client, seconds, preview, cfg, focus, banner)
 
     out = []
     ok = calibrate.run_highlight_test(
@@ -569,7 +660,7 @@ def test_highlight_test_preview_window_draws_once(monkeypatch):
     if not ok and out[-1].startswith("× 无法打开高亮窗口"):
         pytest.skip(f"没有图形界面：{out[-1]}")
     assert ok, out
-    assert drawn == [(29, True)]
+    assert drawn == [(29, True, "本场已定：赢 · 洛卡拉掉 5 血")]
 
 
 def test_focus_taken_by_the_highlight_is_given_back(monkeypatch):
@@ -589,7 +680,7 @@ def test_focus_taken_by_the_highlight_is_given_back(monkeypatch):
         def __init__(self, _root, _cfg):
             api.foreground = self.hwnd  # 第一次显示时抢走了焦点
 
-        def show(self, step, client):
+        def show(self, step, client, banner=None):
             pass
 
         def destroy(self):
@@ -681,6 +772,60 @@ def test_highlight_frame_style_draws_a_thin_full_outline():
         canvas = window._canvas
         outlines = [canvas.itemcget(i, "outline") for i in canvas.find_all()]
         assert outlines == ["#281e0a", "#80c0ff"]  # 深色衬底 + 设置的颜色
+        window.destroy()
+    finally:
+        root.destroy()
+
+
+def test_highlight_draws_the_combat_result_banner_on_top():
+    """战斗结果的横幅：棋盘顶部正中一个深色圆角框，边框和字用结果的颜色，画在框之后；
+    同样的内容不重画，None 或面板隐藏时清掉，太长时截掉末尾加"…"。"""
+    tk = pytest.importorskip("tkinter")
+    from lscs.config import HighlightConfig
+    from lscs.overlay.banner import Banner
+    from lscs.overlay.geometry import Rect
+    from lscs.overlay.model import NextStep, Target
+    from lscs.overlay.style import BADGE_FILL
+
+    root, window = _highlight_window(tk, HighlightConfig())
+    try:
+        canvas = window._canvas
+        client = Rect(40, 60, 1280, 720)  # 内容区高 720：字号 19，框 y 9~39
+        won = Banner("本场已定：赢 · 洛卡拉掉 5 血", "win")
+        window.draw([], client, won)
+        assert window.texts() == [won.text] and window.shapes() == 2
+        box, text = canvas.find_all()
+        assert canvas.type(box) == "polygon"
+        assert canvas.itemcget(box, "fill") == BADGE_FILL
+        assert canvas.itemcget(box, "outline") == "#9fd3a0"
+        assert canvas.itemcget(text, "fill") == "#9fd3a0"
+        x0, y0, x1, y1 = canvas.bbox(box)
+        assert 0 <= y0 <= 9 and 39 <= y1 < 0.08 * 720  # 不碰对手头像
+        assert (x0 + x1) / 2 == pytest.approx(640, abs=3)  # 画布坐标：客户区正中
+        drawn, items = window._drawn, canvas.find_all()
+        window.draw([], client, won)  # 同样的内容：不重画
+        assert window._drawn is drawn and canvas.find_all() == items
+        window.draw([], client, Banner(won.text, "win", expires_at=12.0))  # 到期时间不算内容
+        assert canvas.find_all() == items
+        step = NextStep("▶ 买", Target(row="shop", index=1, count=3), badge="1")
+        window.show(step, client, won)
+        assert window.shapes() == 10 + 2  # 四角括号、徽章，再加横幅
+        assert canvas.itemcget(canvas.find_all()[-1], "text") == won.text  # 最上层
+        lost = Banner("本场已定：输 · 你掉 2 血，剩 30+8", "loss")
+        window.show(step, client, lost)
+        assert lost.text in window.texts()
+        assert canvas.itemcget(canvas.find_all()[-2], "outline") == "#ff9f43"
+        window.show(step, client, None)
+        assert window.shapes() == 10 and not any("本场已定" in t for t in window.texts())
+        window.show(step, None, won)  # 面板隐藏：横幅也清掉
+        assert window.shapes() == 0
+        long = Banner("本场已定：赢 · " + "非常长的英雄名字" * 20 + "掉 5 血", "tie")
+        window.draw([], client, long)
+        (shown,) = window.texts()
+        assert shown.endswith("…") and shown.startswith("本场已定：赢 · ")
+        x0, _y0, x1, _y1 = canvas.bbox(canvas.find_all()[0])
+        assert x1 - x0 <= 0.5 * 1280 + 4  # 封顶半个内容区（加上边框）
+        assert canvas.itemcget(canvas.find_all()[0], "outline") == "#d4d4dc"
         window.destroy()
     finally:
         root.destroy()
@@ -795,7 +940,7 @@ def test_panel_stays_when_the_highlight_is_foreground_and_lifts_after_a_rebuild(
         def __init__(self, _root, _cfg):
             pass
 
-        def show(self, step, client):
+        def show(self, step, client, banner=None):
             rebuilt, FakeHighlight.rebuilt = FakeHighlight.rebuilt, False
             return rebuilt
 

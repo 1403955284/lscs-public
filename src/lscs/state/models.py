@@ -34,6 +34,10 @@ class EventType(StrEnum):
     HERO_POWER_CHANGED = "HERO_POWER_CHANGED"
     COMBAT_STARTED = "COMBAT_STARTED"
     COMBAT_ENDED = "COMBAT_ENDED"
+    # 战斗结果结算了（游戏 STEP 变成 MAIN_CLEANUP，或对局结束的 FINAL_WRAPUP）；data：opponent
+    # 对手编号（认不出时 None），outcome win/loss/tie，lost 我方掉血，dealt 对手掉血。
+    # 详细数字在 GameState.last_combat
+    COMBAT_RESULT = "COMBAT_RESULT"
     GAME_ENDED = "GAME_ENDED"
     # 游戏弹出了一组新的"选一个"（GameState.choice）；data：id 编号，kind 种类，count 选项个数
     CHOICE_OFFERED = "CHOICE_OFFERED"
@@ -139,6 +143,26 @@ class OpponentView(_Frozen):
         return self.health > 0
 
 
+class CombatResult(_Frozen):
+    """一场战斗的真实结果：游戏 STEP 变成 MAIN_CLEANUP（或对局结束的 FINAL_WRAPUP）时从标签算出，
+    比客户端的战斗动画早几十秒（提前显示战斗结果设计文档第 2 节）。"""
+
+    turn: int  # 酒馆回合
+    opponent_id: int | None  # COMBAT_STARTED 认出的对手；认不出时 None
+    # 对手英雄的卡牌 ID（战斗里的英雄，残影是克尔苏加德）；排行榜上找不到这个对手时 None
+    opponent_hero: str | None
+    outcome: Literal["win", "loss", "tie"]
+    ghost: bool  # 对手开打前已淘汰（残影）
+    lost: int  # 我方掉的有效血量（血量 + 护甲，≥ 0）
+    dealt: int  # 对手掉的有效血量（≥ 0；残影或对手未知时 0）
+    my_health: int  # 结算后我方血量（可以 ≤ 0）
+    my_armor: int
+    opponent_health: int | None  # 结算后对手的排行榜血量；残影照常记，对手未知时 None
+    opponent_armor: int | None
+    me_dead: bool  # my_health + my_armor <= 0
+    opponent_dead: bool  # 不是残影、对手已知，且 opponent_health + opponent_armor <= 0
+
+
 class HeroOption(_Frozen):
     """选英雄阶段的一个备选英雄（我方手牌区里 CARDTYPE=HERO 的实体）。"""
 
@@ -215,6 +239,9 @@ class GameState(_Frozen):
     hero_select: HeroSelect | None = None
     # 只在招募阶段、游戏正弹着一组还没选完的"选一个"时不为 None
     choice: Choice | None = None
+    # 本局最近一场结算过的战斗结果：一直留到下一场结算或新对局；招募阶段里它是上一场的
+    # （turn 不等于当前回合），显示端自己按回合和阶段过滤
+    last_combat: CombatResult | None = None
 
 
 class Event(_Frozen):

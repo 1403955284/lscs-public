@@ -404,3 +404,21 @@ def test_old_trinket_row_values_are_reported():
         "choice4_height = 0.44",
     ]
     assert old_highlight_values(HighlightConfig()) == []
+
+
+def test_combat_result_defaults_on_and_can_be_switched_off(tmp_path):
+    from lscs.config import CombatResultConfig
+
+    assert AppConfig().combat_result == CombatResultConfig()
+    assert CombatResultConfig().enabled is True
+    cfg = load_config(write(tmp_path, "[combat_result]\nenabled = false\n"))
+    assert cfg.combat_result.enabled is False
+    text = EXAMPLE.read_text(encoding="utf-8")
+    assert text.index("[positioning]") < text.index("[combat_result]") < text.index("[stats]")
+    section = text[text.index("[combat_result]") : text.index("[stats]")]
+    assert "\nenabled = true" in section and "不是预测" in section and "棋盘顶部" in section
+
+
+def test_combat_result_unknown_key_is_rejected(tmp_path):
+    with pytest.raises(ConfigError, match="combat_result.banner"):
+        load_config(write(tmp_path, "[combat_result]\nbanner = true\n"))
