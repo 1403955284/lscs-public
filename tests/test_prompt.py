@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from factory import hand_minion, make_state, minion, power, shop_minion
@@ -46,13 +47,19 @@ OPPONENTS_TURN_2 = (
 ▶ 第 3 名 费林大使 | 血量 30+0 | 酒馆 1 本 | 威胁 23 | 还没见过阵容"""
 )
 
-# 这份合成日志没有选项列表，所以英雄技能是"还不确定"（真实日志见 test_hero_power_line_*）
+NO_PLAN = (
+    '【整局计划】还没定：请在 plan 里定下本局计划（前几回合可以写"未定"，'
+    "key_cards 写最想找的启动卡）"
+)
+# 这份合成日志没有选项列表，所以英雄技能是"还不确定"（真实日志见 test_hero_power_line_*）；
+# 还没有整局计划：局面的第一行请 AI 定一个
 EXPECTED_TURN_2 = (
     POOL_TURN_2
     + "\n\n"
     + OPPONENTS_TURN_2
+    + "\n\n"
+    + NO_PLAN
     + """
-
 第 2 回合（招募）| 英雄：米尔豪斯·法力风暴 | 血量 27+0 | 铸币 4 | 酒馆 1 本
 升本 4 金 | 刷新 1 金 | 买牌 2 金 | 卖牌 +1 金
 预算：铸币 4，只买随从最多 2 张；随从上限 7，现在 1 个（场面 1 + 手牌随从 0），还能再买 6 个随从；英雄技能现在不能用
@@ -64,10 +71,56 @@ EXPECTED_TURN_2 = (
 场面（已用 1/7）：
   [#31] 海盗无赖 3/1 | 1 本 | 海盗 | 亡语：召唤一个1/1的海盗并使其立即发起攻击。
 手牌：
-  （空）"""
+  （空）
+预算：铸币 4，还能再买 6 个随从（场上 1/7）"""
 )
 
 EXPECTED_SYSTEM = """你是《炉石传说》酒馆战棋的高分教练，正在给一位 6000 分以下的新手实时指挥招募阶段的操作。目标是稳定进前四、争取第一。请用简体中文，具体、直接。
+
+【先分析，再给操作】
+先在 analysis 里用两三句话写清：现在是什么阶段、血量和场面强不强、经济怎么样；本局准备走什么方向（种族/流派）以及理由；本回合的目标（升本？补战力？找对子三连？找核心卡？）。然后再按这个目标给操作。
+判断方向和目标时要用上局面里的【对手】和卡池估计：别人都在抢的种族更难成型，可以考虑换方向；下一个对手很强、自己血量又低时先保血；要找的牌池里只剩一两张时别死等三连。
+summary 用一句话（25 字以内）直接写本回合要做什么、为了什么，它会显示在游戏画面上的小面板里，所以要短、要完整，不要半句话。
+局面里有【整局计划】时，analysis 的第一句写这回合怎么执行计划：现在处于计划的哪个阶段、离成型还差什么。
+
+【运营方法】
+- 阶段：
+  - 前期（1~3 本，大约第 1~5 回合）：按节奏升本；剩下的铸币买当前最能打、或者有成长/配合/经济价值的随从。前期身材重要，但同样身材时优先带圣盾、复生、能成长或能给钱的牌。
+  - 中期（4 本，大约第 6~8 回合）：根据场面、商店和本局种族定下一个主方向，开始找这个方向的核心卡；手里有对子就值得刷新找第三张；三连发现的牌优先选方向核心。
+  - 后期（5~6 本）：围绕核心卡成型；铸币主要用来刷新找核心卡、三连，以及把方向外的过渡白板换成方向内的牌。
+- 长线：血量是资源。血量高（25 以上）时可以慢——按计划升本、多刷新找核心卡；血量低于 15 时每回合先保证打得过下一个对手（看【对手】里 ▶ 的阵容），再谈成型。
+- 每一步问自己是"为了本回合不掉血"还是"为了成型"：前期多买少刷；中期只为找核心卡和对子刷新；成型后刷新是为了三连和把白板换成方向内的牌。
+- 牌的价值不只是身材：能成长（每回合/每次触发变大）、和场上种族或机制配合、提供经济（给铸币、免费刷新、减费）、带关键词（圣盾、复生、剧毒、风怒）的牌，往往比一张身材大但没效果的白板更值钱。酒馆法术（加属性、给铸币）也是资源。
+- 刷新：**刷新后程序会立刻把新商店发给你，你会再给一次建议，所以可以放心建议刷新。** 这些情况应该刷新：该买的买完了还有铸币；商店里没有对方向有用的牌；在找三连的第三张或核心卡。不要为了凑合而买一张对阵容没帮助的白板。
+- 升本：参考攻略里的节奏；血量健康、场面不差时可以提前升本；连续掉血、场面明显偏弱时先补战力。升本的回合，剩下的铸币再买牌或刷新。
+- 冻结：只在商店里有核心卡/三连需要的牌、但这回合买不起时冻结。
+- 卖牌：场面满了要买关键牌时，卖掉对方向没用、身材最小的过渡牌（卖出 +1 金）。被养大的随从、金色随从和方向核心不要卖。
+- 三连：凑成三连会拿到金色随从并发现一张高一本的牌，是重要的强度来源。
+
+【整局计划】
+- plan 是整局的计划，不是本回合的：目标流派（comp，用【本赛季流派指南】里的名字；前几回合还没定时写"未定"）、主种族（tribe）、2~3 张核心卡（key_cards，必须是本局卡池里的卡名；局面里核心卡后面的 ✓ 只是显示标记，表示已经有这张，写 key_cards 时不要带）、升本节奏（tiers，一句话）、刷新和保血的规则（roll，一句话）、现在的阶段（stage：前期 / 过渡 / 成型 / 保血）、换方向的条件（pivot，一句话）。每个字段都要短（40 字以内），它们会显示在游戏画面的小面板上。
+- stage 按这个标准写，每回合按局面重新判断（照抄计划时也要更新它，阶段变了不算改计划）：前期 = 还没定方向（通常 1~3 本）；过渡 = 已经定了方向、在找核心卡（通常 4~5 本）；成型 = 场上已经有 2 张以上核心卡、阵容开始运转；保血 = 血量 + 护甲不超过 15，先保证打得过下一个对手。
+- 定计划时看三样：本局种族能走哪些流派（指南）、商店和场上已经给了什么（对子、核心卡）、别人在抢什么（【对手】的主打种族）。
+- 局面里说不用写 plan 时就不写 plan，照着计划给操作就行；否则局面里已经有【整局计划】时默认沿用：plan 原样照抄，changed 留空。只有这些情况才改：连续掉血、血量 + 护甲不超过 15（改成"保血"阶段，核心卡不变）；核心卡池里快没了或被两家以上抢；商店连续两回合给另一条线的核心卡而自己这条线一张没来；达到了 pivot 写的条件。改了就在 changed 里用一句话说原因。
+- 给操作时服从计划：计划是方向，不是这回合一定要买核心卡；核心卡买不起、场面放不下就不买，先看局面里"预算"那一行；升本的回合先留够升本的钱。在这个前提下优先买核心卡和同方向的牌，按计划的节奏升本，按计划的规则刷新；偏离计划的步骤要在 reason 里写明为什么。look_for 写计划里还没拿到的核心卡。
+
+【必须遵守的规则】
+1. 只能使用局面中给出的实体编号（#数字）：buy 只能买"商店"里的，sell 只能卖"场面"上的。
+2. 每个动作都要填 gold_after（执行完这一步后剩多少铸币，不能小于 0）和 minions_after（场面 + 手牌随从一共几个，买 +1、卖 -1、凑成三连 -2），任何一步都不能超过随从上限。
+3. 最多 5 个动作；refresh 要放在最后（之后看不到新商店，所以 refresh 后面不要再冻结）；freeze 只能放在最后。
+4. 英雄技能：局面里写了"不要安排 hero_power"时绝对不要安排；可以用时考虑使用时机（买来的随从在手牌里，要先打出去，给场上随从加属性的技能才会作用到它）；需要目标时 entity_id 填目标编号。
+5. 不要建议发现选择或黑暗之赐。站位由程序按战斗机制另行提示：不要在 actions 里安排站位，summary 里也不要写站位。
+
+只输出一个 json 对象，格式：
+{"analysis": "局势判断、本局方向、本回合目标（两三句）", "actions": [{"type": "buy", "entity_id": 1689, "gold_after": 4, "minions_after": 5, "reason": "一句话理由"}, {"type": "refresh", "gold_after": 3, "minions_after": 5, "reason": "..."}], "summary": "本回合目标，25 字以内，例如：补两张畸变铺场，下回合再升 4 本", "direction": "方向/流派", "look_for": ["接下来要找的牌名"], "plan": {"comp": "目标流派（指南里的名字；还没定写未定）", "tribe": "主种族（中文，如 畸变）", "key_cards": ["核心卡名", "核心卡名"], "tiers": "升本节奏一句话，例如：第 6 回合 4 本，第 8 回合 5 本", "roll": "刷新和保血的规则一句话", "stage": "前期/过渡/成型/保血", "pivot": "换方向的条件一句话", "changed": "改了计划才写一句原因，没改留空"}, "confidence": 0.7}
+动作类型：buy（买）、sell（卖）、upgrade（升本）、refresh（刷新）、freeze（冻结）、hero_power（英雄技能）。buy 和 sell 必须带 entity_id。
+
+【攻略要点】
+要点"""
+
+# [llm] game_plan 关掉时：没有【整局计划】一节和 analysis 的那一句，示例里没有 plan；
+# 长线运营的两条照样有
+EXPECTED_SYSTEM_NO_PLAN = """你是《炉石传说》酒馆战棋的高分教练，正在给一位 6000 分以下的新手实时指挥招募阶段的操作。目标是稳定进前四、争取第一。请用简体中文，具体、直接。
 
 【先分析，再给操作】
 先在 analysis 里用两三句话写清：现在是什么阶段、血量和场面强不强、经济怎么样；本局准备走什么方向（种族/流派）以及理由；本回合的目标（升本？补战力？找对子三连？找核心卡？）。然后再按这个目标给操作。
@@ -79,6 +132,8 @@ summary 用一句话（25 字以内）直接写本回合要做什么、为了什
   - 前期（1~3 本，大约第 1~5 回合）：按节奏升本；剩下的铸币买当前最能打、或者有成长/配合/经济价值的随从。前期身材重要，但同样身材时优先带圣盾、复生、能成长或能给钱的牌。
   - 中期（4 本，大约第 6~8 回合）：根据场面、商店和本局种族定下一个主方向，开始找这个方向的核心卡；手里有对子就值得刷新找第三张；三连发现的牌优先选方向核心。
   - 后期（5~6 本）：围绕核心卡成型；铸币主要用来刷新找核心卡、三连，以及把方向外的过渡白板换成方向内的牌。
+- 长线：血量是资源。血量高（25 以上）时可以慢——按计划升本、多刷新找核心卡；血量低于 15 时每回合先保证打得过下一个对手（看【对手】里 ▶ 的阵容），再谈成型。
+- 每一步问自己是"为了本回合不掉血"还是"为了成型"：前期多买少刷；中期只为找核心卡和对子刷新；成型后刷新是为了三连和把白板换成方向内的牌。
 - 牌的价值不只是身材：能成长（每回合/每次触发变大）、和场上种族或机制配合、提供经济（给铸币、免费刷新、减费）、带关键词（圣盾、复生、剧毒、风怒）的牌，往往比一张身材大但没效果的白板更值钱。酒馆法术（加属性、给铸币）也是资源。
 - 刷新：**刷新后程序会立刻把新商店发给你，你会再给一次建议，所以可以放心建议刷新。** 这些情况应该刷新：该买的买完了还有铸币；商店里没有对方向有用的牌；在找三连的第三张或核心卡。不要为了凑合而买一张对阵容没帮助的白板。
 - 升本：参考攻略里的节奏；血量健康、场面不差时可以提前升本；连续掉血、场面明显偏弱时先补战力。升本的回合，剩下的铸币再买牌或刷新。
@@ -120,15 +175,16 @@ def full_message(state, memory=None, cards=CARDS, pool=None, all_opponents=True)
 
 
 def message_parts(state, memory=None, **kwargs):
-    """（本局卡池, 对手, 局面）三段，用空行分隔。"""
+    """（本局卡池, 对手, 局面）三段，用空行分隔；局面的第一行是整局计划。"""
     pool, opponents, situation = full_message(state, memory, **kwargs).split("\n\n", 2)
     assert pool.startswith("【本局卡池") and opponents.startswith("【对手】")
+    assert situation.startswith("【整局计划")
     return pool, opponents, situation
 
 
 def message_for(state, memory=None, **kwargs):
-    """去掉开头的本局卡池和对手，只看局面部分。"""
-    return message_parts(state, memory, **kwargs)[2]
+    """去掉开头的本局卡池、对手和整局计划那一行，只看局面部分（从回合行开始）。"""
+    return message_parts(state, memory, **kwargs)[2].split("\n", 1)[1]
 
 
 def test_user_message_snapshot(mini_lines):
@@ -317,13 +373,14 @@ MEMORY = AIMemory(
 )
 
 
+# 记忆是倒数第二行：最后一行再说一遍预算（test_budget_is_restated_as_the_last_line）
 def test_memory_line_from_an_earlier_judgement():
     state = make_state(turn=7, shop=[shop_minion(20, "BGS_061", 3, 1)])
-    assert message_for(state, MEMORY).splitlines()[-1] == (
+    assert message_for(state, MEMORY).splitlines()[-2] == (
         "你之前的判断（第 6 回合）：方向 畸变；要找：飘荡祭品、神明；分析：血量健康， 准备升本。"
     )
     deep_last_turn = AIMemory(turn=6, deep=True, direction=None)
-    assert message_for(state, deep_last_turn).splitlines()[-1] == (
+    assert message_for(state, deep_last_turn).splitlines()[-2] == (
         "你之前的判断（第 6 回合）：方向 未定；要找：无"
     )
     assert "你之前的判断" not in message_for(state)
@@ -334,12 +391,12 @@ def test_memory_line_with_this_turns_deep_analysis():
     deep = AIMemory(
         turn=6, deep=True, direction="畸变", look_for=("神明",), analysis="提前升 5 本。"
     )
-    assert message_for(state, deep).splitlines()[-1] == (
+    assert message_for(state, deep).splitlines()[-2] == (
         "本回合深度分析：方向 畸变；要找：神明；分析：提前升 5 本。"
     )
     same_turn_fast = AIMemory(turn=6, deep=False, direction="畸变")
     assert (
-        message_for(state, same_turn_fast).splitlines()[-1].startswith("你之前的判断（第 6 回合）")
+        message_for(state, same_turn_fast).splitlines()[-2].startswith("你之前的判断（第 6 回合）")
     )
 
 
@@ -380,6 +437,29 @@ def test_unknown_cards_fall_back_to_ids():
 
 def test_system_prompt_snapshot():
     assert build_system_prompt("要点") == EXPECTED_SYSTEM
+    assert build_system_prompt("要点", game_plan=True) == EXPECTED_SYSTEM
+
+
+def test_system_prompt_without_the_game_plan():
+    assert build_system_prompt("要点", game_plan=False) == EXPECTED_SYSTEM_NO_PLAN
+    assert "【整局计划】" not in EXPECTED_SYSTEM_NO_PLAN and '"plan"' not in EXPECTED_SYSTEM_NO_PLAN
+    assert "- 长线：血量是资源。" in EXPECTED_SYSTEM_NO_PLAN
+
+
+def test_system_prompt_asks_for_a_whole_game_plan():
+    system = build_system_prompt("要点")
+    assert (
+        '"look_for": ["接下来要找的牌名"], "plan": {"comp": "目标流派（指南里的名字；还没定写未定）", '
+        '"tribe": "主种族（中文，如 畸变）", "key_cards": ["核心卡名", "核心卡名"],' in system
+    )
+    assert '"stage": "前期/过渡/成型/保血"' in system
+    assert '"changed": "改了计划才写一句原因，没改留空"' in system
+    plan = system.index("\n\n【整局计划】\n- plan 是整局的计划，不是本回合的")
+    assert system.index("- 三连：") < plan < system.index("【必须遵守的规则】")
+    assert "plan 原样照抄，changed 留空" in system
+    assert "summary 用一句话" in system.split("局面里有【整局计划】时，analysis 的第一句")[0]
+    stages = system.index("  - 后期（5~6 本）")
+    assert stages < system.index("- 长线：血量是资源。") < system.index("- 牌的价值不只是身材")
 
 
 def test_system_prompt_derives_limit_and_example(monkeypatch):
@@ -437,7 +517,7 @@ def test_budget_line_survives_zero_buy_cost():
     state = make_state(gold=3)
     ctx = build_context(state, 0)
     lines = build_user_message(state, ctx, CARDS).split("\n\n", 2)[2].splitlines()
-    assert lines[2].startswith("预算：铸币 3，只买随从最多 7 张；")
+    assert lines[3].startswith("预算：铸币 3，只买随从最多 7 张；")  # 计划、回合、价格之后
 
 
 def test_other_opponents_without_place():
@@ -688,7 +768,7 @@ def test_hero_message_after_reroll_without_mechanics():
 EXPECTED_CHOICE_SYSTEM = """你是《炉石传说》酒馆战棋的高分教练，正在帮一位 6000 分以下的新手在游戏弹出的几个选项里选一个（三连奖励的发现、黑暗之赐、饰品、英雄技能的升级选项，或者随从效果的发现）。玩家几秒钟内就要点，请用简体中文，直接给结论。
 
 【怎么判断】
-- 先看本局方向和场面：和当前方向（种族/流派）、场上核心配合的选项优先；还没有方向时选单独最强、最稳、新手最容易用好的。
+- 先看本局方向和场面：有整局计划时，计划的核心卡和同方向的牌优先；和当前方向（种族/流派）、场上核心配合的选项优先；还没有方向时选单独最强、最稳、新手最容易用好的。
 - 三连奖励 / 发现随从：优先方向核心卡、能成长的牌、有经济价值的牌，其次才看身材；能和手里、场上凑成对子或三连的也值得。
 - 黑暗之赐：每个选项的属性已经算上了赐福。比较"随从本身 + 赐福"对现在阵容的价值；圣盾、复生、风怒这类关键词放在主力随从身上最值。
 - 饰品：看它在接下来几个回合能带来多少收益；和方向配合、现在就能用上的优先；要花铸币的饰品要考虑这回合剩多少铸币、会不会耽误升本。
@@ -898,13 +978,17 @@ def test_choice_message_titles_and_memory():
 
 
 def test_repair_text_for_plans_keeps_the_thoughts_and_rechecks_each_step():
-    for lane in ("fast", "deep"):
-        text = repair_text(lane, "第 2 步：铸币不够")
-        assert text == (
-            "你刚才的方案不合法：第 2 步：铸币不够。\n"
-            "请按同样的规则改正后，重新输出完整的 json：analysis、summary、direction、look_for "
-            "保持不变，只改 actions；每一步都重新核对 gold_after 和 minions_after。"
-        )
+    assert repair_text("deep", "第 2 步：铸币不够") == (
+        "你刚才的方案不合法：第 2 步：铸币不够。\n"
+        "请按同样的规则改正后，重新输出完整的 json：analysis、summary、direction、look_for、"
+        "plan 保持不变，只改 actions；每一步都重新核对 gold_after 和 minions_after。"
+    )
+    # 快速建议不写 plan，改正时也不要它
+    assert repair_text("fast", "第 2 步：铸币不够") == (
+        "你刚才的方案不合法：第 2 步：铸币不够。\n"
+        "请按同样的规则改正后，重新输出完整的 json：analysis、summary、direction、look_for "
+        "保持不变，只改 actions；每一步都重新核对 gold_after 和 minions_after。"
+    )
 
 
 def test_repair_text_for_picks():
@@ -918,7 +1002,7 @@ def test_opponents_block_sits_between_the_pool_and_the_turn(mini_lines):
     text = full_message(recruit_state(mini_lines, 2))
     pool, opponents, situation = text.split("\n\n", 2)
     assert pool == POOL_TURN_2 and opponents == OPPONENTS_TURN_2
-    assert situation.startswith("第 2 回合（招募）")
+    assert situation.startswith(NO_PLAN + "\n第 2 回合（招募）")
 
 
 def test_same_turn_messages_share_the_pool_and_opponents_prefix(mini_lines):
@@ -1385,7 +1469,7 @@ def test_stats_block_sits_between_the_pool_and_the_opponents(mini_lines):
     pool, block, opponents, situation = text.split("\n\n", 3)
     assert (pool, opponents) == (POOL_TURN_2, OPPONENTS_TURN_2)
     assert block == "【战绩块】\n1本：甲 +0.55"
-    assert situation.startswith("第 2 回合（招募）")
+    assert situation.startswith(NO_PLAN + "\n第 2 回合（招募）")
     assert build_user_message(state, ctx, CARDS, stats_block=None) == build_user_message(
         state, ctx, CARDS
     )
@@ -1397,3 +1481,237 @@ def test_card_median_counts_only_tavern_pool_minions():
     # 衍生物、7 本、双人模式专属、样本少的（都是 +0.99）不算：中位数是 +0.38 → "+0.4"
     block = build_stats_block(STATS_CARDS, frozenset({"BEAST"}), BLOCK_STATS)
     assert "全部随从的中位数约 +0.4；" in block.splitlines()[0]
+
+
+# ---- 本赛季流派指南（整局计划与流派指南设计文档第 3.4、7.2 节） ----
+
+COMPS_BLOCK = "【本赛季流派指南（样例）】\n## 海盗刀剑\n- 核心卡：刀剑收藏家（4 本）"
+
+
+def test_comps_block_sits_after_the_pool_and_stats_and_before_the_opponents(mini_lines):
+    state = recruit_state(mini_lines, 2)
+    ctx = build_context(state, RULES.buy_cost_for(state.me.hero_card_id))
+    stats = "【战绩块】\n1本：甲 +0.55"
+    text = build_user_message(state, ctx, CARDS, stats_block=stats, comps_block=COMPS_BLOCK)
+    pool, block, comps, opponents, _ = text.split("\n\n", 4)
+    assert (pool, block, comps, opponents) == (POOL_TURN_2, stats, COMPS_BLOCK, OPPONENTS_TURN_2)
+    pool, comps, opponents, _ = build_user_message(
+        state, ctx, CARDS, comps_block=COMPS_BLOCK
+    ).split("\n\n", 3)
+    assert (pool, comps, opponents) == (POOL_TURN_2, COMPS_BLOCK, OPPONENTS_TURN_2)
+    assert build_user_message(state, ctx, CARDS, comps_block=None) == build_user_message(
+        state, ctx, CARDS
+    )
+
+
+# ---- 整局计划（整局计划与流派指南设计文档第 7.2、7.3 节） ----
+
+
+def game_plan(**fields):
+    from lscs.advisor.models import GamePlan
+
+    values = {
+        "comp": "畸变神明",
+        "tribe": "ABERRATION",
+        "key_cards": ("蚀脑怪", "残忍的精神鞭笞者", "飘荡祭品"),
+        "tiers": "第 6 回合 4 本，第 8 回合 5 本",
+        "roll": "5 本后铸币主要刷新找核心卡；血量低于 15 先补身材",
+        "stage": "过渡",
+        "pivot": "第 8 回合还没有两张核心卡就转海盗",
+        "turn": 5,
+    }
+    values.update(fields)
+    return GamePlan(**values)
+
+
+def planned_state():
+    """场上有一张金色蚀脑怪：核心卡里的蚀脑怪打 ✓。"""
+    brain = minion(10, "BG36_099_G", 6, 8, tier=2, races=["ABERRATION"], golden=True)
+    return make_state(turn=6, board=[brain], tribes={"ABERRATION", "PIRATE"})
+
+
+def plan_line_of(state, plan, **kwargs):
+    ctx = build_context(state, RULES.buy_cost_for(state.me.hero_card_id))
+    text = build_user_message(state, ctx, CARDS, game_plan=plan, **kwargs)
+    return text.split("\n\n", 2)[2].split("\n", 1)
+
+
+def test_plan_block_is_one_line_before_the_turn_line():
+    from lscs.llm.prompt import plan_block
+
+    first, rest = plan_line_of(planned_state(), game_plan())
+    assert first == (
+        "【整局计划（第 5 回合定，深度分析维护；给操作时要服从它）】目标 畸变神明（畸变）"
+        " | 核心卡 蚀脑怪✓、残忍的精神鞭笞者、飘荡祭品 | 节奏 第 6 回合 4 本，第 8 回合 5 本"
+        " | 规则 5 本后铸币主要刷新找核心卡；血量低于 15 先补身材 | 阶段 过渡"
+        " | 换方向 第 8 回合还没有两张核心卡就转海盗"
+    )
+    assert rest.startswith("第 6 回合（招募）")
+    assert plan_block(game_plan(), planned_state(), CARDS) == first
+
+
+def test_plan_block_skips_empty_fields():
+    from lscs.llm.prompt import plan_block
+
+    plan = game_plan(tribe=None, key_cards=(), tiers="", roll="", stage=None, pivot="")
+    assert plan_block(plan, planned_state(), CARDS) == (
+        "【整局计划（第 5 回合定，深度分析维护；给操作时要服从它）】目标 畸变神明"
+    )
+    pirates = game_plan(comp="海盗刀剑", tribe="PIRATE", key_cards=(), roll="", pivot="")
+    assert plan_block(pirates, planned_state(), CARDS).endswith(
+        "】目标 海盗刀剑（海盗） | 节奏 第 6 回合 4 本，第 8 回合 5 本 | 阶段 过渡"
+    )
+
+
+def test_undecided_plan_lists_the_cards_to_look_for():
+    from lscs.llm.prompt import plan_block
+
+    plan = game_plan(comp="未定", tribe="ABERRATION", key_cards=("蚀脑怪", "虚悯者"), stage="前期")
+    plan = plan.model_copy(update={"tiers": "", "roll": "", "pivot": "", "turn": 2})
+    assert plan_block(plan, planned_state(), CARDS) == (
+        "【整局计划（第 2 回合定，深度分析维护；给操作时要服从它）】"
+        "目标 未定（先按前期节奏，想找：蚀脑怪✓、虚悯者） | 阶段 前期"
+    )
+    bare = plan.model_copy(update={"key_cards": (), "stage": None})
+    assert plan_block(bare, planned_state(), CARDS).endswith("】目标 未定（先按前期节奏）")
+
+
+def test_no_plan_yet_asks_for_one_and_switched_off_has_no_line():
+    first, _ = plan_line_of(planned_state(), None)
+    assert first == NO_PLAN
+    first, _ = plan_line_of(planned_state(), None, plan_enabled=False)
+    assert first.startswith("第 6 回合（招募）")
+    first, _ = plan_line_of(planned_state(), game_plan(), plan_enabled=False)
+    assert first.startswith("第 6 回合（招募）")
+
+
+def test_plan_changes_only_touch_the_part_after_the_opponents_block():
+    state = planned_state()
+    ctx = build_context(state, RULES.buy_cost_for(state.me.hero_card_id))
+    messages = [
+        build_user_message(state, ctx, CARDS, comps_block=COMPS_BLOCK, game_plan=plan)
+        for plan in (None, game_plan(), game_plan(stage="保血", turn=9))
+    ]
+    # 卡池、流派指南、对手三块逐字相同（前缀缓存照样命中），只有局面部分不同
+    assert len({"\n\n".join(m.split("\n\n")[:3]) for m in messages}) == 1
+    assert len({m.split("\n\n")[3] for m in messages}) == 3
+    assert all(m.split("\n\n")[2].startswith("【对手】") for m in messages)
+
+
+def test_pool_estimate_line_also_counts_the_key_cards():
+    from lscs.advisor.pool import PoolEstimator
+
+    state = make_state(
+        board=[minion(10, "BG36_099", 3, 4, tier=2, races=["ABERRATION"])],
+        tribes={"ABERRATION", "DEMON"},
+    )
+    view = PoolEstimator(CARDS, {1: 16, 2: 15, 3: 13}).view(state)
+    ctx = build_context(state, RULES.buy_cost_for(state.me.hero_card_id), pool=view)
+    memory = AIMemory(turn=1, deep=True, look_for=("飘荡祭品",))
+    plan = game_plan(key_cards=("蚀脑怪", "飘荡祭品", "虚悯者"))
+    text = build_user_message(state, ctx, CARDS, memory, game_plan=plan)
+    line = next(line for line in text.splitlines() if line.startswith("卡池估计"))
+    assert line == (
+        "卡池估计（还能刷到的张数）：飘荡祭品 还剩约 13 张；蚀脑怪 还剩约 14 张（你有 1 张）；"
+        "虚悯者 还剩约 16 张"
+    )
+
+
+def test_choice_message_has_a_plan_line_before_the_options():
+    from factory import choice_option, make_choice
+
+    options = [choice_option(9723, "BGS_061", 0, 4, 5, tier=2)]
+    triple = make_choice(options, kind="triple", source="TB_BaconShop_Triples_01")
+    from factory import choice_state
+
+    from lscs.llm.prompt import build_choice_message
+
+    brain = minion(10, "BG36_099", 3, 4, tier=2, races=["ABERRATION"])
+    state = choice_state(triple, board=[brain], tribes=frozenset({"ABERRATION"}))
+    lines = build_choice_message(state, CARDS, game_plan=game_plan()).splitlines()
+    plan = lines.index(
+        "整局计划：目标 畸变神明 · 核心卡 蚀脑怪✓、残忍的精神鞭笞者、飘荡祭品 · 阶段 过渡"
+    )
+    assert lines[plan - 1].startswith("  ") and lines[plan + 1] == "选项："
+    undecided = game_plan(comp="未定", key_cards=("虚悯者",), stage=None)
+    assert (
+        "整局计划：目标 未定 · 想找 虚悯者"
+        in build_choice_message(state, CARDS, game_plan=undecided).splitlines()
+    )
+    assert "整局计划" not in build_choice_message(state, CARDS)
+
+
+def test_choice_system_prompt_puts_the_plans_key_cards_first():
+    from lscs.llm.prompt import build_choice_system_prompt
+
+    assert (
+        "- 先看本局方向和场面：有整局计划时，计划的核心卡和同方向的牌优先；"
+        in build_choice_system_prompt("要点")
+    )
+
+
+def test_system_prompt_says_the_tick_is_only_a_display_mark():
+    assert "局面里核心卡后面的 ✓ 只是显示标记，表示已经有这张，写 key_cards 时不要带" in (
+        build_system_prompt("要点")
+    )
+
+
+def test_plan_example_names_no_real_comp_or_card():
+    # 实测里 AI 第 1 回合原样抄了示例里的核心卡：示例只写占位说明
+    from lscs.llm.prompt import EXAMPLE
+
+    example = json.dumps(EXAMPLE["plan"], ensure_ascii=False)
+    for real in ("畸变神明", "蚀脑怪", "精神鞭笞者", "飘荡祭品", "海盗"):
+        assert real not in example
+
+
+def test_system_prompt_defines_each_stage():
+    system = build_system_prompt("要点")
+    assert (
+        "前期 = 还没定方向（通常 1~3 本）；过渡 = 已经定了方向、在找核心卡（通常 4~5 本）；"
+        "成型 = 场上已经有 2 张以上核心卡、阵容开始运转；"
+        "保血 = 血量 + 护甲不超过 15，先保证打得过下一个对手。" in system
+    )
+    assert "照抄计划时也要更新它，阶段变了不算改计划" in system
+    assert "stage 按这个标准写" not in build_system_prompt("要点", game_plan=False)
+
+
+def test_fast_lane_is_not_asked_for_a_plan_while_deep_analysis_sets_it():
+    from lscs.llm.prompt import NO_PLAN_FAST
+
+    first, _ = plan_line_of(planned_state(), None, ask_plan=False)
+    assert first == NO_PLAN_FAST == "【整局计划】还没定（由深度分析来定，这次不用写 plan）"
+    first, _ = plan_line_of(planned_state(), game_plan(), ask_plan=False)
+    deep, _ = plan_line_of(planned_state(), game_plan())
+    assert first == deep + "（快速建议不用写 plan，照着做就行）"  # 有计划时只多这一句
+
+
+def test_system_prompt_lets_the_fast_lane_skip_the_plan():
+    assert (
+        "- 局面里说不用写 plan 时就不写 plan，照着计划给操作就行；否则局面里已经有【整局计划】时"
+        "默认沿用：plan 原样照抄，changed 留空。" in build_system_prompt("要点")
+    )
+
+
+def test_obeying_the_plan_never_means_overspending():
+    system = build_system_prompt("要点")
+    assert (
+        "- 给操作时服从计划：计划是方向，不是这回合一定要买核心卡；核心卡买不起、场面放不下就不买，"
+        '先看局面里"预算"那一行；升本的回合先留够升本的钱。在这个前提下优先买核心卡和同方向的牌'
+        in system
+    )
+
+
+def test_budget_is_restated_as_the_last_line():
+    from lscs.llm.prompt import budget_reminder
+
+    board = [minion(10 + i, "BG21_029", 1, 1) for i in range(5)]  # 米尔豪斯：买牌 2 金
+    state = make_state(gold=7, board=board, hand=[hand_minion(30, "BGS_061", 3, 1)])
+    lines = message_for(state, MEMORY).splitlines()
+    assert lines[-1] == "预算：铸币 7，还能再买 1 个随从（场上 5/7）"
+    assert lines[-2].startswith("你之前的判断")  # 在手牌和记忆之后
+    # 前面完整的预算行还在原处（和校验器口径一致）
+    assert lines[2].startswith("预算：铸币 7，只买随从最多 3 张；")
+    full = make_state(gold=3, board=[minion(10 + i, "BG21_029", 1, 1) for i in range(7)])
+    ctx = build_context(full, 3)
+    assert budget_reminder(ctx) == "预算：铸币 3，还能再买 0 个随从（场上 7/7）"

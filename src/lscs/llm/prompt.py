@@ -3,7 +3,12 @@
 系统提示和局面消息，招募阶段的提示不受影响。
 
 本版本统计（本版本统计设计文档第 6.4、7.2、8 节）：有统计时选英雄、选项的消息里多一行说明和
-每个选项的战绩，招募的消息在卡池块之后多一块"本版本战绩好的随从"；没有统计时和以前逐字相同。"""
+每个选项的战绩，招募的消息在卡池块之后多一块"本版本战绩好的随从"；没有统计时和以前逐字相同。
+
+流派指南与整局计划（整局计划与流派指南设计文档第 7 节）：招募的消息在战绩块之后多一块"本赛季
+流派指南"（只随本局种族变，llm.comps），对手块之后、回合行之前一行整局计划（还没定时请 AI 定
+一个）；系统提示多了长线运营的两条和【整局计划】一节，示例里有 plan；选项的消息在手牌之后多一行
+计划。选英雄的提示和消息不变。"""
 
 from __future__ import annotations
 
@@ -13,8 +18,14 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from lscs.advisor.context import MINION, TurnContext, hero_power_blocker, hero_power_used
-from lscs.advisor.models import Lane
+from lscs.advisor.context import (
+    MAX_BOARD,
+    MINION,
+    TurnContext,
+    hero_power_blocker,
+    hero_power_used,
+)
+from lscs.advisor.models import UNDECIDED, GamePlan, Lane
 from lscs.advisor.names import armor_zh, choice_title, keyword_zh, minion_label, tribe_zh
 from lscs.advisor.opponents import (
     OpponentSummary,
@@ -22,10 +33,11 @@ from lscs.advisor.opponents import (
     eliminated_names,
     summarize_opponents,
 )
+from lscs.advisor.plan_check import comp_with_tribe, key_cards_text, plan_look_for
 from lscs.advisor.pool import PoolNote, in_lobby, pool_notes
 from lscs.advisor.stats_note import pct
 from lscs.cards.db import CardDB, CardInfo
-from lscs.llm.parse import MAX_ACTIONS
+from lscs.llm.parse import MAX_ACTIONS, PLAN_PLACEHOLDERS
 from lscs.state.models import (
     NO_TARGET,
     ChoiceKind,
@@ -55,22 +67,30 @@ EXAMPLE = {
     "summary": "本回合目标，25 字以内，例如：补两张畸变铺场，下回合再升 4 本",
     "direction": "方向/流派",
     "look_for": ["接下来要找的牌名"],
+    # 整局计划（整局计划与流派指南设计文档第 4.2 节）；[llm] game_plan 关掉时示例里没有它。
+    # 只写占位说明、不写具体的流派和卡名：实测里 AI 第 1 回合原样抄了示例里的核心卡
+    # （占位说明定义在 llm.parse：AI 原样抄回来时解析成"未定"、空字段）
+    "plan": PLAN_PLACEHOLDERS,
     "confidence": 0.7,
 }
 
-# 更聪明的 AI 建议设计文档第 3.1 节的原文（实验验证过），不要随意改动
+# 更聪明的 AI 建议设计文档第 3.1 节实验验证过的原文，整局计划与流派指南设计文档第 7.1 节加了
+# 长线运营的两条和整局计划（{plan_analysis}、{plan_section}，game_plan 关掉时为空）。
+# 改动会让整局的缓存前缀作废一次，不要随意改动
 SYSTEM_TEMPLATE = """你是《炉石传说》酒馆战棋的高分教练，正在给一位 6000 分以下的新手实时指挥招募阶段的操作。目标是稳定进前四、争取第一。请用简体中文，具体、直接。
 
 【先分析，再给操作】
 先在 analysis 里用两三句话写清：现在是什么阶段、血量和场面强不强、经济怎么样；本局准备走什么方向（种族/流派）以及理由；本回合的目标（升本？补战力？找对子三连？找核心卡？）。然后再按这个目标给操作。
 判断方向和目标时要用上局面里的【对手】和卡池估计：别人都在抢的种族更难成型，可以考虑换方向；下一个对手很强、自己血量又低时先保血；要找的牌池里只剩一两张时别死等三连。
-summary 用一句话（25 字以内）直接写本回合要做什么、为了什么，它会显示在游戏画面上的小面板里，所以要短、要完整，不要半句话。
+summary 用一句话（25 字以内）直接写本回合要做什么、为了什么，它会显示在游戏画面上的小面板里，所以要短、要完整，不要半句话。{plan_analysis}
 
 【运营方法】
 - 阶段：
   - 前期（1~3 本，大约第 1~5 回合）：按节奏升本；剩下的铸币买当前最能打、或者有成长/配合/经济价值的随从。前期身材重要，但同样身材时优先带圣盾、复生、能成长或能给钱的牌。
   - 中期（4 本，大约第 6~8 回合）：根据场面、商店和本局种族定下一个主方向，开始找这个方向的核心卡；手里有对子就值得刷新找第三张；三连发现的牌优先选方向核心。
   - 后期（5~6 本）：围绕核心卡成型；铸币主要用来刷新找核心卡、三连，以及把方向外的过渡白板换成方向内的牌。
+- 长线：血量是资源。血量高（25 以上）时可以慢——按计划升本、多刷新找核心卡；血量低于 15 时每回合先保证打得过下一个对手（看【对手】里 ▶ 的阵容），再谈成型。
+- 每一步问自己是"为了本回合不掉血"还是"为了成型"：前期多买少刷；中期只为找核心卡和对子刷新；成型后刷新是为了三连和把白板换成方向内的牌。
 - 牌的价值不只是身材：能成长（每回合/每次触发变大）、和场上种族或机制配合、提供经济（给铸币、免费刷新、减费）、带关键词（圣盾、复生、剧毒、风怒）的牌，往往比一张身材大但没效果的白板更值钱。酒馆法术（加属性、给铸币）也是资源。
 - 刷新：**刷新后程序会立刻把新商店发给你，你会再给一次建议，所以可以放心建议刷新。** 这些情况应该刷新：该买的买完了还有铸币；商店里没有对方向有用的牌；在找三连的第三张或核心卡。不要为了凑合而买一张对阵容没帮助的白板。
 - 升本：参考攻略里的节奏；血量健康、场面不差时可以提前升本；连续掉血、场面明显偏弱时先补战力。升本的回合，剩下的铸币再买牌或刷新。
@@ -78,7 +98,7 @@ summary 用一句话（25 字以内）直接写本回合要做什么、为了什
 - 卖牌：场面满了要买关键牌时，卖掉对方向没用、身材最小的过渡牌（卖出 +1 金）。被养大的随从、金色随从和方向核心不要卖。
 - 三连：凑成三连会拿到金色随从并发现一张高一本的牌，是重要的强度来源。
 
-【必须遵守的规则】
+{plan_section}【必须遵守的规则】
 1. 只能使用局面中给出的实体编号（#数字）：buy 只能买"商店"里的，sell 只能卖"场面"上的。
 2. 每个动作都要填 gold_after（执行完这一步后剩多少铸币，不能小于 0）和 minions_after（场面 + 手牌随从一共几个，买 +1、卖 -1、凑成三连 -2），任何一步都不能超过随从上限。
 3. 最多 {max_actions} 个动作；refresh 要放在最后（之后看不到新商店，所以 refresh 后面不要再冻结）；freeze 只能放在最后。
@@ -91,6 +111,16 @@ summary 用一句话（25 字以内）直接写本回合要做什么、为了什
 
 【攻略要点】
 {guide}"""  # noqa: E501
+
+PLAN_ANALYSIS = "\n局面里有【整局计划】时，analysis 的第一句写这回合怎么执行计划：现在处于计划的哪个阶段、离成型还差什么。"  # noqa: E501
+PLAN_SECTION = """【整局计划】
+- plan 是整局的计划，不是本回合的：目标流派（comp，用【本赛季流派指南】里的名字；前几回合还没定时写"未定"）、主种族（tribe）、2~3 张核心卡（key_cards，必须是本局卡池里的卡名；局面里核心卡后面的 ✓ 只是显示标记，表示已经有这张，写 key_cards 时不要带）、升本节奏（tiers，一句话）、刷新和保血的规则（roll，一句话）、现在的阶段（stage：前期 / 过渡 / 成型 / 保血）、换方向的条件（pivot，一句话）。每个字段都要短（40 字以内），它们会显示在游戏画面的小面板上。
+- stage 按这个标准写，每回合按局面重新判断（照抄计划时也要更新它，阶段变了不算改计划）：前期 = 还没定方向（通常 1~3 本）；过渡 = 已经定了方向、在找核心卡（通常 4~5 本）；成型 = 场上已经有 2 张以上核心卡、阵容开始运转；保血 = 血量 + 护甲不超过 15，先保证打得过下一个对手。
+- 定计划时看三样：本局种族能走哪些流派（指南）、商店和场上已经给了什么（对子、核心卡）、别人在抢什么（【对手】的主打种族）。
+- 局面里说不用写 plan 时就不写 plan，照着计划给操作就行；否则局面里已经有【整局计划】时默认沿用：plan 原样照抄，changed 留空。只有这些情况才改：连续掉血、血量 + 护甲不超过 15（改成"保血"阶段，核心卡不变）；核心卡池里快没了或被两家以上抢；商店连续两回合给另一条线的核心卡而自己这条线一张没来；达到了 pivot 写的条件。改了就在 changed 里用一句话说原因。
+- 给操作时服从计划：计划是方向，不是这回合一定要买核心卡；核心卡买不起、场面放不下就不买，先看局面里"预算"那一行；升本的回合先留够升本的钱。在这个前提下优先买核心卡和同方向的牌，按计划的节奏升本，按计划的规则刷新；偏离计划的步骤要在 reason 里写明为什么。look_for 写计划里还没拿到的核心卡。
+
+"""  # noqa: E501
 
 # 选英雄建议设计文档第 5.1 节的原文。招募阶段的 SYSTEM_TEMPLATE 一个字都不改（DeepSeek 按前缀
 # 缓存）；选英雄每局只调一次，缓存不命中无所谓
@@ -128,7 +158,7 @@ CHOICE_EXAMPLE = {"pick": 6933, "reason": "为什么选它，25 字以内", "con
 CHOICE_SYSTEM_TEMPLATE = """你是《炉石传说》酒馆战棋的高分教练，正在帮一位 6000 分以下的新手在游戏弹出的几个选项里选一个（三连奖励的发现、黑暗之赐、饰品、英雄技能的升级选项，或者随从效果的发现）。玩家几秒钟内就要点，请用简体中文，直接给结论。
 
 【怎么判断】
-- 先看本局方向和场面：和当前方向（种族/流派）、场上核心配合的选项优先；还没有方向时选单独最强、最稳、新手最容易用好的。
+- 先看本局方向和场面：有整局计划时，计划的核心卡和同方向的牌优先；和当前方向（种族/流派）、场上核心配合的选项优先；还没有方向时选单独最强、最稳、新手最容易用好的。
 - 三连奖励 / 发现随从：优先方向核心卡、能成长的牌、有经济价值的牌，其次才看身材；能和手里、场上凑成对子或三连的也值得。
 - 黑暗之赐：每个选项的属性已经算上了赐福。比较"随从本身 + 赐福"对现在阵容的价值；圣盾、复生、风怒这类关键词放在主力随从身上最值。
 - 饰品：看它在接下来几个回合能带来多少收益；和方向配合、现在就能用上的优先；要花铸币的饰品要考虑这回合剩多少铸币、会不会耽误升本。
@@ -146,6 +176,13 @@ pick 必须是选项的实体编号；reason 会显示在游戏画面上，25 �
 # AI 的回答不合法时的改正要求（AI 自我改正设计文档第 3.3 节）：作为新的一轮 user 消息，接在原局面
 # 消息和模型自己的回答之后。系统提示不动（前缀缓存）；DeepSeek 的 json 模式要求提示里有"json"
 REPAIR_PLAN = (
+    "你刚才的方案不合法：{problem}。\n"
+    "请按同样的规则改正后，重新输出完整的 json：analysis、summary、direction、look_for、plan "
+    "保持不变，"
+    "只改 actions；每一步都重新核对 gold_after 和 minions_after。"
+)
+# 快速建议不写 plan（深度分析定计划），改正时也不要它（实测：快速建议照抄 plan 时更容易出错）
+REPAIR_PLAN_FAST = (
     "你刚才的方案不合法：{problem}。\n"
     "请按同样的规则改正后，重新输出完整的 json：analysis、summary、direction、look_for 保持不变，"
     "只改 actions；每一步都重新核对 gold_after 和 minions_after。"
@@ -195,9 +232,15 @@ def load_guide(path: Path) -> str:
     return path.read_text(encoding="utf-8-sig", errors="replace").strip()
 
 
-def build_system_prompt(guide: str) -> str:
+def build_system_prompt(guide: str, game_plan: bool = True) -> str:
+    """game_plan（[llm] game_plan）为假时没有【整局计划】一节，示例里也没有 plan。"""
+    example = EXAMPLE if game_plan else {k: v for k, v in EXAMPLE.items() if k != "plan"}
     return SYSTEM_TEMPLATE.format(
-        example=json.dumps(EXAMPLE, ensure_ascii=False), guide=guide, max_actions=MAX_ACTIONS
+        example=json.dumps(example, ensure_ascii=False),
+        guide=guide,
+        max_actions=MAX_ACTIONS,
+        plan_analysis=PLAN_ANALYSIS if game_plan else "",
+        plan_section=PLAN_SECTION if game_plan else "",
     )
 
 
@@ -216,11 +259,15 @@ def build_choice_system_prompt(guide: str) -> str:
     )
 
 
-def repair_text(lane: Lane, problem: str) -> str:
-    """problem：校验器或解析器给出的原因，原样发回去。招募的两路用 REPAIR_PLAN，
-    选英雄、选项用 REPAIR_PICK。"""
-    template = REPAIR_PLAN if lane in ("fast", "deep") else REPAIR_PICK
-    return template.format(problem=problem)
+def repair_text(lane: Lane, problem: str, writes_plan: bool | None = None) -> str:
+    """problem：校验器或解析器给出的原因，原样发回去。定整局计划的那一路（深度分析，或深度分析
+    关闭时的快速建议）用 REPAIR_PLAN，不定计划的快速建议用 REPAIR_PLAN_FAST（不提 plan），选英雄、
+    选项用 REPAIR_PICK。writes_plan 为 None 时按路名：深度分析定计划、快速建议不定。"""
+    if lane not in ("fast", "deep"):
+        return REPAIR_PICK.format(problem=problem)
+    if writes_plan is None:
+        writes_plan = lane == "deep"
+    return (REPAIR_PLAN if writes_plan else REPAIR_PLAN_FAST).format(problem=problem)
 
 
 def _in_tavern(card: CardInfo) -> bool:
@@ -426,6 +473,13 @@ def _budget_line(ctx: TurnContext) -> str:
     return line
 
 
+def budget_reminder(ctx: TurnContext) -> str:
+    """招募消息的最后一行，再说一遍预算（实测：快速建议常在铸币、场面上出错）。和前面的预算行
+    口径一样，只用 TurnContext 里的数。"""
+    room = max(ctx.minion_limit - ctx.board_minions - ctx.hand_minions, 0)
+    return f"预算：铸币 {ctx.gold}，还能再买 {room} 个随从（场上 {ctx.board_minions}/{MAX_BOARD}）"
+
+
 def _mechanics_line(state: GameState, cards: CardDB) -> str | None:
     """本局机制（古神等），招募和选英雄的消息共用；卡牌数据里都查不到时为 None。"""
     mechanics = [cards.get_by_dbf(dbf) for dbf in state.global_dbfs]
@@ -526,17 +580,72 @@ def _pool_note_text(note: PoolNote) -> str:
 
 
 def _pool_line(
-    state: GameState, ctx: TurnContext, memory: AIMemory | None, w: _Writer
+    state: GameState,
+    ctx: TurnContext,
+    memory: AIMemory | None,
+    w: _Writer,
+    game_plan: GamePlan | None = None,
 ) -> str | None:
-    """对子、差一张成对子和记忆里要找的牌还剩约几张；没有卡池估计或没有这些牌时为 None。"""
+    """对子、差一张成对子、记忆里要找的牌和计划的核心卡还剩约几张；没有卡池估计或没有这些牌
+    时为 None。"""
     if ctx.pool is None:
         return None
     shop = [s.card_id for s in state.shop if s.card_type == MINION]
-    look_for = memory.look_for if memory is not None else ()
+    look_for = plan_look_for(memory.look_for if memory is not None else (), game_plan)
     notes = pool_notes(ctx.pool, ctx, shop, look_for, w.name)
     if not notes:
         return None
     return POOL_LINE_TITLE + "；".join(_pool_note_text(n) for n in notes)
+
+
+PLAN_TITLE = "【整局计划（第 {turn} 回合定，深度分析维护；给操作时要服从它）】"
+NO_PLAN = (
+    '【整局计划】还没定：请在 plan 里定下本局计划（前几回合可以写"未定"，'
+    "key_cards 写最想找的启动卡）"
+)
+# 深度分析打开时，快速建议不定计划（定了也不采用）：只说还没定，不让它写；有计划时计划行末尾
+# 告诉它不用写 plan（实测：快速建议照抄 plan 时第一次就不合法的更多）
+NO_PLAN_FAST = "【整局计划】还没定（由深度分析来定，这次不用写 plan）"
+FAST_PLAN_NOTE = "（快速建议不用写 plan，照着做就行）"
+
+
+def plan_block(
+    game_plan: GamePlan | None, state: GameState, cards: CardDB, ask_plan: bool = True
+) -> str:
+    """招募消息里的整局计划，一行：空字段不写；"未定"写成想找的牌。还没有计划时请 AI 定一个。
+    ask_plan 为假（深度分析打开时的快速建议，不定计划）：还没有计划时只说还没定，有计划时末尾
+    写明不用写 plan。"""
+    if game_plan is None:
+        return NO_PLAN if ask_plan else NO_PLAN_FAST
+    keys = key_cards_text(game_plan, state, _Writer(cards).name)
+    if game_plan.undecided:
+        hint = "先按前期节奏" + (f"，想找：{keys}" if keys else "")
+        parts = [f"目标 {UNDECIDED}（{hint}）"]
+    else:
+        parts = [f"目标 {comp_with_tribe(game_plan, always=True)}"]
+        if keys:
+            parts.append(f"核心卡 {keys}")
+    for label, text in (
+        ("节奏", game_plan.tiers),
+        ("规则", game_plan.roll),
+        ("阶段", game_plan.stage),
+        ("换方向", game_plan.pivot),
+    ):
+        if text:
+            parts.append(f"{label} {text}")
+    block = PLAN_TITLE.format(turn=game_plan.turn) + " | ".join(parts)
+    return block if ask_plan else block + FAST_PLAN_NOTE
+
+
+def plan_choice_line(game_plan: GamePlan, state: GameState, cards: CardDB) -> str:
+    """选项消息里的整局计划，一行：目标、核心卡（或想找的牌）、阶段。"""
+    keys = key_cards_text(game_plan, state, _Writer(cards).name)
+    parts = [f"目标 {game_plan.comp}"]
+    if keys:
+        parts.append(f"{'想找' if game_plan.undecided else '核心卡'} {keys}")
+    if game_plan.stage:
+        parts.append(f"阶段 {game_plan.stage}")
+    return "整局计划：" + " · ".join(parts)
 
 
 def build_user_message(
@@ -547,16 +656,24 @@ def build_user_message(
     all_opponents: bool = True,
     opponents_block: str | None = None,
     stats_block: str | None = None,
+    comps_block: str | None = None,
+    game_plan: GamePlan | None = None,
+    plan_enabled: bool = True,
+    ask_plan: bool = True,
 ) -> str:
-    """本局卡池 + 空行 +（本版本战绩好的随从 + 空行）+ 对手 + 空行 + 局面；有记忆时末尾加一行
-    之前的判断。不附规则建议（AI 曾经照抄）。卡池块、战绩块和对手块在前：跨回合的缓存前缀
-    （系统提示 + 卡池块 + 战绩块）只随本局种族变，对手块同一回合内不变。opponents_block：
-    调度器这一回合已经生成的对手块；None 时按 state 现生成。stats_block：build_stats_block 的
-    结果；None 时没有这一块。"""
+    """本局卡池 + 空行 +（本版本战绩好的随从 + 空行）+（本赛季流派指南 + 空行）+ 对手 + 空行 +
+    局面；有记忆时末尾加一行之前的判断，最后一行再说一遍预算（budget_reminder）。不附规则建议
+    （AI 曾经照抄）。卡池块、战绩块、流派指南块和对手块在前：跨回合的缓存前缀（系统提示 + 卡池块
+    + 战绩块 + 流派指南块）只随本局种族变，对手块同一回合内不变。opponents_block：调度器这一
+    回合已经生成的对手块；None 时按 state 现生成。stats_block：build_stats_block 的结果；
+    comps_block：llm.comps.comps_block 的结果；None 时没有这一块。plan_enabled（[llm] game_plan）
+    时局面的第一行是整局计划（game_plan；还没有时请 AI 定一个；ask_plan 为假时只说还没定、有
+    计划时说明不用写 plan）：它属于每次都变的局面部分，一回合最多变一次，不影响前面的缓存。"""
     me = state.me
     assert me is not None
     w = _Writer(cards)
-    lines = [
+    lines = [plan_block(game_plan, state, cards, ask_plan)] if plan_enabled else []
+    lines += [
         _turn_line(state, w),
         " | ".join(
             [
@@ -579,16 +696,19 @@ def build_user_message(
     lines += w.section("商店：", state.shop)
     lines += w.section(f"场面（已用 {len(me.board)}/7）：", me.board)
     lines += w.section("手牌：", me.hand)
-    pool = _pool_line(state, ctx, memory, w)
+    pool = _pool_line(state, ctx, memory, w, game_plan)
     if pool is not None:
         lines.append(pool)
     if memory is not None:
         lines.append(_memory_line(memory, state.turn))
+    lines.append(budget_reminder(ctx))  # 最后再说一遍预算
     if opponents_block is None:
         opponents_block = build_opponents_block(state, cards, all_opponents)
     blocks = [card_pool_block(cards, state.tribes)]
     if stats_block is not None:
         blocks.append(stats_block)
+    if comps_block is not None:
+        blocks.append(comps_block)
     blocks += [opponents_block, "\n".join(lines)]
     return "\n\n".join(blocks)
 
@@ -730,11 +850,13 @@ def build_choice_message(
     cards: CardDB,
     memory: AIMemory | None = None,
     stats: MetaStats | None = None,
+    game_plan: GamePlan | None = None,
 ) -> str:
     """游戏弹出的"选一个"：标题、回合、本局种族和机制、场面、手牌和选项。不放本局卡池
     （选项就那么几张，发卡池只会更慢）；有记忆时末尾加一行之前的判断（只读，不会被改写）。
     stats：本版本统计——饰品写平均名次和被选率，三连、发现、黑暗之赐的随从写回合修正后的
-    战绩；有任何一个选项带战绩时"选项："之前加一行说明。"""
+    战绩；有任何一个选项带战绩时"选项："之前加一行说明。game_plan：整局计划，有时手牌之后
+    加一行（目标、核心卡、阶段）。"""
     choice, me = state.choice, state.me
     assert choice is not None and me is not None
     w = _Writer(cards)
@@ -750,6 +872,8 @@ def build_choice_message(
         lines.append(_trinkets_line(me.trinkets, w))
     lines += w.section(f"场面（已用 {len(me.board)}/7）：", me.board)
     lines += w.section("手牌：", me.hand)
+    if game_plan is not None:
+        lines.append(plan_choice_line(game_plan, state, cards))
     options = [_choice_option_line(option, w) for option in choice.options]
     if stats is not None:
         used: set[str] = set()

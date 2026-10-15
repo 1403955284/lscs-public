@@ -264,3 +264,122 @@ def test_empty_choice_answer_can_be_retried():
 
     with pytest.raises(EmptyResponse):
         parse_choice_pick("  ", CHOICE_IDS)
+
+
+# ---- 整局计划（整局计划与流派指南设计文档第 4.3 节） ----
+
+PLAN = {
+    "comp": " 畸变神明 ",
+    "tribe": "畸变",
+    "key_cards": ["蚀脑怪", "残忍的精神鞭笞者(金)", "飘荡祭品"],
+    "tiers": "第 6 回合 4 本，第 8 回合 5 本",
+    "roll": "5 本后铸币主要刷新找核心卡；\n血量低于 15 先补身材",
+    "stage": "过渡",
+    "pivot": "第 8 回合还没有两张核心卡就转海盗",
+    "changed": "",
+}
+
+
+def plan_answer(plan) -> str:
+    return json.dumps({"actions": [], "plan": plan}, ensure_ascii=False)
+
+
+def test_game_plan_fields_are_read():
+    from lscs.advisor.models import GamePlan
+
+    plan = parse_plan(plan_answer(PLAN))
+    assert plan.game_plan == GamePlan(
+        comp="畸变神明",
+        tribe="ABERRATION",
+        key_cards=("蚀脑怪", "残忍的精神鞭笞者", "飘荡祭品"),  # 去掉"(金)"
+        tiers="第 6 回合 4 本，第 8 回合 5 本",
+        roll="5 本后铸币主要刷新找核心卡； 血量低于 15 先补身材",  # 合成一行
+        stage="过渡",
+        pivot="第 8 回合还没有两张核心卡就转海盗",
+    )
+    assert plan.game_plan.turn == 0  # 回合由调度器校验时填
+
+
+def test_game_plan_fields_are_cut_and_capped():
+    raw = dict(
+        PLAN,
+        comp="一二三四五六七八九十甲乙丙",
+        key_cards=["甲", 7, "", "乙", "甲", "丙", "丁"],
+        tiers="长" * 50,
+        changed=" 连输两场 ",
+    )
+    plan = parse_plan(plan_answer(raw)).game_plan
+    assert plan.comp == "一二三四五六七八九十甲…"  # 12 个字
+    assert plan.key_cards == ("甲", "乙", "丙")  # 跳过不是文字的、空的、重复的，最多 3 张
+    assert plan.tiers == "长" * 39 + "…"
+    assert plan.changed == "连输两场"
+
+
+@pytest.mark.parametrize(
+    ("tribe", "expected"),
+    [("畸变", "ABERRATION"), ("PIRATE", "PIRATE"), ("pirate", "PIRATE"), ("火星人", None)],
+)
+def test_game_plan_tribe(tribe, expected):
+    assert parse_plan(plan_answer(dict(PLAN, tribe=tribe))).game_plan.tribe == expected
+
+
+def test_game_plan_tribe_all_or_missing_is_none():
+    assert parse_plan(plan_answer(dict(PLAN, tribe="ALL"))).game_plan.tribe is None
+    assert parse_plan(plan_answer(dict(PLAN, tribe=None))).game_plan.tribe is None
+
+
+@pytest.mark.parametrize("stage", ["中期", "", 3, None])
+def test_unknown_stage_is_none(stage):
+    assert parse_plan(plan_answer(dict(PLAN, stage=stage))).game_plan.stage is None
+
+
+@pytest.mark.parametrize("stage", ["前期", "过渡", "成型", "保血"])
+def test_known_stages(stage):
+    assert parse_plan(plan_answer(dict(PLAN, stage=stage))).game_plan.stage == stage
+
+
+@pytest.mark.parametrize(
+    "raw", [None, "畸变神明", ["畸变神明"], {}, {"comp": ""}, {"comp": 3}, {"key_cards": ["甲"]}]
+)
+def test_no_game_plan_is_not_an_error(raw):
+    data = {"actions": [{"type": "refresh"}], "summary": "刷"}
+    if raw is not None:
+        data["plan"] = raw
+    plan = parse_plan(json.dumps(data, ensure_ascii=False))
+    assert plan.game_plan is None and plan.summary == "刷"
+    assert plan.actions == (Action(type="refresh"),)
+
+
+@pytest.mark.parametrize(
+    ("comp", "expected"),
+    [
+        ("畸变怪养神流（亡语 / 弃牌）", "畸变怪养神流"),
+        ("畸变神明（畸变）", "畸变神明"),
+        ("守门融合怪喝茶流（中立法术流）", "守门融合怪喝茶流"),  # 不截成半个括号
+        ("海盗(金币) (钩牙)", "海盗"),
+        ("（未定）", "（未定）"),  # 去光了就保留原样
+        ("圣盾龙（希望信使）流", "圣盾龙（希望信使）流"),  # 只去末尾的
+    ],
+)
+def test_game_plan_comp_drops_trailing_notes_before_cutting(comp, expected):
+    assert parse_plan(plan_answer(dict(PLAN, comp=comp))).game_plan.comp == expected
+
+
+def test_game_plan_key_cards_drop_the_display_marks():
+    cards = ["蚀脑怪✓", "残忍的精神鞭笞者 ✔", "飘荡祭品(金)✓"]
+    plan = parse_plan(plan_answer(dict(PLAN, key_cards=cards))).game_plan
+    assert plan.key_cards == ("蚀脑怪", "残忍的精神鞭笞者", "飘荡祭品")
+
+
+def test_a_copied_placeholder_plan_is_undecided_and_empty():
+    from lscs.advisor.models import GamePlan
+    from lscs.llm.parse import PLAN_PLACEHOLDERS
+
+    plan = parse_plan(plan_answer(dict(PLAN_PLACEHOLDERS))).game_plan
+    assert plan == GamePlan(comp="未定")  # 示例原样抄回来：什么都没定
+    partly = dict(
+        PLAN, comp="目标流派", key_cards=["核心卡名", "蚀脑怪"], pivot="换方向的条件一句话"
+    )
+    plan = parse_plan(plan_answer(partly)).game_plan
+    assert (plan.comp, plan.key_cards, plan.pivot) == ("未定", ("蚀脑怪",), "")
+    assert plan.tiers == PLAN["tiers"]  # 真写了的照旧

@@ -12,7 +12,8 @@
 小圆点，选项、选英雄和站位再加一行理由；带画面高亮要框的位置 Target）、若干块（Block）、
 底部一行提示（notice）和警告。精简模式只有一个没有标签的块，每行前面一个粗体标签：
 
-- 招募："然后"（剩下的步骤，短写）、"目标"（AI 的一句话；没有 AI 时规则的"方向"）；
+- 招募："然后"（剩下的步骤，短写）、"目标"（AI 的一句话；没有 AI 时规则的"方向"）、"计划"
+  （整局计划：目标流派 · 阶段 · 核心卡，✓ 是已经有的；还没有计划时没有这一行）；
 - 站位（方案做完后"下一步"是站位的第一步）：理由的标签是"为何"；
 - 弹出选项："理由"、选项标题 + 按顺序的选项名（★ AI 推荐，▲ 本版本战绩最好的饰品）；
 - 选英雄："理由"、"护甲"或"名次"（★ 是"下一步"指的那个）；
@@ -20,7 +21,8 @@
 - 对局结束：复盘的关键时刻和下局重点。
 
 详细模式（[overlay] detail = true）的"下一步"在一个带底色的"现在"块里，下面分块，块标签写
-用途：本回合（剩下的每一步、站位、目标、"规则另议"）、留意（要找和对子、下个对手和最强）、
+用途：本回合（剩下的每一步、站位、目标、整局计划、"计划提醒"、"规则另议"）、留意（要找和
+对子、下个对手和最强）、
 选择（每个选项一行，右列本版本统计）、备选和点评（选英雄）、对手（战斗中所有对手）、复盘。
 
 面板太高时 condense 逐级去掉次要的行（界面从第 0 级试到最后一级）。
@@ -37,11 +39,13 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Literal
 
+from lscs.advisor.context import build_context
 from lscs.advisor.display import CIRCLED, describe_action, hero_comment_lines
 from lscs.advisor.models import (
     Action,
     Advice,
     ChoiceAdvice,
+    GamePlan,
     HeroAdvice,
     Lane,
     Move,
@@ -56,6 +60,7 @@ from lscs.advisor.opponents import (
     eliminated_names,
     summarize_opponents,
 )
+from lscs.advisor.plan_check import key_cards_text, off_plan_note
 from lscs.advisor.pool import PoolNote, note_for
 from lscs.advisor.positioning import where_text
 from lscs.advisor.runner import remaining_plan
@@ -124,6 +129,7 @@ BEST = "▲"  # 本版本战绩最好的饰品（不是推荐）
 # 精简模式行首的标签
 THEN = "然后"
 GOAL = "目标"
+PLAN = "计划"  # 整局计划（整局计划与流派指南设计文档第 8.2 节）
 DIRECTION = "方向"
 REASON = "理由"
 WHY = "为何"
@@ -249,6 +255,7 @@ class _PlanEntry:
     base: GameState
     expired: bool = False  # 深度分析的操作已经不能用，只看思路
     notes: tuple[PoolNote, ...] = ()  # 对子和要找的牌还剩约几张（Advice.pool_notes）
+    plan_note: str | None = None  # 方案和整局计划矛盾时的提醒（Advice.plan_note）
 
 
 @dataclass(frozen=True)
@@ -539,6 +546,7 @@ class OverlayModel:
         self._review: GameReview | None = None  # 对局结束后的复盘
         self._position: PositionAdvice | None = None  # 本回合最近一次站位建议
         self._stats_note: StatsNote | None = None  # 这组备选英雄或饰品的本版本统计
+        self._game_plan: GamePlan | None = None  # 整局计划：换回合保留，新对局清空
 
     # ---- 界面线程 ----
 
@@ -556,6 +564,7 @@ class OverlayModel:
                     self._ai_off = None
                 self._hero_rules, self._hero_ai = None, None  # 新对局（或重连）：重新开始
                 self._review = None
+                self._game_plan = None
             if any(e.type == EventType.HEROES_OFFERED for e in events):
                 self._hero_ai = None  # 新的一组备选（重随）：上一组的推荐、错误和提示都不再显示
                 self._stats_note = None
@@ -637,7 +646,11 @@ class OverlayModel:
     def show_ai(self, state: GameState, advice: Advice, agrees: bool) -> None:
         """agrees（AI 同意规则建议）只在终端里说；面板照样按 AI 的步骤列。"""
         entry = _PlanEntry(
-            advice.plan, state, expired=advice.expired is not None, notes=advice.pool_notes
+            advice.plan,
+            state,
+            expired=advice.expired is not None,
+            notes=advice.pool_notes,
+            plan_note=advice.plan_note,
         )
         with self._lock:
             self._enter_turn(advice.turn)
@@ -647,8 +660,16 @@ class OverlayModel:
                 self._ai = entry
             self._commit()
 
-    def ai_summary(self, calls: int, input_tokens: int, output_tokens: int) -> None:
+    def ai_summary(
+        self, calls: int, input_tokens: int, output_tokens: int, off_plan: int = 0
+    ) -> None:
         """本局 AI 用量只在终端显示。"""
+
+    def show_plan(self, state: GameState, plan: GamePlan, previous: GamePlan | None) -> None:
+        """整局计划定下或改了：招募时精简模式多一行"计划"，详细模式"本回合"里一行。"""
+        with self._lock:
+            self._game_plan = plan
+            self._commit()
 
     def show_position(self, state: GameState, advice: PositionAdvice | None) -> None:
         """站位建议；None 表示现在不提示（还没买完、功能关闭），清掉旧的。"""
@@ -1099,6 +1120,39 @@ class OverlayModel:
             return Line(f"{label}：{text}", role="goal")
         return Line(text, role="goal", label=label, max_lines=lines)
 
+    def _plan_line(self, state: GameState) -> Line | None:
+        """整局计划一行；还没有计划时为 None。精简模式："计划"标签，"畸变神明 · 保血 · 核心
+        蚀脑怪✓、飘荡祭品"（还没定时"未定 · 前期 · 想找 甲、乙"），一行；详细模式："计划：
+        畸变神明（保血） · 核心 …… · 升本节奏"，和目标同级。"""
+        plan = self._game_plan
+        if plan is None:
+            return None
+        keys = key_cards_text(plan, state, self._name)
+        cards = f"{'想找' if plan.undecided else '核心'} {keys}" if keys else ""
+        if self._detail:
+            head = f"{plan.comp}（{plan.stage}）" if plan.stage else plan.comp
+            parts = [head, cards, plan.tiers]
+            return Line("计划：" + NAME_SEP.join(p for p in parts if p), role="goal", max_lines=2)
+        parts = [plan.comp, plan.stage or "", cards]
+        text = NAME_SEP.join(p for p in parts if p)
+        return Line(text, "dim", "aside", label=PLAN, max_lines=1)
+
+    def _plan_note_line(self, state: GameState, r: _Recruit) -> Line | None:
+        """详细模式的"提醒：商店里有核心卡 X，方案却没买它"：显示的 AI 方案出建议时有提醒，而且
+        按现在的局面和计划还是这样（买了那张、铸币花完了就不再提醒）。"""
+        entry, plan = r.entry, r.plan
+        if entry is None or entry.plan_note is None or plan is None or state.me is None:
+            return None
+        ctx = build_context(state, self._buy_cost(state.me.hero_card_id))
+        if ctx is None:
+            return None
+        try:
+            note = off_plan_note(plan, self._game_plan, ctx, state, self._name)
+        except Exception:
+            log.debug("检查计划提醒时出错", exc_info=True)
+            return None
+        return Line(f"提醒：{note}", "muted", "alt") if note is not None else None
+
     def _then_text(self, state: GameState, r: _Recruit) -> str:
         """写"然后"：显示的方案在第一步之后的每一步（编号是完整方案里的序号，短写），后面还有
         站位要调时接"· 站位 把 X 拖到最左边"（前面没有步骤时不带"· "）；"下一步"是站位时
@@ -1131,6 +1185,9 @@ class OverlayModel:
             goal = self._goal_line()
             if goal is not None:
                 lines.append(goal)
+            plan_line = self._plan_line(state)
+            if plan_line is not None:
+                lines.append(plan_line)
             blocks = _single_block(lines)
         showing_ai = r.entry is not None and r.source != "rules"
         return self._view(
@@ -1172,6 +1229,9 @@ class OverlayModel:
         goal = self._goal_line()
         if goal is not None:
             lines.append(goal)
+        for extra in (self._plan_line(state), self._plan_note_line(state, r)):
+            if extra is not None:
+                lines.append(extra)
         alt = self._rules_alt(state, r)
         if alt is not None:
             lines.append(alt)

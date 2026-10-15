@@ -200,8 +200,9 @@ def test_remaining_plan_drops_executed_steps():
     )
 
 
-def result_for(old, plan=PLAN, started=100.0, lane="fast", expired=None):
-    request = AIRequest(1, old, None, started, lane)
+def result_for(old, plan=PLAN, started=100.0, lane="fast", expired=None, game_plan=None):
+    """game_plan：发出请求时局面消息里的整局计划。"""
+    request = AIRequest(1, old, None, started, lane, game_plan=game_plan)
     return AIResult(request, plan, None, elapsed=3.0, expired=expired)
 
 
@@ -405,7 +406,8 @@ def test_ai_request_at_recruit_start_already_knows_the_hero_power(path, line):
     runner = AdviceRunner(RULES, CARDS.name, AdviceDisplay(CARDS.name, lambda _: None), scheduler)
     run(read_log_lines(path), runner)
     recruit = [c for c in provider.calls if not c.user.startswith(("选英雄", "选择："))]
-    situations = [c.user.split("\n\n", 2)[2] for c in recruit]  # 去掉开头的本局卡池和对手
+    # 去掉开头的本局卡池、对手和整局计划那一行
+    situations = [c.user.split("\n\n", 2)[2].split("\n", 1)[1] for c in recruit]
     starts = [text for text in situations if text.startswith("第 1 回合")]
     assert starts and any(text.startswith(line) for text in starts[0].splitlines())
 
@@ -698,12 +700,13 @@ def test_user_game_sends_one_opponents_block_per_recruit_turn():
         if not call.user.startswith("【本局卡池"):
             continue  # 选英雄、选项和改正要求
         _, block, situation = call.user.split("\n\n", 2)
-        turn = int(re.match(r"第 (\d+) 回合", situation).group(1))
+        turn = int(re.search(r"^第 (\d+) 回合", situation, re.M).group(1))  # 计划那一行之后
         blocks.setdefault(turn, set()).add(block)
     assert sorted(blocks) == list(range(1, 14))
     assert all(len(found) == 1 for found in blocks.values()), {t: len(b) for t, b in blocks.items()}
+    recruit = [c.user for c in provider.calls if c.user.startswith("【本局卡池")]
     calls_per_turn = [
-        sum(1 for c in provider.calls if f"\n\n第 {t} 回合（招募）" in c.user) for t in (10, 11, 12)
+        sum(1 for u in recruit if f"\n第 {t} 回合（招募）" in u) for t in (10, 11, 12)
     ]
     assert all(n >= 2 for n in calls_per_turn)  # 这几个回合对手中途升过本，也有好几次调用
 
@@ -722,3 +725,113 @@ def test_deep_result_in_combat_still_counts_the_cards_to_look_for():
     assert advice.expired == "changed"
     # 退回用发出请求时的招募局面算张数
     assert advice.pool_notes == (PoolNote("BG36_113", "飘荡祭品", have=0, left=13),)
+
+
+# ---- 整局计划（整局计划与流派指南设计文档第 5.2、6 节） ----
+
+NAGA_PLAN = {"comp": "纳迦法术", "tribe": "纳迦", "key_cards": ["熔岩潜伏者"], "stage": "前期"}
+
+
+def test_plan_is_printed_after_the_deep_block_and_off_plan_fast_advice_is_counted(mini_lines):
+    nothing = json.dumps({"actions": []})
+    planned = json.dumps(
+        {"analysis": "走纳迦", "actions": [], "plan": NAGA_PLAN}, ensure_ascii=False
+    )
+    out = []
+    runner = make_runner([MINI_HERO, nothing, planned, nothing, planned], out, deep=True)
+    run(mini_lines, runner)
+    lines = advice_lines(out)
+    plan = lines.index("  🗺 计划：纳迦法术 · 核心 熔岩潜伏者 · 阶段 前期")
+    # 紧跟在第 1 回合的深度分析之后
+    assert lines[plan - 2 : plan] == ["  🧠 深度分析（0 秒）：无需操作", "          分析：走纳迦"]
+    assert sum("🗺" in line for line in lines) == 1  # 第 2 回合照抄：不再打印
+    reminder = "          ⚠ 计划提醒：商店里有核心卡 熔岩潜伏者，方案却没买它"
+    assert lines.count(reminder) == 2  # 第 2 回合的快速建议和深度分析都没买
+    assert lines[-1] == "本局 AI 调用 5 次，输入 0.5 千、输出 0.1 千 token，快速建议偏离计划 1 次"
+    assert runner.off_plan == 1
+
+
+def test_a_new_game_resets_the_off_plan_count():
+    from lscs.state.models import Event, EventType
+
+    out = []
+    runner = make_runner([], out)
+    runner.off_plan = 3
+    runner.on_update(make_state(turn=1), [Event(type=EventType.GAME_STARTED, turn=0)])
+    assert runner.off_plan == 0
+
+
+class PlanOnly:
+    """只提供整局计划的调度器替身（_show_result 只读它）。"""
+
+    def __init__(self, game_plan):
+        self.game_plan = game_plan
+
+
+def test_ai_advice_counts_the_key_cards_and_carries_the_plan_note():
+    from lscs.advisor.models import GamePlan
+    from lscs.advisor.pool import PoolEstimator, PoolNote
+
+    spy = AdviceSpy()
+    estimator = PoolEstimator(CARDS, {1: 16, 2: 15, 3: 13})
+    game_plan = GamePlan(comp="畸变神明", key_cards=("飘荡祭品", "蚀脑怪"))
+    runner = AdviceRunner(
+        RULES, CARDS.name, spy, PlanOnly(game_plan), pool=estimator, clock=lambda: 106.0
+    )
+    shop = [shop_minion(20, "BG36_113", 2, 1, tier=3, races=("ABERRATION",))]
+    state = make_state(gold=5, shop=shop)
+    runner._state = state
+    plan = Plan(source="llm", actions=(Action(type="refresh"),), look_for=("虚悯者",))
+    runner._show_result(result_for(state, plan, game_plan=game_plan))
+    (advice,) = spy.advice("show_ai")
+    assert [n.name for n in advice.pool_notes] == ["虚悯者", "飘荡祭品", "蚀脑怪"]
+    assert advice.pool_notes[1] == PoolNote("BG36_113", "飘荡祭品", have=0, left=13, shop=1)
+    assert advice.plan_note == "商店里有核心卡 飘荡祭品，方案却没买它"
+    assert runner.off_plan == 1
+    runner._show_result(result_for(state, plan, lane="deep", game_plan=game_plan))
+    assert spy.advice("show_ai")[1].plan_note is not None and runner.off_plan == 1  # 深度不计数
+    buys = Plan(source="llm", actions=(Action(type="buy", entity_id=20),))
+    runner._show_result(result_for(state, buys, game_plan=game_plan))
+    assert spy.advice("show_ai")[2].plan_note is None and runner.off_plan == 1
+    # 发出时还没有计划（AI 没看到计划）：不提醒、不计数，张数照样带核心卡
+    runner._show_result(result_for(state, plan))
+    latest = spy.advice("show_ai")[3]
+    assert latest.plan_note is None and runner.off_plan == 1
+    assert [n.name for n in latest.pool_notes] == ["虚悯者", "飘荡祭品", "蚀脑怪"]
+
+
+def test_deep_advice_is_checked_against_its_own_new_plan():
+    from lscs.advisor.models import GamePlan
+
+    spy = AdviceSpy()
+    old_plan = GamePlan(comp="畸变神明", key_cards=("飘荡祭品",))
+    runner = AdviceRunner(RULES, CARDS.name, spy, PlanOnly(old_plan), clock=lambda: 106.0)
+    shop = [shop_minion(20, "BG36_113", 2, 1, tier=3), shop_minion(21, "BG36_099", 3, 4, tier=2)]
+    state = make_state(gold=5, shop=shop)
+    runner._state = state
+    pivot = GamePlan(comp="蚀脑怪流", key_cards=("蚀脑怪",))
+    plan = Plan(source="llm", actions=(Action(type="buy", entity_id=21),), game_plan=pivot)
+    runner._show_result(result_for(state, plan, lane="deep", game_plan=old_plan))
+    assert spy.advice("show_ai")[0].plan_note is None  # 按新计划买了蚀脑怪，不算偏离
+
+
+def test_plan_updates_reach_the_display():
+    from lscs.advisor.models import GamePlan
+    from lscs.llm.scheduler import PlanUpdated
+
+    class Scheduler:
+        def __init__(self, events):
+            self.events = events
+
+        def tick(self):
+            return self.events
+
+    spy = AdviceSpy()
+    plan = GamePlan(comp="畸变神明", turn=5)
+    state = make_state(turn=5)
+    runner = AdviceRunner(RULES, CARDS.name, spy, Scheduler([PlanUpdated(plan, None, 5)]))
+    runner.tick()
+    assert spy.calls == []  # 还没有局面：不显示
+    runner._state = state
+    runner.tick()
+    assert spy.calls == [("show_plan", (state, plan, None))]

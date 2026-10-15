@@ -57,12 +57,24 @@ def test_repair_invalid_can_be_switched_off(tmp_path):
     assert cfg.llm.repair_invalid is False
 
 
+def test_comp_guide_is_on_by_default_and_can_be_switched_off(tmp_path):
+    assert load_config(tmp_path / "config.toml").llm.comp_guide is True
+    assert load_config(write(tmp_path, "[llm]\ncomp_guide = false\n")).llm.comp_guide is False
+
+
+def test_game_plan_is_on_by_default_and_can_be_switched_off(tmp_path):
+    assert load_config(tmp_path / "config.toml").llm.game_plan is True
+    assert load_config(write(tmp_path, "[llm]\ngame_plan = false\n")).llm.game_plan is False
+
+
 def test_example_file_matches_defaults():
     assert load_config(EXAMPLE) == AppConfig()
     text = EXAMPLE.read_text(encoding="utf-8")
     assert "\nhero_advice = true " in text
     assert "\nchoice_advice = true " in text
     assert "\nrepair_invalid = true " in text
+    assert "\ncomp_guide = true " in text
+    assert "\ngame_plan = true " in text
     assert "\ndrag_handle = true " in text
     assert "\nenabled = false" in text  # [stats]：本版本统计默认关闭
 

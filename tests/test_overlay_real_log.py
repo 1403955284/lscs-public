@@ -12,13 +12,22 @@ from pathlib import Path
 import pytest
 from helpers import NEEDS_USER_LOG, USER_LOG, keep_away_from_real_files, replay_log
 
-from lscs.advisor.models import Action, Advice, Plan
+from lscs.advisor.models import Action, Advice, GamePlan, Plan
 from lscs.overlay.model import OverlayModel, OverlayView, Target
 from lscs.state.models import EventType, Phase
 
 pytestmark = NEEDS_USER_LOG
 
 DEEP_SUMMARY = "补身材并凑畸变"
+# 第 9 回合注入的整局计划（整局计划与流派指南设计文档第 8.2 节）；没有卡牌数据，卡名就是卡牌 ID
+NINE_PLAN = GamePlan(
+    comp="畸变神明",
+    tribe="ABERRATION",
+    key_cards=("BG36_099", "BG36_108", "BG36_113"),
+    tiers="第 8 回合 5 本",
+    stage="保血",
+    turn=9,
+)
 
 
 def _identity(card_id: str) -> str:
@@ -74,6 +83,8 @@ def drive(detail: bool = False) -> dict[str, OverlayView]:
             advice = Advice(state_seq=state.seq, turn=9, plan=plan, lane="deep")
             model.show_ai(state, advice, False)
             views["recruit9_start"] = model.snapshot()
+            model.show_plan(state, NINE_PLAN, None)
+            views["recruit9_planned"] = model.snapshot()
         elif injected and state.me.gold == 0:
             views.setdefault("recruit9_broke", model.snapshot())
     return views
@@ -180,8 +191,30 @@ def test_spent_gold_switches_to_the_rules_plan(views, detail):
     assert view.next_step.badge == "1"
     assert view.source == "规则"
     goals = [line.text for line in lines(view) if line.role == "goal"]
-    assert goals == [f"目标：{DEEP_SUMMARY}" if detail else DEEP_SUMMARY]
+    if detail:  # 整局计划和目标同级，一直留到回合结束
+        assert goals == [f"目标：{DEEP_SUMMARY}", "计划：畸变神明（保血） · 核心 " + PLAN_KEYS]
+    else:
+        assert goals == [DEEP_SUMMARY]
     assert not any(line.role == "alt" for line in lines(view))  # 显示的是规则：没有"规则另议"
+
+
+# 第 9 回合场上有蚀脑怪和残忍的精神鞭笞者：打 ✓
+PLAN_KEYS = "BG36_099✓、BG36_108✓、BG36_113 · 第 8 回合 5 本"
+
+
+def test_injected_plan_adds_one_line_and_keeps_the_next_step(views, detail):
+    before, after = views["recruit9_start"], views["recruit9_planned"]
+    assert after.next_step == before.next_step and after.source == before.source
+    added = [line for line in lines(after) if line not in lines(before)]
+    if detail:
+        assert [(line.text, line.role) for line in added] == [
+            ("计划：畸变神明（保血） · 核心 " + PLAN_KEYS, "goal")
+        ]
+    else:
+        (line,) = added
+        assert (line.label, line.role, line.max_lines) == ("计划", "aside", 1)
+        assert line.text == "畸变神明 · 保血 · 核心 BG36_099✓、BG36_108✓、BG36_113"
+    assert "计划" not in "".join(line.text + line.label for line in lines(views["combat9"]))
 
 
 def test_combat(views, detail):

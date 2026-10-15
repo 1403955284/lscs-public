@@ -162,6 +162,9 @@ def _advice_text(turn: TurnRecord, name: Namer) -> str | None:
         parts.append("规则 " + "、".join(_action_name(a, c, name) for a, c in advice.rules_actions))
     if advice.deep_summary:
         parts.append(f'深度 "{" ".join(advice.deep_summary.split())}"')
+    if advice.plan_comp:
+        stage = f"/{advice.plan_stage}" if advice.plan_stage else ""
+        parts.append(f'计划 "{advice.plan_comp}{stage}"')
     if advice.advised:
         parts.append(f"采纳 {advice.followed}/{advice.advised}")
     return "建议：" + "；".join(parts) if parts else None

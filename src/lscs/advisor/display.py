@@ -11,6 +11,7 @@ from lscs.advisor.models import (
     Advice,
     ChoiceAdvice,
     Expired,
+    GamePlan,
     HeroAdvice,
     Lane,
     Plan,
@@ -24,6 +25,7 @@ from lscs.advisor.opponents import (
     contested_parts,
     eliminated_names,
 )
+from lscs.advisor.plan_check import comp_with_tribe, key_cards_text
 from lscs.advisor.pool import PoolNote, note_for
 from lscs.advisor.positioning import INTRO, step_texts
 from lscs.review.report import GameReview, ai_terminal_lines, terminal_lines
@@ -173,6 +175,49 @@ def thought_lines(
     return lines
 
 
+def plan_terminal_lines(
+    plan: GamePlan, previous: GamePlan | None, state: GameState | None, name: Namer
+) -> list[str]:
+    """终端的 🗺 块（整局计划与流派指南设计文档第 8.1 节）。第一行：定下时（包括从"未定"定下
+    目标流派）"计划：……"，改了时"计划改了：……"（升本节奏没变就不重复写），流派和核心卡没变、
+    只有阶段变了时"阶段：保血（原来 过渡）"。下面一行"原因：……"（改了且 AI 写了原因时），再一行
+    "规则：……   换方向：……"（定下时都写，改了时只写变了的）。"""
+    if previous is not None and (
+        plan.signature() == previous.signature() or (plan.undecided and previous.undecided)
+    ):
+        lines = [f"阶段：{plan.stage or '—'}（原来 {previous.stage or '—'}）"]
+        if plan.changed:
+            lines.append(f"原因：{plan.changed}")
+        return lines
+    if previous is not None and previous.undecided:
+        previous = None  # 从"未定"定下目标流派：和第一次定下一样写
+
+    def fresh(field: str) -> str:
+        """这个字段要写（定下时有就写，改了时变了才写）；不写时为空。"""
+        value = getattr(plan, field)
+        return value if previous is None or value != getattr(previous, field) else ""
+
+    parts = [comp_with_tribe(plan)]
+    keys = key_cards_text(plan, state, name)
+    if keys:
+        parts.append(f"{'想找' if plan.undecided else '核心'} {keys}")
+    if fresh("tiers"):
+        parts.append(plan.tiers)
+    if plan.stage:
+        parts.append(f"阶段 {plan.stage}")
+    lines = [("计划：" if previous is None else "计划改了：") + " · ".join(parts)]
+    if previous is not None and plan.changed:
+        lines.append(f"原因：{plan.changed}")
+    tail = []
+    if fresh("roll"):
+        tail.append(f"规则：{plan.roll}")
+    if fresh("pivot"):
+        tail.append(f"换方向：{plan.pivot}")
+    if tail:
+        lines.append("   ".join(tail))
+    return lines
+
+
 def hero_name(state: GameState, entity_id: int | None, name: Namer) -> str:
     """备选英雄的名字；不在当前备选里时用编号。"""
     select = state.hero_select
@@ -280,7 +325,10 @@ class AdviceSink(Protocol):
     def show_ai(self, state: GameState, advice: Advice, agrees: bool) -> None: ...
     def show_hero(self, state: GameState, advice: HeroAdvice, agrees: bool = False) -> None: ...
     def show_choice(self, state: GameState, advice: ChoiceAdvice | None) -> None: ...
-    def ai_summary(self, calls: int, input_tokens: int, output_tokens: int) -> None: ...
+    def show_plan(self, state: GameState, plan: GamePlan, previous: GamePlan | None) -> None: ...
+    def ai_summary(
+        self, calls: int, input_tokens: int, output_tokens: int, off_plan: int = 0
+    ) -> None: ...
     def show_review(self, state: GameState, review: GameReview) -> None: ...
     def show_position(self, state: GameState, advice: PositionAdvice | None) -> None: ...
     def show_stats(self, state: GameState, note: StatsNote) -> None: ...
@@ -383,9 +431,11 @@ class AdviceDisplay:
             self._out(f"  {ICONS[lane]}AI 建议不合法（{reason}），正在让它改正…")
 
     def show_ai(self, state: GameState, advice: Advice, agrees: bool) -> None:
+        """方案和思路；方案和整局计划矛盾时（plan_note）块末尾加一行"⚠ 计划提醒"。"""
         plan, deep = advice.plan, advice.lane == "deep"
         icon = ICONS[advice.lane]
         notes = advice.pool_notes
+        reminder = [f"⚠ 计划提醒：{advice.plan_note}"] if advice.plan_note else []
         if advice.expired is not None:
             # 冒号而不是括号：原因里本身带括号，不嵌套
             label = f"深度分析：{EXPIRED_LABELS[advice.expired]}"
@@ -398,13 +448,17 @@ class AdviceDisplay:
         if agrees:
             who = "深度分析" if deep else "AI "
             agree = f"✓ {who}同意规则建议（{seconds}）"
-            self._block(icon, [agree, *thought_lines(plan, notes=notes)])
+            self._block(icon, [agree, *thought_lines(plan, notes=notes), *reminder])
             return
         stale = (f"（{advice.stale_note}）",) if advice.stale_note else ()
         lines = format_plan(plan, state, self._name)
         lines += thought_lines(plan, summary=bool(plan.actions), extra=stale, notes=notes)
         label = f"深度分析（{seconds}）：" if deep else f"AI（{seconds}）："
-        self._block(icon + label, lines)
+        self._block(icon + label, lines + reminder)
+
+    def show_plan(self, state: GameState, plan: GamePlan, previous: GamePlan | None) -> None:
+        """整局计划定下或改了（只在这时打印，紧跟在带来它的深度分析之后）。"""
+        self._block("🗺 ", plan_terminal_lines(plan, previous, state, self._name))
 
     def show_hero(self, state: GameState, advice: HeroAdvice, agrees: bool = False) -> None:
         """选英雄建议。规则：一行；AI：推荐和理由一行，下面每个英雄的点评各一行。
@@ -442,10 +496,14 @@ class AdviceDisplay:
         pick = choice_pick_text(state, advice.pick, self._name)
         self._out(f"  🤖 AI（{seconds}）：选 {pick} —— {advice.reason}")
 
-    def ai_summary(self, calls: int, input_tokens: int, output_tokens: int) -> None:
+    def ai_summary(
+        self, calls: int, input_tokens: int, output_tokens: int, off_plan: int = 0
+    ) -> None:
+        """off_plan：本局快速建议偏离计划（有"计划提醒"）的次数，0 次不写。"""
+        tail = f"，快速建议偏离计划 {off_plan} 次" if off_plan else ""
         self._out(
             f"本局 AI 调用 {calls} 次，输入 {input_tokens / 1000:.1f} 千、"
-            f"输出 {output_tokens / 1000:.1f} 千 token"
+            f"输出 {output_tokens / 1000:.1f} 千 token{tail}"
         )
 
     def show_review(self, state: GameState, review: GameReview) -> None:
@@ -501,8 +559,13 @@ class DisplayGroup:
     def show_choice(self, state: GameState, advice: ChoiceAdvice | None) -> None:
         self._each("show_choice", state, advice)
 
-    def ai_summary(self, calls: int, input_tokens: int, output_tokens: int) -> None:
-        self._each("ai_summary", calls, input_tokens, output_tokens)
+    def show_plan(self, state: GameState, plan: GamePlan, previous: GamePlan | None) -> None:
+        self._each("show_plan", state, plan, previous)
+
+    def ai_summary(
+        self, calls: int, input_tokens: int, output_tokens: int, off_plan: int = 0
+    ) -> None:
+        self._each("ai_summary", calls, input_tokens, output_tokens, off_plan)
 
     def show_review(self, state: GameState, review: GameReview) -> None:
         self._each("show_review", state, review)

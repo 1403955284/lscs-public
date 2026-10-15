@@ -113,7 +113,9 @@ def test_display_group_forwards_every_method_and_isolates_errors(caplog):
     group.ai_text("深度分析超时", "deep")
     group.ai_repairing("fast", "第 2 步：铸币不够")
     group.show_ai(STATE, advice, True)
+    group.show_plan(STATE, GAME_PLAN, None)
     group.ai_summary(2, 300, 40)
+    group.ai_summary(2, 300, 40, 3)
     expected = [
         ("show_rules", (STATE, advice)),
         ("rules_error", (False,)),
@@ -124,7 +126,9 @@ def test_display_group_forwards_every_method_and_isolates_errors(caplog):
         ("ai_text", ("深度分析超时", "deep")),
         ("ai_repairing", ("fast", "第 2 步：铸币不够")),
         ("show_ai", (STATE, advice, True)),
-        ("ai_summary", (2, 300, 40)),
+        ("show_plan", (STATE, GAME_PLAN, None)),
+        ("ai_summary", (2, 300, 40, 0)),
+        ("ai_summary", (2, 300, 40, 3)),
     ]
     assert first.calls == expected
     assert last.calls == expected
@@ -902,3 +906,123 @@ def test_display_group_forwards_show_stats_and_the_review_tap_ignores_it():
     DisplayGroup(Broken(), collector, Panel()).show_stats(choice_state(choice), note)
     assert seen == [note]
     assert collector.logs == {} and collector.ai_choices == {}
+
+
+# ---- 整局计划（整局计划与流派指南设计文档第 8.1 节） ----
+
+PLAN_NAMES = {"BG36_099": "蚀脑怪", "BG36_099_G": "蚀脑怪(金)", "BG36_113": "飘荡祭品"}
+
+
+def plan_name(card_id):
+    return PLAN_NAMES.get(card_id, card_id)
+
+
+def plan_of(**fields):
+    from lscs.advisor.models import GamePlan
+
+    values = {
+        "comp": "畸变神明",
+        "tribe": "ABERRATION",
+        "key_cards": ("蚀脑怪", "残忍的精神鞭笞者", "飘荡祭品"),
+        "tiers": "第 6 回合 4 本，第 8 回合 5 本",
+        "roll": "5 本后铸币主要刷新找核心卡；血量低于 15 先补身材",
+        "stage": "过渡",
+        "pivot": "第 8 回合还没有两张核心卡就转海盗",
+        "turn": 5,
+    }
+    values.update(fields)
+    return GamePlan(**values)
+
+
+GAME_PLAN = plan_of()
+PLAN_STATE = make_state(turn=5, board=[minion(10, "BG36_099_G", 6, 8, races=["ABERRATION"])])
+
+
+def plan_output(plan, previous=None, state=PLAN_STATE):
+    out = []
+    AdviceDisplay(plan_name, out.append).show_plan(state, plan, previous)
+    return out
+
+
+def test_new_plan_prints_two_lines_with_the_held_key_cards_marked():
+    assert plan_output(GAME_PLAN) == [
+        "  🗺 计划：畸变神明 · 核心 蚀脑怪✓、残忍的精神鞭笞者、飘荡祭品 · 第 6 回合 4 本，"
+        "第 8 回合 5 本 · 阶段 过渡",
+        "          规则：5 本后铸币主要刷新找核心卡；血量低于 15 先补身材   "
+        "换方向：第 8 回合还没有两张核心卡就转海盗",
+    ]
+
+
+def test_new_plan_with_few_fields():
+    plan = plan_of(comp="刀剑流", tribe="PIRATE", key_cards=(), tiers="", roll="", pivot="")
+    assert plan_output(plan) == ["  🗺 计划：刀剑流（海盗） · 阶段 过渡"]
+    named = plan.model_copy(update={"comp": "海盗刀剑", "stage": None})
+    assert plan_output(named) == ["  🗺 计划：海盗刀剑"]  # 流派名里有种族名：不重复写
+    undecided = plan_of(comp="未定", key_cards=("飘荡祭品",), stage="前期", roll="", pivot="")
+    assert plan_output(undecided) == [
+        "  🗺 计划：未定 · 想找 飘荡祭品 · 第 6 回合 4 本，第 8 回合 5 本 · 阶段 前期"
+    ]
+
+
+def test_changed_plan_gives_the_reason_and_only_what_changed():
+    new = plan_of(
+        key_cards=("蚀脑怪", "飘荡祭品"),
+        stage="保血",
+        roll="血量低于 15 先补身材",
+        changed="连输两场掉到 19 血，先补身材",
+        turn=9,
+    )
+    assert plan_output(new, GAME_PLAN) == [
+        "  🗺 计划改了：畸变神明 · 核心 蚀脑怪✓、飘荡祭品 · 阶段 保血",
+        "          原因：连输两场掉到 19 血，先补身材",
+        "          规则：血量低于 15 先补身材",
+    ]
+    silent = plan_of(comp="刀剑流", tribe="PIRATE", key_cards=(), turn=9)
+    assert plan_output(silent, GAME_PLAN) == ["  🗺 计划改了：刀剑流（海盗） · 阶段 过渡"]
+
+
+def test_a_new_stage_alone_prints_one_line_and_the_reason():
+    stage = plan_of(stage="保血", changed="血量 13", turn=9)
+    assert plan_output(stage, GAME_PLAN) == [
+        "  🗺 阶段：保血（原来 过渡）",
+        "          原因：血量 13",
+    ]
+    assert plan_output(plan_of(stage="成型"), GAME_PLAN) == ["  🗺 阶段：成型（原来 过渡）"]
+
+
+def test_plan_note_goes_at_the_end_of_the_ai_block():
+    plan = Plan(source="llm", actions=(Action(type="refresh"),), summary="刷")
+    note = "商店里有核心卡 海盗，方案却没买它"
+    for agrees, first in ((False, "  🤖 AI（1.0 秒）：① 刷新"), (True, "  🤖 ✓ AI 同意规则建议")):
+        out = []
+        advice = Advice(state_seq=1, turn=3, plan=plan, elapsed=1.0, plan_note=note)
+        AdviceDisplay(name, out.append).show_ai(STATE, advice, agrees)
+        assert out[0].startswith(first)
+        assert out[-1] == f"          ⚠ 计划提醒：{note}"
+    out = []
+    advice = Advice(state_seq=1, turn=3, plan=plan, elapsed=1.0)
+    AdviceDisplay(name, out.append).show_ai(STATE, advice, False)
+    assert not any("计划提醒" in line for line in out)
+
+
+def test_ai_summary_counts_the_fast_advice_off_the_plan():
+    out = []
+    display = AdviceDisplay(name, out.append)
+    display.ai_summary(79, 29300, 11200, 3)
+    display.ai_summary(79, 29300, 11200)
+    assert out == [
+        "本局 AI 调用 79 次，输入 29.3 千、输出 11.2 千 token，快速建议偏离计划 3 次",
+        "本局 AI 调用 79 次，输入 29.3 千、输出 11.2 千 token",
+    ]
+
+
+def test_choosing_a_comp_after_undecided_reads_like_a_new_plan():
+    undecided = plan_of(comp="未定", key_cards=("飘荡祭品",), stage="前期", roll="", pivot="")
+    assert plan_output(GAME_PLAN, undecided)[0].startswith("  🗺 计划：畸变神明 · 核心 ")
+    other = undecided.model_copy(update={"key_cards": ("蚀脑怪",), "stage": "过渡"})
+    assert plan_output(other, undecided) == ["  🗺 阶段：过渡（原来 前期）"]
+
+
+def test_rewording_alone_is_not_a_changed_plan_in_the_terminal():
+    reworded = plan_of(key_cards=("飘荡祭品", "残忍的精神鞭笞者", "蚀脑怪"), stage="成型")
+    assert plan_output(reworded, GAME_PLAN) == ["  🗺 阶段：成型（原来 过渡）"]

@@ -15,6 +15,8 @@ hero_advice = true             # 选英雄时也让 AI 推荐一个（每局 1 �
 choice_advice = true           # 弹出选项（三连发现、黑暗之赐、饰品、技能升级）时让 AI 选一个
 repair_invalid = true          # AI 的方案不合法时把原因发回去让它改正一次（多等约 2 秒、多一次调用）
 all_opponents = true           # 把所有对手的阵容摘要发给 AI（关掉只写下一个对手）
+comp_guide = true              # 把本赛季流派指南里和本局种族有关的流派发给 AI（strategy/current/comps.md）
+game_plan = true               # 让深度分析定下整局计划（目标流派、核心卡、升本节奏），快速建议和面板跟着它走
 # 深度分析：每回合开始时和快速建议同时发出，开思考，约 20 秒（偶尔 1 分钟）出结果
 deep_analysis = true           # false 关闭深度分析（每局大约省 5 毛到 1 块钱）
 deep_thinking = "low"          # 思考强度：low 或 high（high 更慢）

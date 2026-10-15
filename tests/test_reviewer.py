@@ -190,9 +190,42 @@ def test_tap_collects_ai_advice_hero_and_choice_picks(tmp_path):
     tap.show_opponents(state, None)
     tap.show_review(state, None)
     tap.show_position(state, None)
+    from lscs.advisor.models import GamePlan
+
+    game_plan = GamePlan(comp="畸变神明")
+    tap.show_plan(state, game_plan, None)
+    assert tap.plans == [(state.turn, game_plan)]
     # 新对局清空
     r.on_update(make_state(phase=Phase.HERO_SELECT, turn=0), [ev(EventType.GAME_STARTED, 0)])
-    assert (tap.logs, tap.hero_ai_pick, tap.ai_choices) == ({}, None, {})
+    assert (tap.logs, tap.hero_ai_pick, tap.ai_choices, tap.plans) == ({}, None, {}, [])
+
+
+def test_plans_reach_the_record_and_the_history(tmp_path):
+    from lscs.advisor.models import GamePlan
+
+    r, sink, _ = reviewer(tmp_path)
+    seq = 0
+
+    def feed(state, *events):
+        nonlocal seq
+        seq += 1
+        state = state.model_copy(update={"seq": seq})
+        r.on_update(state, list(events))
+        return state
+
+    feed(make_state(phase=Phase.HERO_SELECT, turn=0), ev(EventType.GAME_STARTED, 0))
+    start = feed(make_state(gold=3, shop=SHOP), ev(EventType.RECRUIT_STARTED))
+    r.tap.show_rules(start, Advice(state_seq=start.seq, turn=1, plan=plan(("buy", 10))))
+    r.tap.show_plan(start, GamePlan(comp="畸变神明", stage="前期"), None)  # 第 1 回合定下
+    feed(make_state(phase=Phase.COMBAT, board=[minion(10, "A", 2, 2)]))
+    over = make_state(phase=Phase.GAME_OVER, health=0).model_copy(update={"final_place": 5})
+    feed(over, ev(EventType.GAME_ENDED, 1, place=5))
+    r.tick()
+    (review,) = sink.reviews
+    assert review.record.turns[0].advice.plan_comp == "畸变神明"
+    assert (review.record.plan_comps, review.record.plan_changes) == (("畸变神明",), 0)
+    entry = json.loads((tmp_path / "reviews" / "history.jsonl").read_text(encoding="utf-8"))
+    assert (entry["plan_comps"], entry["plan_changes"]) == (["畸变神明"], 0)
 
 
 @NEEDS_USER_LOG

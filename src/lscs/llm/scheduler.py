@@ -39,6 +39,13 @@
 - 本版本统计（本版本统计设计文档第 8 节第 3 条）：生成局面消息时取，第一次取到之后整局复用
   （后台在对局中途换了也不会让这局的前缀变来变去；选英雄时还没准备好的，之后的消息照样用上）；招募消息里的"本版本战绩好的随从"块
   按本局种族缓存，和卡池块一样只在种族变化时才变。
+- 流派指南（整局计划与流派指南设计文档第 3 节）：招募消息里的"本赛季流派指南"块同样按本局种族
+  缓存（comp_guide 关闭或没有 comps.md 时没有）；只发给定计划的那一路（深度分析，深度关闭时是
+  快速建议），深度分析打开时快速建议不拿。
+- 整局计划（同上第 4~6 节）：交付前校验回答里的 plan（_sanitize_plan）；深度分析的结果（操作过期、
+  只看思路的也算；深度关闭时是快速建议的）带着计划时采用它，晚到的更早回合的不覆盖新的；定下、
+  改了、只改阶段时在 AIResult 之后发 PlanUpdated，照抄时不发。计划写进之后的招募消息（对手块之后）
+  和选项消息；每个请求记下发出时的计划（AIRequest.game_plan）。新对局清空；game_plan 关闭时没有。
 """
 
 from __future__ import annotations
@@ -52,10 +59,12 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 
 from lscs.advisor.context import TurnContext
-from lscs.advisor.models import ChoiceAdvice, Expired, HeroAdvice, Lane, Plan
+from lscs.advisor.models import ChoiceAdvice, Expired, GamePlan, HeroAdvice, Lane, Plan
+from lscs.advisor.pool import in_lobby
 from lscs.advisor.validate import normalize_actions, validate_plan
 from lscs.cards.db import CardDB
 from lscs.config import LLMConfig
+from lscs.llm.comps import CompsFile, comps_block, match_comp
 from lscs.llm.notices import (
     AI_OFF_THIS_TIME,
     AUTH_DISABLED,
@@ -72,6 +81,7 @@ from lscs.llm.parse import (
     parse_plan,
 )
 from lscs.llm.prompt import (
+    MAX_TAVERN_TIER,
     AIMemory,
     build_choice_message,
     build_choice_system_prompt,
@@ -85,7 +95,7 @@ from lscs.llm.prompt import (
 )
 from lscs.llm.provider import LLMError, LLMProvider, LLMResult, Thinking, Turn
 from lscs.llm.record import Recorder
-from lscs.state.models import Event, EventType, GameState, Phase
+from lscs.state.models import Event, EventType, GameState, Phase, TribesConfidence
 from lscs.stats.model import MetaStats
 
 log = logging.getLogger(__name__)
@@ -96,6 +106,8 @@ DEADLINE_GRACE = 2.0
 HERO_DEBOUNCE = 0.5
 # 改正要发出时，离这一路的截止时间至少还要有这么多秒
 REPAIR_MIN_SECONDS = 3.0
+# 血量 + 护甲不超过这么多时，整局计划的阶段一定是"保血"（AI 没改也按它显示）
+PROTECT_HEALTH = 15
 # 深度分析改正时用快速建议的输出上限，但至少这么多：深度分析的 json（分析写得长）不能被截断
 DEEP_REPAIR_MIN_TOKENS = 4000
 INVALID = "AI 建议无效，已忽略"
@@ -112,6 +124,7 @@ class AIRequest:
     lane: Lane = "fast"
     signature: tuple[tuple[int, str], ...] = ()  # 选英雄：基于哪一组备选（HeroSelect.signature()）
     choice_id: int | None = None  # 选项：基于哪一组（Choice.id）
+    game_plan: GamePlan | None = None  # 发出时局面消息里的整局计划（"计划提醒"按它查）
 
 
 @dataclass(frozen=True)
@@ -171,7 +184,18 @@ class AIResult:
         return self.request.lane
 
 
-SchedulerEvent = AIStarted | AIRepairing | AINotice | AIResult
+@dataclass(frozen=True)
+class PlanUpdated:
+    """整局计划定下或改了（整局计划与流派指南设计文档第 6 节）：和带来它的 AIResult 在同一次
+    tick 里、紧跟在它后面。previous 为 None 表示第一次定下；只有阶段变了时 previous 和 plan 的
+    signature() 相同。turn：带来它的请求是哪个回合的。"""
+
+    plan: GamePlan
+    previous: GamePlan | None
+    turn: int
+
+
+SchedulerEvent = AIStarted | AIRepairing | AINotice | AIResult | PlanUpdated
 
 
 @dataclass
@@ -226,13 +250,16 @@ class LLMScheduler:
         run_async: Callable[[Callable[[], None]], None] = _run_in_thread,
         hero_debounce: float = HERO_DEBOUNCE,
         stats: Callable[[], MetaStats | None] | None = None,
+        comps: CompsFile | None = None,
     ) -> None:
-        """stats：取本版本统计（StatsStore.get，还没准备好时返回 None）；统计关闭时为 None。"""
+        """stats：取本版本统计（StatsStore.get，还没准备好时返回 None）；统计关闭时为 None。
+        comps：本赛季流派指南（strategy/current/comps.md）；没有文件时为 None。"""
         self._provider = provider
         self._stats = stats
+        self._comps = comps
         self._cfg = cfg
         self._cards = cards
-        self._system = build_system_prompt(guide)
+        self._system = build_system_prompt(guide, cfg.game_plan)
         self._system_hash = _sha1(self._system)
         self._hero_system = build_hero_system_prompt(guide, heroes_note)
         self._hero_hash = _sha1(self._hero_system)
@@ -274,6 +301,11 @@ class LLMScheduler:
         return self._memory
 
     @property
+    def game_plan(self) -> GamePlan | None:
+        """本局的整局计划；还没定、新对局或 game_plan 关闭时为 None。"""
+        return self._game_plan
+
+    @property
     def provider(self) -> LLMProvider:
         """对局复盘用同一个提供商和配置（不占本局的调用预算）。"""
         return self._provider
@@ -308,6 +340,9 @@ class LLMScheduler:
         self._game_first_id = self._last_id  # 编号不大于它的请求属于以前的对局
         self._budget_notified = False
         self._memory: AIMemory | None = None
+        self._game_plan: GamePlan | None = None
+        self._plan_from = 0  # 最近一次采用的计划来自哪个回合的请求（晚到的更早回合的不采用）
+        self._fast_plan_turn: int | None = None  # 深度分析关闭时：这个回合已经采用过快速建议的计划
         self._last_shop: frozenset[int] = frozenset()
         self._last_turn: int | None = None
         # (酒馆回合, 对手块)：本回合第一次生成招募消息时算好，整回合复用（对手在招募中途升本、
@@ -317,6 +352,8 @@ class LLMScheduler:
         self._game_stats: MetaStats | None = None
         # (本局种族, 战绩块)：种族变了才重算
         self._stats_block: tuple[frozenset[str], str | None] | None = None
+        # (本局种族, 流派指南块)：同上
+        self._comps_block: tuple[frozenset[str], str | None] | None = None
 
     def observe(self, state: GameState, events: Sequence[Event], ctx: TurnContext | None) -> None:
         """每次状态更新都调用；只记下要发的请求，不在这里发出。"""
@@ -437,6 +474,7 @@ class LLMScheduler:
                 event = self._events.get_nowait()
             except queue.Empty:
                 return
+            plan_event: PlanUpdated | None = None
             if isinstance(event, AIRepairing):
                 if not self._lane_named(event.lane).is_current_id(event.request_id):
                     log.info("丢弃已被取代的请求 #%s 的改正提示", event.request_id)
@@ -445,7 +483,9 @@ class LLMScheduler:
                 lane = self._lane(event.request)
                 if not lane.is_current(event.request):
                     log.info("丢弃已被取代的 AI 结果 #%s", event.request.request_id)
-                    self._remember_late(event)
+                    plan_event = self._remember_late(event)
+                    if plan_event is not None:
+                        out.append(plan_event)
                     continue
                 lane.in_flight = None
                 if (
@@ -454,8 +494,10 @@ class LLMScheduler:
                     and event.request.request_id <= lane.refreshed_up_to
                 ):
                     event = replace(event, expired="refreshed")
-                self._remember(event)
+                plan_event = self._remember(event)
             out.append(event)
+            if plan_event is not None:
+                out.append(plan_event)  # 先打深度分析的结果，再打计划
 
     def _lane(self, request: AIRequest) -> _LaneState:
         return self._lane_named(request.lane)
@@ -463,8 +505,8 @@ class LLMScheduler:
     def _lane_named(self, name: Lane) -> _LaneState:
         return next(lane for lane in self._lanes if lane.name == name)
 
-    def _remember_late(self, result: AIResult) -> None:
-        """本局上一回合的深度分析在新回合开始后才返回：不显示，但它的判断仍然记下来。"""
+    def _remember_late(self, result: AIResult) -> PlanUpdated | None:
+        """本局上一回合的深度分析在新回合开始后才返回：不显示，但它的判断和计划仍然记下来。"""
         request = result.request
         if (
             result.lane == "deep"
@@ -472,22 +514,62 @@ class LLMScheduler:
             and self._last_turn is not None
             and request.state.turn == self._last_turn - 1
         ):
-            self._remember(result)
+            return self._remember(result)
+        return None
 
-    def _remember(self, result: AIResult) -> None:
+    def _remember(self, result: AIResult) -> PlanUpdated | None:
         """合法结果（深度分析操作过期也算）里有方向、要找或分析时记下来。
         按返回的先后，记最近的一次；但同一回合的深度分析不被快速建议覆盖，
-        晚到的旧回合结果也不覆盖新回合的深度分析。"""
+        晚到的旧回合结果也不覆盖新回合的深度分析。整局计划见 _update_plan（深度分析只看思路
+        的结果也算）；定下或改了时返回要发的事件。"""
+        plan_event = self._update_plan(result)
         plan = result.plan
         if plan is None or result.expired == "invalid":
-            return
+            return plan_event
         if not (plan.direction or plan.look_for or plan.analysis):
-            return
+            return plan_event
         turn, deep = result.request.state.turn, result.lane == "deep"
         old = self._memory
         if old is not None and old.deep and (old.turn > turn or (old.turn == turn and not deep)):
-            return
+            return plan_event
         self._memory = AIMemory(turn, deep, plan.direction, plan.look_for, plan.analysis)
+        return plan_event
+
+    def _update_plan(self, result: AIResult) -> PlanUpdated | None:
+        """深度分析的结果（合法、操作过期、不合法只看思路都算）带着校验过的计划时采用它；深度
+        分析关闭时采用快速建议的，否则快速建议的计划只留在调用记录里（它不开思考，改整局计划
+        会来回摇摆；深度分析关闭时每回合只采用快速建议的第一个计划）。晚到的更早回合的计划
+        不覆盖新回合的。和现在的计划比：
+        - 第一次定下、signature()（流派和核心卡）变了：返回事件，回合是这次的；
+        - 还都是"未定"、只换了想找的牌，或者只改了节奏、规则、换方向的措辞：悄悄换成新的，
+          原因清空、回合保留（"第 N 回合定"不变），不发事件；
+        - 阶段变了（流派和核心卡没变）：换成新的、回合保留，返回事件（显示成"阶段：……"）。"""
+        plan = result.plan
+        new = plan.game_plan if plan is not None else None
+        if new is None or not self._cfg.game_plan:
+            return None
+        if result.lane != "deep" and (result.lane != "fast" or self._cfg.deep_analysis):
+            return None
+        turn = result.request.state.turn
+        if turn < self._plan_from:
+            return None
+        if result.lane == "fast":
+            if turn == self._fast_plan_turn:
+                return None  # 每回合只采用第一次：刷新后的快速建议不开思考，别让计划来回摇摆
+            self._fast_plan_turn = turn
+        self._plan_from = turn
+        old = self._game_plan
+        same = old is not None and (
+            new.signature() == old.signature() or (old.undecided and new.undecided)
+        )
+        if old is None or not same:
+            self._game_plan = new
+            return PlanUpdated(new, old, turn)
+        if new.stage == old.stage:
+            self._game_plan = new.model_copy(update={"changed": "", "turn": old.turn})
+            return None
+        self._game_plan = new.model_copy(update={"turn": old.turn})
+        return PlanUpdated(self._game_plan, old, turn)
 
     def _start_due(self) -> None:
         now = self._clock()
@@ -502,11 +584,12 @@ class LLMScheduler:
                 self._settle(lane, AI_OFF_THIS_TIME)
             return
         budget_notified = self._budget_notified
-        # 快速和深度同时发出时局面相同，只生成一次
-        messages: dict[tuple[str, int], str | None] = {}
+        # 同时发出、局面相同的只生成一次；深度分析打开时快速建议的消息不一样（没有流派指南块，
+        # 计划行不同），按"这一路定不定计划"分开
+        messages: dict[tuple[str, int, bool], str | None] = {}
         for lane, pending in due:
             kind = "recruit" if lane in self._recruit_lanes else lane.name
-            key = (kind, id(pending.state))
+            key = (kind, id(pending.state), self._writes_plan(lane))
             if key not in messages:
                 messages[key] = self._message(lane, pending)
             user = messages[key]
@@ -532,7 +615,9 @@ class LLMScheduler:
             if lane is self._hero:
                 return build_hero_message(pending.state, self._cards, pending.rerolled, stats)
             if lane is self._choice:
-                return build_choice_message(pending.state, self._cards, self._memory, stats)
+                return build_choice_message(
+                    pending.state, self._cards, self._memory, stats, self._game_plan
+                )
             assert pending.ctx is not None
             return build_user_message(
                 pending.state,
@@ -541,12 +626,24 @@ class LLMScheduler:
                 self._memory,
                 opponents_block=self._opponents_block(pending.state),
                 stats_block=self._stats_block_for(pending.state.tribes, stats),
+                comps_block=(
+                    self._comps_block_for(pending.state.tribes) if self._writes_plan(lane) else None
+                ),
+                game_plan=self._game_plan,
+                plan_enabled=self._cfg.game_plan,
+                ask_plan=self._writes_plan(lane),
             )
         except Exception:
             log.warning("生成 AI 局面消息时出错", exc_info=True)
             notice_lane = "choice" if lane is self._choice else None
             self._events.put(AINotice("生成 AI 局面时出错，本次跳过", notice_lane))
             return None
+
+    def _writes_plan(self, lane: _LaneState) -> bool:
+        """这一路定整局计划：深度分析，或者深度分析关闭时的快速建议。只有它拿流派指南块（快速建议
+        按计划行照做就行，省下约 2 千 token、少分心）；它的前缀（系统提示 + 卡池 + 战绩）和深度
+        分析的一样，照样命中缓存。不定计划的快速建议，消息里也说明不用写 plan。"""
+        return lane is not self._fast or not self._cfg.deep_analysis
 
     def _stats_for_game(self) -> MetaStats | None:
         """本局的本版本统计：还没准备好（None）时每次生成消息都再取一次，第一次取到之后整局都用
@@ -565,6 +662,16 @@ class LLMScheduler:
         if cached is None or cached[0] != tribes:
             cached = (tribes, build_stats_block(self._cards, tribes, stats))
             self._stats_block = cached
+        return cached[1]
+
+    def _comps_block_for(self, tribes: frozenset[str]) -> str | None:
+        """本局种族能走的流派；没有流派指南或 comp_guide 关闭时为 None。"""
+        if self._comps is None or not self._cfg.comp_guide:
+            return None
+        cached = self._comps_block
+        if cached is None or cached[0] != tribes:
+            cached = (tribes, comps_block(self._comps, tribes))
+            self._comps_block = cached
         return cached[1]
 
     def _opponents_block(self, state: GameState) -> str:
@@ -596,6 +703,7 @@ class LLMScheduler:
                 lane.name,
                 signature,
                 choice_id,
+                self._game_plan,
             )
             lane.current_id = request.request_id
         lane.in_flight = request
@@ -692,14 +800,47 @@ class LLMScheduler:
         else:
             assert request.ctx is not None
             actions = normalize_actions(parsed.actions, request.ctx)
-            plan = parsed.model_copy(update={"actions": actions})
+            game_plan = self._sanitize_plan(parsed.game_plan, request.state)
+            plan = parsed.model_copy(update={"actions": actions, "game_plan": game_plan})
             self._finish(request, plan=plan, llm=result, repaired=repaired)
 
-    def _thoughts(self, lane: _LaneState, plan: Plan | None) -> Plan | None:
-        """深度分析的操作不能用时，它的分析和要找的牌仍然有用：去掉动作的方案；没有时为 None。"""
+    def _sanitize_plan(self, raw: GamePlan | None, state: GameState) -> GamePlan | None:
+        """校验 AI 写的整局计划（设计文档第 4.4 节）：核心卡要能在卡池里按名字查到、不是 7 本、
+        本局种族已确认时要在本局（中立和全种族的牌总在），去重保序，写成卡池里的名字；主种族
+        不在已确认的本局种族里时去掉；回合填成请求的回合。核心卡一张不剩也照样接受（"未定"）。
+        流派名对得上流派指南的标题时换成标题（llm.comps.match_comp）；血量 + 护甲不超过
+        PROTECT_HEALTH 时阶段一定是"保血"。"""
+        if raw is None:
+            return None
+        confirmed = state.tribes_confidence == TribesConfidence.CONFIRMED and bool(state.tribes)
+        kept: list[str] = []
+        for name in raw.key_cards:
+            info = self._cards.find_pool_minion(name)
+            if info is None or (info.tier or 0) > MAX_TAVERN_TIER:
+                log.info("整局计划的核心卡 %s 不是酒馆里的随从，去掉", name)
+            elif confirmed and not in_lobby(info, state.tribes):
+                log.info("整局计划的核心卡 %s 不在本局种族里，去掉", name)
+            elif info.name not in kept:
+                kept.append(info.name)
+        tribe = raw.tribe
+        if tribe is not None and confirmed and tribe not in state.tribes:
+            tribe = None
+        update: dict[str, object] = {"key_cards": tuple(kept), "tribe": tribe, "turn": state.turn}
+        canonical = match_comp(raw.comp, self._comps)
+        if canonical is not None and canonical != raw.comp:
+            update["comp"] = canonical  # AI 换个说法写同一个流派：用指南里的标题
+        me = state.me
+        if me is not None and me.health + me.armor <= PROTECT_HEALTH and raw.stage != "保血":
+            update["stage"] = "保血"
+        return raw.model_copy(update=update)
+
+    def _thoughts(self, lane: _LaneState, request: AIRequest, plan: Plan | None) -> Plan | None:
+        """深度分析的操作不能用时，它的分析、要找的牌和整局计划仍然有用：去掉动作的方案（计划
+        校验过）；没有分析和要找时为 None。"""
         if lane is not self._deep or plan is None or not (plan.analysis or plan.look_for):
             return None
-        return plan.model_copy(update={"actions": ()})
+        game_plan = self._sanitize_plan(plan.game_plan, request.state)
+        return plan.model_copy(update={"actions": (), "game_plan": game_plan})
 
     def _take_call(
         self, lane: _LaneState, request: AIRequest, deadline: float, margin: float
@@ -771,7 +912,7 @@ class LLMScheduler:
                     and self._take_call(lane, request, deadline, REPAIR_MIN_SECONDS)
                 ):
                     # 校验器仍然是唯一的标准：不从不合法的方案里挑合法的前几步
-                    sent = repair_text(lane.name, problem)
+                    sent = repair_text(lane.name, problem, self._writes_plan(lane))
                     turns = (("assistant", result.text), ("user", sent))
                     call = _Call(sent, lane.thinking, lane.max_tokens, repair=True)
                     if lane is self._deep:  # 思考在第一次回答里做完了，改正只修动作
@@ -794,7 +935,7 @@ class LLMScheduler:
                         self.disabled_reason = AUTH_DISABLED
                 if trip:
                     self._events.put(AINotice(AUTH_DISABLED))
-            thoughts = self._thoughts(lane, first_plan) if call.repair else None
+            thoughts = self._thoughts(lane, request, first_plan) if call.repair else None
             if thoughts is not None:  # 改正调用失败：深度分析第一次回答的思路照样交付
                 self._finish(request, plan=thoughts, expired="invalid", repaired=True)
             else:
@@ -815,7 +956,7 @@ class LLMScheduler:
     ) -> None:
         """没有可用的回答（不合法或空内容，不再改正、重试）。深度分析只看思路：思路取第一次
         解析出的方案（有思考的那次），没有分析和要找时才按错误结束。"""
-        thoughts = self._thoughts(lane, first_plan)
+        thoughts = self._thoughts(lane, request, first_plan)
         if thoughts is not None:
             self._finish(request, plan=thoughts, llm=result, expired="invalid", repaired=repaired)
         else:

@@ -47,6 +47,10 @@ class LLMConfig(BaseModel):
     repair_invalid: bool = True
     # 局面消息里附所有对手的摘要（放在本局卡池之后，和它一起命中缓存）；关掉只写下一个对手
     all_opponents: bool = True
+    # 把本赛季流派指南里和本局种族有关的流派发给 AI（strategy/current/comps.md）
+    comp_guide: bool = True
+    # 让深度分析定下整局计划（目标流派、核心卡、升本节奏），快速建议和面板跟着它走
+    game_plan: bool = True
 
     @field_validator("api_key")
     @classmethod

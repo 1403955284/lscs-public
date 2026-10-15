@@ -10,8 +10,18 @@ from typing import TYPE_CHECKING
 from lscs.advisor.context import MINION, TurnContext, build_context, hero_power_used
 from lscs.advisor.display import AdviceSink
 from lscs.advisor.hero_rules import rule_hero_pick
-from lscs.advisor.models import Action, Advice, HeroAdvice, Lane, Plan, PositionAdvice, StatsNote
+from lscs.advisor.models import (
+    Action,
+    Advice,
+    GamePlan,
+    HeroAdvice,
+    Lane,
+    Plan,
+    PositionAdvice,
+    StatsNote,
+)
 from lscs.advisor.opponents import summarize_opponents
+from lscs.advisor.plan_check import off_plan_note, plan_look_for
 from lscs.advisor.pool import PoolEstimator, PoolNote, PoolView, pool_notes
 from lscs.advisor.positioning import plan_positions, validate_position
 from lscs.advisor.rules import rule_plans
@@ -113,6 +123,7 @@ class AdviceRunner:
         self._opponents_turn: int | None = None  # 这个回合已经列过对手一览
         self.last_rules: Advice | None = None
         self.last_hero: HeroAdvice | None = None  # 最近一次选英雄的规则建议
+        self.off_plan = 0  # 本局快速建议偏离计划（有"计划提醒"）的次数
 
     def on_update(self, state: GameState, events: list[Event]) -> None:
         self._state = state
@@ -122,6 +133,7 @@ class AdviceRunner:
             self._opponents_turn = None
             self._position_intro = False
             self.last_hero = None
+            self.off_plan = 0
             if self._scheduler is not None:
                 self._scheduler.reset_game()
         if state.phase == Phase.HERO_SELECT and EventType.HEROES_OFFERED in types:
@@ -141,7 +153,7 @@ class AdviceRunner:
             self._scheduler.observe(state, events, None)
         s = self._scheduler
         if s is not None and EventType.GAME_ENDED in types and s.calls > 0:
-            self._display.ai_summary(s.calls, s.input_tokens, s.output_tokens)
+            self._display.ai_summary(s.calls, s.input_tokens, s.output_tokens, self.off_plan)
 
     def _pool_error(self, what: str) -> None:
         """在 except 里调用：卡池估计出错不影响建议，只是不显示张数；完整堆栈只记一次。"""
@@ -311,7 +323,7 @@ class AdviceRunner:
         """主循环每次轮询调用：取回 AI 的结果并显示。"""
         if self._scheduler is None:
             return
-        from lscs.llm.scheduler import AINotice, AIRepairing, AIResult, AIStarted
+        from lscs.llm.scheduler import AINotice, AIRepairing, AIResult, AIStarted, PlanUpdated
 
         try:
             for event in self._scheduler.tick():
@@ -326,6 +338,8 @@ class AdviceRunner:
                         self._display.ai_text(event.text, event.lane)
                 elif isinstance(event, AIResult):
                     self._show_result(event)
+                elif isinstance(event, PlanUpdated) and self._state is not None:
+                    self._display.show_plan(self._state, event.plan, event.previous)
         except Exception:
             # 这里在 watch 主循环里运行，出错只记日志，不能让 watch 退出
             log.warning("处理 AI 结果时出错", exc_info=True)
@@ -383,7 +397,13 @@ class AdviceRunner:
         basis, ctx = current, self._context(current)
         if ctx is None:
             basis, ctx = request.state, self._context(request.state)
-        notes = self._notes(basis, ctx, plan.look_for)
+        notes = self._notes(basis, ctx, plan_look_for(plan.look_for, self._game_plan()))
+        # 快速建议按发出时告诉它的计划查（还没有计划时不查）；深度分析按它自己定下的计划查
+        own = result.plan.game_plan if lane == "deep" and result.plan is not None else None
+        target = own or request.game_plan
+        note = self._plan_note(plan, target, ctx, basis) if expired is None else None
+        if note is not None and lane == "fast":
+            self.off_plan += 1
         advice = Advice(
             state_seq=request.state.seq,
             turn=request.state.turn,
@@ -393,8 +413,24 @@ class AdviceRunner:
             lane=lane,
             expired=expired,
             pool_notes=notes,
+            plan_note=note,
         )
         self._display.show_ai(current, advice, agrees)
+
+    def _game_plan(self) -> GamePlan | None:
+        return self._scheduler.game_plan if self._scheduler is not None else None
+
+    def _plan_note(
+        self, plan: Plan, game_plan: GamePlan | None, ctx: TurnContext | None, state: GameState
+    ) -> str | None:
+        """方案和整局计划明显矛盾时的提醒（只提醒不改方案）；出错只记日志。"""
+        if game_plan is None or ctx is None:
+            return None
+        try:
+            return off_plan_note(plan, game_plan, ctx, state, self._name)
+        except Exception:
+            log.warning("检查方案是否偏离计划时出错", exc_info=True)
+            return None
 
     def _show_hero_result(self, result: AIResult) -> None:
         """选英雄的 AI 结果（或错误）：已经选完（或已经过了选英雄阶段）、重随过（备选变了）都

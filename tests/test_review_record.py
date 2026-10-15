@@ -397,6 +397,43 @@ def test_attach_advice_fills_turns_and_choices():
     assert out.turns[0].choices[0].ai_card_id == "Y"
 
 
+def test_attach_advice_records_the_plan_in_force_at_the_end_of_each_turn():
+    from lscs.advisor.models import GamePlan
+
+    g = Game()
+    g.feed(ev(START), gold=3, shop=[shop_minion(10, "A", 2, 2)])
+    g.feed(gold=0, hand=[hand_minion(10, "A", 2, 2)])
+    record = g.end()
+    turn = record.turns[0]
+    record = record.model_copy(
+        update={"turns": tuple(turn.model_copy(update={"turn": n}) for n in (1, 2, 3, 4))}
+    )
+    logs = {n: AdviceLog(rules_start=(1, plan(("refresh", None)))) for n in (1, 2, 3)}
+    undecided = GamePlan(comp="未定", key_cards=("A",), stage="前期")
+    aberration = GamePlan(comp="畸变神明", key_cards=("A",), stage="过渡")
+    plans = [
+        (2, undecided),
+        (2, aberration),  # 同一回合定下：回合结束时生效的是后一份；从"未定"定下不算换方向
+        (3, aberration.model_copy(update={"stage": "保血"})),  # 只改阶段，不算改计划
+    ]
+    out = attach_advice(record, g.builder.ops, g.builder.entity_cards, logs, plans=plans)
+    got = [(t.advice.plan_comp, t.advice.plan_stage) if t.advice else None for t in out.turns]
+    assert got == [
+        (None, None),
+        ("畸变神明", "过渡"),
+        ("畸变神明", "保血"),
+        None,
+    ]  # 第 4 回合没有建议
+    assert (out.plan_comps, out.plan_changes) == (("未定", "畸变神明"), 0)
+    pirates = GamePlan(comp="海盗金币流", key_cards=("B",), stage="过渡")
+    out = attach_advice(
+        record, g.builder.ops, g.builder.entity_cards, logs, plans=[*plans, (4, pirates)]
+    )
+    assert (out.plan_comps, out.plan_changes) == (("未定", "畸变神明", "海盗金币流"), 1)
+    plain = attach_advice(record, g.builder.ops, g.builder.entity_cards, logs)
+    assert (plain.plan_comps, plain.plan_changes) == ((), 0)
+
+
 # ---- 两份真实日志 ----
 
 

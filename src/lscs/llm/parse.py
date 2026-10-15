@@ -5,16 +5,22 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from collections.abc import Sequence
 
 from lscs.advisor.models import (
     ACTION_TYPES,
+    STAGES,
+    UNDECIDED,
     Action,
     ChoiceAdvice,
+    GamePlan,
     HeroAdvice,
     HeroComment,
     Plan,
 )
+from lscs.advisor.names import TRIBE_ZH
+from lscs.advisor.plan_check import plain_name
 
 MAX_ACTIONS = 5  # 例如 买、买、英雄技能、刷新、冻结
 MAX_LOOK_FOR = 6  # "要找的牌"最多几个
@@ -23,6 +29,27 @@ HERO_REASON_CHARS = 60  # 选英雄的理由最长几个字（截断方式同上
 HERO_COMMENT_CHARS = 20  # 每个英雄的点评最长几个字
 CHOICE_REASON_CHARS = 30  # 选项的理由最长几个字（提示词要求 25 字以内）
 NO_REASON = "（AI 没有给理由）"
+# 整局计划（整局计划与流派指南设计文档第 4.3 节）：每个字段都要短，面板放得下
+PLAN_COMP_CHARS = 12  # 目标流派
+PLAN_KEY_CARDS = 3  # 核心卡最多几张（每张最长 LOOK_FOR_CHARS 个字）
+PLAN_TEXT_CHARS = 40  # 升本节奏、刷新规则、换方向条件、改计划的原因
+_ZH_TRIBES = {zh: race for race, zh in TRIBE_ZH.items() if race != "ALL"}
+# 系统提示示例里 plan 的占位说明（prompt.EXAMPLE 用的就是它）：AI 原样抄回来时当作没写，
+# 流派名是占位说明时当作"未定"
+PLAN_PLACEHOLDERS: dict[str, object] = {
+    "comp": "目标流派（指南里的名字；还没定写未定）",
+    "tribe": "主种族（中文，如 畸变）",
+    "key_cards": ["核心卡名", "核心卡名"],
+    "tiers": "升本节奏一句话，例如：第 6 回合 4 本，第 8 回合 5 本",
+    "roll": "刷新和保血的规则一句话",
+    "stage": "前期/过渡/成型/保血",
+    "pivot": "换方向的条件一句话",
+    "changed": "改了计划才写一句原因，没改留空",
+}
+PLACEHOLDER_COMP = "目标流派"  # 占位说明去掉括号后剩下的
+PLACEHOLDER_CARD = "核心卡名"
+# 流派名末尾的括号（"畸变怪养神流（亡语/弃牌）""畸变神明（畸变）"）：截断前去掉，免得只剩半个括号
+_TRAILING_NOTE = re.compile(r"\s*[（(][^（）()]*[）)]\s*$")
 
 
 class ParseError(Exception):
@@ -93,6 +120,71 @@ def _look_for(raw: object) -> tuple[str, ...]:
     return tuple(names)
 
 
+def _card_name(raw: object) -> str:
+    """去掉 AI 从局面里抄来的 ✓ 和末尾的"(金)"。"""
+    return _cut(plain_name(_one_line(raw, 10_000)), LOOK_FOR_CHARS)
+
+
+def _comp_name(raw: object) -> str:
+    """目标流派：去掉末尾的括号说明（一层层去，去光了就保留原样），再截到 PLAN_COMP_CHARS。"""
+    name = _one_line(raw, 10_000)
+    while True:
+        shorter = _TRAILING_NOTE.sub("", name)
+        if shorter == name or not shorter:
+            break
+        name = shorter
+    return _cut(name, PLAN_COMP_CHARS)
+
+
+def _key_cards(raw: object) -> tuple[str, ...]:
+    """和 look_for 一样读：不是列表时没有，跳过空的和不是文字的；去掉"(金)"、重复的，最多 3 张。"""
+    if not isinstance(raw, list):
+        return ()
+    names: list[str] = []
+    for item in raw:
+        name = _card_name(item)
+        if name and name != PLACEHOLDER_CARD and name not in names:
+            names.append(name)
+        if len(names) == PLAN_KEY_CARDS:
+            break
+    return tuple(names)
+
+
+def _plan_tribe(raw: object) -> str | None:
+    """中文种族名反查成枚举名（"畸变" → ABERRATION），也认枚举名；查不到（含"全种族"）时 None。"""
+    text = _one_line(raw, 20)
+    if text.upper() in TRIBE_ZH and text.upper() != "ALL":
+        return text.upper()
+    return _ZH_TRIBES.get(text)
+
+
+def _game_plan(raw: object) -> GamePlan | None:
+    """回答里的 plan：不是对象、没有 comp 时为 None（不算错，不触发改正）。"""
+    if not isinstance(raw, dict):
+        return None
+    comp = _comp_name(raw.get("comp"))
+    if not comp:
+        return None
+    if comp == PLACEHOLDER_COMP:
+        comp = UNDECIDED  # 原样抄了示例的占位说明：还没定
+
+    def text(field: str) -> str:
+        value = _one_line(raw.get(field), PLAN_TEXT_CHARS)
+        return "" if value == _one_line(PLAN_PLACEHOLDERS[field], PLAN_TEXT_CHARS) else value
+
+    stage = raw.get("stage")
+    return GamePlan(
+        comp=comp,
+        tribe=_plan_tribe(raw.get("tribe")),
+        key_cards=_key_cards(raw.get("key_cards")),
+        tiers=text("tiers"),
+        roll=text("roll"),
+        stage=stage if stage in STAGES else None,
+        pivot=text("pivot"),
+        changed=text("changed"),
+    )
+
+
 def parse_plan(text: str) -> Plan:
     data = _json_object(text)
     raw_actions = data.get("actions")
@@ -123,6 +215,7 @@ def parse_plan(text: str) -> Plan:
         confidence=_confidence(data.get("confidence")),
         analysis=_text(data.get("analysis")),
         look_for=_look_for(data.get("look_for")),
+        game_plan=_game_plan(data.get("plan")),
     )
 
 

@@ -18,6 +18,7 @@ from lscs.review.report import (
     final_focus,
     habits,
     history_entry,
+    history_line,
     markdown,
     read_history,
     review_game,
@@ -192,6 +193,8 @@ def test_history_entry_fields(tmp_path):
         "triples": 1,
         "advised": 0,
         "followed": 0,
+        "plan_comps": [],
+        "plan_changes": 0,
         "flags": ["hp_streak"],
         "file": str(review.path.relative_to(tmp_path)),
     }
@@ -199,6 +202,13 @@ def test_history_entry_fields(tmp_path):
     append_history(path, entry)
     append_history(path, {**entry, "place": 1})
     assert [e["place"] for e in read_history(path)] == [4, 1]
+
+
+def test_history_entry_has_the_plan_comps_and_changes():
+    record = game().model_copy(update={"plan_comps": ("未定", "畸变神明"), "plan_changes": 1})
+    entry = history_entry(review_game(record, RULES, name, WHEN))
+    assert (entry["plan_comps"], entry["plan_changes"]) == (["未定", "畸变神明"], 1)
+    assert history_line(entry) == history_line({**entry, "plan_comps": [], "plan_changes": 0})
 
 
 def test_history_flags_count_a_merged_streak():

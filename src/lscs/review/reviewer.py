@@ -25,7 +25,15 @@ from datetime import datetime
 from pathlib import Path
 
 from lscs.advisor.display import AdviceSink
-from lscs.advisor.models import Advice, ChoiceAdvice, HeroAdvice, Lane, PositionAdvice, StatsNote
+from lscs.advisor.models import (
+    Advice,
+    ChoiceAdvice,
+    GamePlan,
+    HeroAdvice,
+    Lane,
+    PositionAdvice,
+    StatsNote,
+)
 from lscs.advisor.opponents import OpponentOverview
 from lscs.advisor.rules_config import RulesConfig
 from lscs.cards.db import CardDB
@@ -72,7 +80,7 @@ def _run_in_thread(job: Callable[[], None]) -> None:
 
 class AdviceCollector:
     """AdviceSink：只记不显示。回合开始的第一条规则建议、没过期的快速建议、最后一条深度分析、
-    选英雄和选项的 AI 推荐（卡牌 ID）。"""
+    选英雄和选项的 AI 推荐（卡牌 ID），以及整局计划的每次定下和改变（到达时的回合）。"""
 
     def __init__(self) -> None:
         self.reset()
@@ -81,6 +89,7 @@ class AdviceCollector:
         self.logs: dict[int, AdviceLog] = {}
         self.hero_ai_pick: str | None = None
         self.ai_choices: dict[int, str] = {}
+        self.plans: list[tuple[int, GamePlan]] = []
 
     def _log(self, turn: int) -> AdviceLog:
         return self.logs.setdefault(turn, AdviceLog())
@@ -125,7 +134,12 @@ class AdviceCollector:
         if option is not None:
             self.ai_choices[advice.choice_id] = option.card_id
 
-    def ai_summary(self, calls: int, input_tokens: int, output_tokens: int) -> None:
+    def show_plan(self, state: GameState, plan: GamePlan, previous: GamePlan | None) -> None:
+        self.plans.append((state.turn, plan))
+
+    def ai_summary(
+        self, calls: int, input_tokens: int, output_tokens: int, off_plan: int = 0
+    ) -> None:
         pass
 
     def show_review(self, state: GameState, review: GameReview) -> None:
@@ -149,6 +163,7 @@ class _Pending:
     hero_ai_pick: str | None
     ai_choices: dict[int, str] = field(default_factory=dict)
     when: datetime = field(default_factory=datetime.now)
+    plans: tuple[tuple[int, GamePlan], ...] = ()
 
 
 class GameReviewer:
@@ -246,6 +261,7 @@ class GameReviewer:
             hero_ai_pick=collector.hero_ai_pick,
             ai_choices=dict(collector.ai_choices),
             when=self._now(),
+            plans=tuple(collector.plans),
         )
 
     def tick(self) -> None:
@@ -272,6 +288,7 @@ class GameReviewer:
             pending.logs,
             hero_ai_pick=pending.hero_ai_pick,
             ai_choices=pending.ai_choices,
+            plans=pending.plans,
         )
         history = read_history(self.history_path)
         review = review_game(

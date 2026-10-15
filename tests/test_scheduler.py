@@ -64,11 +64,12 @@ def scheduler(
     hero_debounce=0.0,
     step=0.0,
     stats=None,
+    comps=None,
     **cfg,
 ):
     """deep=False：只有快速一路（大部分测试只关心快速建议的时机）。
     hero_debounce=0：选英雄这一路不等（等待只在专门的测试里看）。
-    step：每次调用让时钟前进几秒。stats：取本版本统计的函数。"""
+    step：每次调用让时钟前进几秒。stats：取本版本统计的函数。comps：流派指南（CompsFile）。"""
     clock = clock or Clock()
     provider = SteppingProvider(responses, clock, step) if step else FakeProvider(responses)
     sched = LLMScheduler(
@@ -81,6 +82,7 @@ def scheduler(
         run_async=run_async or (lambda job: job()),
         hero_debounce=hero_debounce,
         stats=stats,
+        comps=comps,
     )
     return sched, provider
 
@@ -100,8 +102,19 @@ def kinds(events):
 
 
 def situation(user):
-    """局面消息去掉开头的本局卡池和对手。"""
-    return user.split("\n\n", 2)[2]
+    """局面消息去掉开头的本局卡池、对手和整局计划那一行（从回合行开始）。"""
+    return user.split("\n\n", 2)[2].split("\n", 1)[1]
+
+
+def plan_line(user):
+    """局面消息里整局计划那一行（对手块之后、回合行之前）。"""
+    return user.split("\n\n", 2)[2].split("\n", 1)[0]
+
+
+def without_plan_line(user):
+    """局面消息去掉整局计划那一行（还没有计划时快速和深度只有这一行不同）。"""
+    head, situation = user.rsplit("\n\n", 1)
+    return head + "\n\n" + situation.split("\n", 1)[1]
 
 
 def test_recruit_start_calls_immediately():
@@ -404,7 +417,12 @@ def test_recruit_start_sends_fast_and_deep_requests():
     fast, deep = provider.calls
     assert (fast.thinking, fast.max_tokens, fast.timeout) == ("disabled", 1500, 20)
     assert (deep.thinking, deep.max_tokens, deep.timeout) == ("low", 16000, 75)
-    assert fast.system == deep.system and fast.user == deep.user  # 同一个前缀，方便缓存
+    assert fast.system == deep.system  # 同一个前缀，方便缓存
+    # 局面消息只有整局计划那一行不同（在对手块之后）：还没有计划时只请深度分析定
+    assert without_plan_line(fast.user) == without_plan_line(deep.user)
+    assert fast.user.rsplit("\n\n", 1)[0] == deep.user.rsplit("\n\n", 1)[0]
+    assert plan_line(fast.user) == "【整局计划】还没定（由深度分析来定，这次不用写 plan）"
+    assert plan_line(deep.user).startswith("【整局计划】还没定：请在 plan 里定下本局计划")
     assert sched.calls == 2
     assert [e.request_id for e in events if type(e).__name__ == "AIStarted"] == [1, 2]
 
@@ -550,8 +568,11 @@ def test_deep_invalid_actions_keep_the_analysis():
     assert [e for e in sched2.tick() if isinstance(e, AIResult)][1].error == "AI 建议无效，已忽略"
 
 
-def last_line(call):
-    return call.user.splitlines()[-1]
+def memory_line(call):
+    """记忆那一行：局面消息的倒数第二行（最后一行再说一遍预算）。"""
+    lines = call.user.splitlines()
+    assert lines[-1].startswith("预算：铸币 ")
+    return lines[-2]
 
 
 def test_memory_follows_valid_results_and_prefers_deep():
@@ -567,15 +588,15 @@ def test_memory_follows_valid_results_and_prefers_deep():
     clock.now += 1.0
     sched.tick()
     assert (
-        last_line(provider.calls[2])
+        memory_line(provider.calls[2])
         == "本回合深度分析：方向 畸变；要找：神明、祭品；分析：深度判断"
     )
     observe(sched, state(turn=4, seq=3), EventType.RECRUIT_STARTED)
     sched.tick()  # 本回合快速结果（野兽）没有覆盖深度分析
-    assert last_line(provider.calls[3]) == (
+    assert memory_line(provider.calls[3]) == (
         "你之前的判断（第 3 回合）：方向 畸变；要找：神明、祭品；分析：深度判断"
     )
-    assert provider.calls[3].user == provider.calls[4].user
+    assert without_plan_line(provider.calls[3].user) == without_plan_line(provider.calls[4].user)
     sched.reset_game()
     assert sched.memory is None
     observe(sched, state(turn=1, seq=4), EventType.RECRUIT_STARTED)
@@ -595,12 +616,12 @@ def test_memory_takes_a_newer_fast_result_and_skips_invalid_or_empty_ones():
     observe(sched, state(turn=4, seq=2), EventType.RECRUIT_STARTED)
     sched.tick()
     assert (
-        last_line(provider.calls[2])
+        memory_line(provider.calls[2])
         == "你之前的判断（第 3 回合）：方向 海盗；要找：无；分析：第 3 回合"
     )
     observe(sched, state(turn=5, seq=3), EventType.RECRUIT_STARTED)
     sched.tick()  # GOOD 没有方向、要找和分析：不覆盖记忆
-    assert last_line(provider.calls[4]) == "你之前的判断（第 4 回合）：方向 野兽；要找：狼王"
+    assert memory_line(provider.calls[4]) == "你之前的判断（第 4 回合）：方向 野兽；要找：狼王"
 
 
 def test_deep_result_after_refresh_still_updates_memory():
@@ -617,7 +638,7 @@ def test_deep_result_after_refresh_still_updates_memory():
     clock.now += 1.0
     sched.tick()
     deferred.jobs[2]()
-    assert last_line(provider.calls[2]) == "本回合深度分析：方向 畸变；要找：无；分析：深度判断"
+    assert memory_line(provider.calls[2]) == "本回合深度分析：方向 畸变；要找：无；分析：深度判断"
 
 
 def test_record_has_the_lane(tmp_path):
@@ -712,7 +733,7 @@ def test_results_are_remembered_before_new_requests_start():
     deferred.jobs[1]()  # 深度分析在同一次轮询里返回，刷新后的快速请求也在这次发出
     sched.tick()
     deferred.jobs[2]()
-    assert last_line(provider.calls[-1]) == "本回合深度分析：方向 畸变；要找：无；分析：深度判断"
+    assert memory_line(provider.calls[-1]) == "本回合深度分析：方向 畸变；要找：无；分析：深度判断"
 
 
 def test_reset_game_drops_the_deep_request_in_flight():
@@ -1191,7 +1212,9 @@ def test_invalid_plan_is_sent_back_once_and_the_repaired_one_is_used(tmp_path):
     first, second = provider.calls
     assert (second.system, second.user) == (first.system, first.user)  # 前缀不变，命中缓存
     assert first.turns == ()
-    assert second.turns == (("assistant", POOR), ("user", repair_text("fast", POOR_REASON)))
+    # 只有快速一路（深度分析关闭）时快速建议定计划，改正要求和深度分析一样保留 plan
+    fixed = repair_text("fast", POOR_REASON, writes_plan=True)
+    assert second.turns == (("assistant", POOR), ("user", fixed))
     assert "铸币不够" in second.turns[1][1]
     assert (second.thinking, second.max_tokens) == ("disabled", 1500)
     result = events[2]
@@ -1205,7 +1228,7 @@ def test_invalid_plan_is_sent_back_once_and_the_repaired_one_is_used(tmp_path):
         (1, "合法", True),
     ]
     assert rows[0]["user"] == first.user  # 原调用记局面消息
-    assert rows[1]["user"] == repair_text("fast", POOR_REASON)  # 改正调用只记改正要求
+    assert rows[1]["user"] == fixed  # 改正调用只记改正要求
     assert rows[1]["response"] == GOOD
 
 
@@ -1797,3 +1820,532 @@ def test_choice_message_gets_the_trinket_stats():
     offer_choice(sched, trinket_choice_state())
     sched.tick()
     assert "| 本版本：第 3.89 名，被选率 27%（8835 局）" in provider.calls[0].user
+
+
+# ---- 本赛季流派指南（整局计划与流派指南设计文档第 3.4、3.5 节） ----
+
+
+def sample_comps():
+    from lscs.llm.comps import parse_comps
+    from lscs.llm.prompt import load_guide
+
+    return parse_comps(load_guide(FIXTURES / "comps_sample.md"))
+
+
+def test_recruit_messages_carry_the_comps_of_the_lobby_after_the_stats_block():
+    stats = meta_stats(BG36_098=0.5)
+    sched, provider = scheduler([GOOD], stats=lambda: stats, comps=sample_comps())
+    observe(sched, recruit_state(), EventType.RECRUIT_STARTED)
+    sched.tick()
+    pool, block, comps, opponents, _ = provider.calls[0].user.split("\n\n", 4)
+    assert pool.startswith("【本局卡池") and opponents.startswith("【对手】")
+    assert block.startswith("【本版本战绩好的随从")
+    assert comps.startswith("【本赛季流派指南（第 14 赛季流派指南（测试样例，不是真实资料）；")
+    titles = [line for line in comps.splitlines() if line.startswith("## ")]
+    assert titles == ["## 畸变神明", "## 海盗刀剑", "## 中立白板", "## 通用运营（本赛季）"]
+
+
+def test_comps_block_is_cached_by_the_lobby_tribes(monkeypatch):
+    import lscs.llm.scheduler
+
+    built = []
+    real = lscs.llm.scheduler.comps_block
+
+    def spy(comps, tribes):
+        built.append(tribes)
+        return real(comps, tribes)
+
+    monkeypatch.setattr(lscs.llm.scheduler, "comps_block", spy)
+    sched, provider = scheduler([GOOD] * 4, comps=sample_comps())
+    observe(sched, recruit_state(turn=3), EventType.RECRUIT_STARTED)
+    sched.tick()
+    observe(sched, recruit_state(turn=4, seq=2), EventType.RECRUIT_STARTED)
+    sched.tick()
+    assert len(built) == 1  # 种族没变：同一块
+    first, second = (c.user.split("\n\n")[1] for c in provider.calls)
+    assert first == second
+    elementals = recruit_state(turn=5, seq=3, tribes=("ABERRATION", "ELEMENTAL"))
+    observe(sched, elementals, EventType.RECRUIT_STARTED)
+    sched.tick()
+    assert len(built) == 2 and "## 元素刷新" in provider.calls[-1].user
+    assert "## 海盗刀剑" not in provider.calls[-1].user
+    sched.reset_game()
+    observe(sched, recruit_state(turn=1, seq=4), EventType.RECRUIT_STARTED)
+    sched.tick()
+    assert len(built) == 3  # 新的一局重新算
+
+
+def test_no_comps_block_when_switched_off_or_without_a_file():
+    plain, plain_provider = scheduler([GOOD, PICK])
+    off, off_provider = scheduler([GOOD, PICK], comps=sample_comps(), comp_guide=False)
+    for sched in (plain, off):
+        observe(sched, recruit_state(), EventType.RECRUIT_STARTED)
+        sched.tick()
+        offer_choice(sched)
+        sched.tick()
+    assert [c.user for c in plain_provider.calls] == [c.user for c in off_provider.calls]
+    assert "流派指南" not in plain_provider.calls[0].user
+
+
+def test_hero_and_choice_messages_get_no_comps():
+    sched, provider = scheduler([HERO, PICK], comps=sample_comps())
+    offer(sched, hero_select_state())
+    sched.tick()
+    offer_choice(sched)
+    sched.tick()
+    assert len(provider.calls) == 2
+    assert all("流派指南" not in c.user for c in provider.calls)
+
+
+# ---- 整局计划：校验（整局计划与流派指南设计文档第 4.4 节） ----
+
+
+def confirmed_state(turn=3, seq=1, tribes=("ABERRATION", "PIRATE")):
+    """本局种族已确认的招募局面。"""
+    from lscs.state.models import TribesConfidence
+
+    st = recruit_state(turn, seq, tribes)
+    return st.model_copy(update={"tribes_confidence": TribesConfidence.CONFIRMED})
+
+
+def raw_plan(**fields):
+    from lscs.advisor.models import GamePlan
+
+    values = {
+        "comp": "畸变神明",
+        "tribe": "ABERRATION",
+        "key_cards": ("蚀脑怪", "飘荡祭品"),
+        "stage": "过渡",
+    }
+    values.update(fields)
+    return GamePlan(**values)
+
+
+def test_sanitize_keeps_pool_cards_of_the_lobby_and_sets_the_turn():
+    sched, _ = scheduler([])
+    st = confirmed_state(turn=5)
+    plan = sched._sanitize_plan(raw_plan(key_cards=("蚀脑怪(金)", "飘荡祭品", "蚀脑怪")), st)
+    assert plan == raw_plan(key_cards=("蚀脑怪", "飘荡祭品"), turn=5)  # 去重保序、用卡池里的名字
+
+
+def test_sanitize_drops_unknown_out_of_lobby_and_tier_7_cards():
+    sched, _ = scheduler([])
+    st = confirmed_state(turn=6, tribes=("ABERRATION", "PIRATE"))
+    raw = raw_plan(key_cards=("不存在的牌", "熔岩潜伏者", "缝合回收者", "刀剑收藏家"))
+    # 纳迦不在本局；缝合回收者 7 本；刀剑收藏家（海盗）留着
+    assert sched._sanitize_plan(raw, st).key_cards == ("刀剑收藏家",)
+
+
+def test_sanitize_keeps_cards_of_any_tribe_while_tribes_are_inferred():
+    from lscs.state.models import TribesConfidence
+
+    sched, _ = scheduler([])
+    st = confirmed_state().model_copy(update={"tribes_confidence": TribesConfidence.INFERRING})
+    raw = raw_plan(tribe="NAGA", key_cards=("熔岩潜伏者",))
+    plan = sched._sanitize_plan(raw, st)
+    assert (plan.tribe, plan.key_cards) == ("NAGA", ("熔岩潜伏者",))
+
+
+def test_sanitize_clears_a_tribe_outside_the_lobby():
+    sched, _ = scheduler([])
+    plan = sched._sanitize_plan(raw_plan(tribe="NAGA"), confirmed_state())
+    assert plan.tribe is None and plan.comp == "畸变神明"
+
+
+def test_sanitize_accepts_an_undecided_plan_without_key_cards():
+    sched, _ = scheduler([])
+    raw = raw_plan(comp="未定", tribe=None, key_cards=("不存在的牌",), stage="前期")
+    plan = sched._sanitize_plan(raw, confirmed_state(turn=2))
+    assert (plan.comp, plan.key_cards, plan.turn) == ("未定", (), 2)
+    assert sched._sanitize_plan(None, confirmed_state()) is None
+
+
+PLANNED = json.dumps(
+    {
+        "actions": [{"type": "buy", "entity_id": 20, "reason": "好"}],
+        "summary": "买",
+        "plan": {"comp": "海盗", "tribe": "海盗", "key_cards": ["刀剑收藏家", "熔岩潜伏者"]},
+    },
+    ensure_ascii=False,
+)
+
+
+def test_delivered_plans_carry_the_sanitized_game_plan():
+    sched, _ = scheduler([PLANNED])
+    observe(sched, confirmed_state(turn=4), EventType.RECRUIT_STARTED)
+    result = next(e for e in sched.tick() if isinstance(e, AIResult))
+    game_plan = result.plan.game_plan
+    assert (game_plan.comp, game_plan.tribe, game_plan.turn) == ("海盗", "PIRATE", 4)
+    assert game_plan.key_cards == ("刀剑收藏家",)  # 熔岩潜伏者（纳迦）不在本局
+
+
+def test_deep_thoughts_of_an_invalid_answer_keep_the_sanitized_game_plan():
+    poor = json.dumps(
+        {
+            "analysis": "走海盗",
+            "actions": [{"type": "upgrade", "reason": "升本"}],  # 铸币 5，升本要 7
+            "plan": {"comp": "海盗", "key_cards": ["刀剑收藏家", "熔岩潜伏者"]},
+        },
+        ensure_ascii=False,
+    )
+    sched, _ = scheduler([GOOD, poor, poor], deep=True)
+    observe(sched, confirmed_state(turn=4), EventType.RECRUIT_STARTED)
+    deep = next(e for e in sched.tick() if isinstance(e, AIResult) and e.lane == "deep")
+    assert deep.expired == "invalid" and deep.plan.actions == ()
+    assert deep.plan.game_plan.key_cards == ("刀剑收藏家",)
+    assert deep.plan.game_plan.turn == 4
+
+
+# ---- 整局计划：调度器维护（整局计划与流派指南设计文档第 5.1、6 节） ----
+
+
+def planned(comp="畸变神明", stage="过渡", changed="", entity=20, **plan):
+    fields = {
+        "comp": comp,
+        "tribe": "畸变",
+        "key_cards": ["蚀脑怪", "飘荡祭品"],
+        "tiers": "第 6 回合 4 本",
+        "stage": stage,
+        "changed": changed,
+    }
+    fields.update(plan)
+    return json.dumps(
+        {
+            "analysis": "按计划走",
+            "actions": [{"type": "buy", "entity_id": entity, "reason": "好"}],
+            "plan": fields,
+        },
+        ensure_ascii=False,
+    )
+
+
+def plan_events(events):
+    from lscs.llm.scheduler import PlanUpdated
+
+    return [e for e in events if isinstance(e, PlanUpdated)]
+
+
+def deep_turn(sched, turn, seq=None):
+    observe(sched, confirmed_state(turn=turn, seq=seq or turn), EventType.RECRUIT_STARTED)
+    return sched.tick()
+
+
+def test_deep_plan_is_set_and_announced_after_its_result():
+    from lscs.llm.scheduler import PlanUpdated
+
+    sched, _ = scheduler([GOOD, planned()], deep=True)
+    events = deep_turn(sched, 5)
+    assert kinds(events)[-2:] == ["AIResult", "PlanUpdated"]
+    assert events[-2].lane == "deep"
+    plan = sched.game_plan
+    assert (plan.comp, plan.tribe, plan.key_cards, plan.turn) == (
+        "畸变神明",
+        "ABERRATION",
+        ("蚀脑怪", "飘荡祭品"),
+        5,
+    )
+    assert events[-1] == PlanUpdated(plan, None, 5)
+
+
+def test_copied_plan_keeps_its_turn_and_announces_nothing():
+    sched, _ = scheduler([GOOD, planned(), GOOD, planned(changed="照抄")], deep=True)
+    deep_turn(sched, 5)
+    events = deep_turn(sched, 6)
+    assert plan_events(events) == []
+    assert sched.game_plan.turn == 5 and sched.game_plan.changed == ""
+
+
+def test_changed_plan_is_announced_with_the_previous_one():
+    answers = [GOOD, planned(), GOOD, planned(comp="海盗刀剑", changed="畸变被抢")]
+    sched, _ = scheduler(answers, deep=True)
+    deep_turn(sched, 5)
+    old = sched.game_plan
+    (event,) = plan_events(deep_turn(sched, 7))
+    assert event.previous == old and event.plan.comp == "海盗刀剑" and event.turn == 7
+    assert sched.game_plan.changed == "畸变被抢" and sched.game_plan.turn == 7
+
+
+def test_a_new_stage_alone_is_announced_too():
+    answers = [GOOD, planned(), GOOD, planned(stage="保血", changed="血量低")]
+    sched, _ = scheduler(answers, deep=True)
+    deep_turn(sched, 5)
+    (event,) = plan_events(deep_turn(sched, 9))
+    assert event.plan.signature() == event.previous.signature()
+    assert (event.plan.stage, event.previous.stage, event.plan.changed) == (
+        "保血",
+        "过渡",
+        "血量低",
+    )
+    assert sched.game_plan.turn == 5  # 阶段会跟着局面变：不改"第 N 回合定"
+
+
+def test_fast_plans_are_ignored_while_deep_analysis_is_on():
+    sched, _ = scheduler([planned(), GOOD], deep=True)
+    assert plan_events(deep_turn(sched, 5)) == [] and sched.game_plan is None
+
+
+def test_fast_plans_are_taken_when_deep_analysis_is_off():
+    sched, _ = scheduler([planned(), planned()])
+    (event,) = plan_events(deep_turn(sched, 5))
+    assert event.previous is None and sched.game_plan.comp == "畸变神明"
+    assert plan_events(deep_turn(sched, 6)) == []  # 照抄
+
+
+def test_refreshed_and_invalid_deep_results_still_update_the_plan():
+    deferred = Deferred()
+    sched, _ = scheduler([GOOD, planned()], deep=True, run_async=deferred)
+    observe(sched, confirmed_state(turn=5), EventType.RECRUIT_STARTED)
+    sched.tick()
+    refreshed = confirmed_state(turn=5, seq=2).model_copy(
+        update={"shop": state(shop_ids=(30, 31)).shop}
+    )
+    observe(sched, refreshed, EventType.SHOP_CHANGED)  # 刷新：深度分析的操作过期
+    for job in deferred.jobs:
+        job()
+    events = sched.tick()
+    deep = next(e for e in events if isinstance(e, AIResult) and e.lane == "deep")
+    assert deep.expired == "refreshed"
+    (event,) = plan_events(events)
+    assert event.plan.comp == "畸变神明"
+    # 不合法、改正后仍不合法：只看思路，计划照样更新
+    poor = planned(comp="海盗刀剑", entity=99)
+    sched2, _ = scheduler([GOOD, poor, poor], deep=True)
+    events = deep_turn(sched2, 6)
+    assert next(e for e in events if isinstance(e, AIResult) and e.lane == "deep").expired == (
+        "invalid"
+    )
+    (event,) = plan_events(events)
+    assert event.plan.comp == "海盗刀剑"
+
+
+def test_late_deep_plan_from_the_previous_turn_is_taken():
+    deferred = Deferred()
+    sched, _ = scheduler([GOOD, planned(), GOOD], deep=True, run_async=deferred)
+    observe(sched, confirmed_state(turn=5), EventType.RECRUIT_STARTED)
+    sched.tick()
+    fast5, deep5 = deferred.jobs
+    fast5()
+    sched.tick()
+    observe(sched, confirmed_state(turn=6, seq=2), EventType.RECRUIT_STARTED)
+    sched.tick()
+    deep5()  # 第 5 回合的深度分析在第 6 回合才回来
+    events = sched.tick()
+    assert [e for e in events if isinstance(e, AIResult)] == []  # 不显示
+    (event,) = plan_events(events)
+    assert event.turn == 5 and sched.game_plan.comp == "畸变神明"
+
+
+def test_late_plan_never_replaces_a_newer_one():
+    deferred = Deferred()
+    answers = [GOOD, planned(comp="新计划"), planned(comp="旧计划")]
+    sched, _ = scheduler(answers, deep=True, run_async=deferred)
+    observe(sched, confirmed_state(turn=5), EventType.RECRUIT_STARTED)
+    sched.tick()
+    _fast5, deep5 = deferred.jobs
+    observe(sched, confirmed_state(turn=6, seq=2), EventType.RECRUIT_STARTED)
+    sched.tick()
+    fast6, deep6 = deferred.jobs[2:]
+    fast6()
+    deep6()
+    assert [e.plan.comp for e in plan_events(sched.tick())] == ["新计划"]
+    deep5()  # 第 5 回合的深度分析比第 6 回合的还晚回来
+    assert plan_events(sched.tick()) == []
+    assert sched.game_plan.comp == "新计划"
+
+
+def test_reset_game_clears_the_plan():
+    sched, provider = scheduler([GOOD, planned(), GOOD, GOOD], deep=True)
+    deep_turn(sched, 5)
+    assert sched.game_plan is not None
+    sched.reset_game()
+    assert sched.game_plan is None
+    deep_turn(sched, 1)
+    assert plan_line(provider.calls[-1].user).startswith("【整局计划】还没定")
+
+
+def test_recruit_messages_carry_the_plan_after_the_opponents_block():
+    sched, provider = scheduler([GOOD, planned(), GOOD, GOOD], deep=True)
+    deep_turn(sched, 5)
+    assert plan_line(provider.calls[0].user).startswith("【整局计划】还没定（由深度分析来定")
+    assert plan_line(provider.calls[1].user).startswith("【整局计划】还没定：")
+    deep_turn(sched, 6)
+    line = plan_line(provider.calls[2].user)
+    assert line.startswith(
+        "【整局计划（第 5 回合定，深度分析维护；给操作时要服从它）】目标 畸变神明"
+    )
+    assert provider.calls[2].user.split("\n\n")[1].startswith("【对手】")
+    assert situation(provider.calls[2].user).startswith("第 6 回合（招募）")
+
+
+def test_choice_messages_carry_a_plan_line():
+    sched, provider = scheduler([GOOD, planned(), PICK], deep=True)
+    deep_turn(sched, 5)
+    offer_choice(sched)
+    sched.tick()
+    assert "\n整局计划：目标 畸变神明 · 核心卡 蚀脑怪、飘荡祭品 · 阶段 过渡\n" in (
+        provider.calls[-1].user
+    )
+
+
+def test_game_plan_off_keeps_the_prompts_free_of_plans():
+    from lscs.llm.prompt import build_system_prompt
+
+    sched, provider = scheduler([GOOD, planned(), GOOD, GOOD, PICK], deep=True, game_plan=False)
+    events = deep_turn(sched, 5)
+    deep_turn(sched, 6)
+    offer_choice(sched)
+    sched.tick()
+    assert plan_events(events) == [] and sched.game_plan is None
+    assert provider.calls[0].system == build_system_prompt("要点", game_plan=False)
+    assert not any("整局计划" in c.user for c in provider.calls)
+
+
+def test_repair_keeps_the_plan_unchanged():
+    assert "look_for、plan 保持不变，只改 actions" in repair_text("deep", "第 1 步：铸币不够")
+    assert "plan" not in repair_text("fast", "第 1 步：铸币不够")  # 快速建议不写 plan
+
+
+def test_fast_lane_is_told_not_to_echo_the_plan_and_its_repair_skips_it():
+    poor = json.dumps({"actions": [{"type": "upgrade", "reason": "升本"}]})  # 铸币 5，升本要 7
+    sched, provider = scheduler([GOOD, planned(), poor, GOOD, GOOD], deep=True)
+    deep_turn(sched, 5)
+    deep_turn(sched, 6)
+    fast, repair, deep = provider.calls[2:5]
+    assert plan_line(fast.user).endswith("（快速建议不用写 plan，照着做就行）")
+    assert not plan_line(deep.user).endswith("照着做就行）")  # 深度分析照旧维护计划
+    assert repair.turns[-1] == ("user", repair_text("fast", "第 1 步：铸币不够"))
+
+
+def test_requests_remember_the_plan_they_were_sent_with():
+    sched, _ = scheduler([GOOD, planned(), GOOD, GOOD], deep=True)
+    first = [e for e in deep_turn(sched, 5) if isinstance(e, AIResult)]
+    assert [r.request.game_plan for r in first] == [None, None]
+    later = [e for e in deep_turn(sched, 6) if isinstance(e, AIResult)]
+    assert all(r.request.game_plan == sched.game_plan for r in later) and len(later) == 2
+
+
+# ---- 整局计划：什么才算改了（实测：AI 每回合换个说法） ----
+
+
+def test_rephrased_comp_is_the_same_plan_when_the_guide_knows_it():
+    from lscs.llm.comps import CompGuide, CompsFile
+
+    guide = CompsFile("", (CompGuide("畸变怪养神流", frozenset({"ABERRATION"}), "- 要点"),))
+    answers = [
+        GOOD,
+        planned(comp="畸变养神（亡语/弃牌）"),
+        GOOD,
+        planned(comp="畸变怪养神流（亡语/弃牌）"),
+        GOOD,
+        planned(comp="畸变怪养神流"),
+    ]
+    sched, provider = scheduler(answers, deep=True, comps=guide)
+    (event,) = plan_events(deep_turn(sched, 5))
+    assert event.plan.comp == "畸变怪养神流"  # 存成指南的标题
+    assert plan_events(deep_turn(sched, 6)) == [] and plan_events(deep_turn(sched, 7)) == []
+    assert sched.game_plan.turn == 5
+
+
+def test_rewording_the_tiers_roll_or_pivot_updates_silently():
+    answers = [
+        GOOD,
+        planned(tiers="第 2 回合升 2 本，第 6 回合 4 本", roll="缺核心卡就刷", pivot="没核心就转"),
+        GOOD,
+        planned(tiers="第2回合2本，第6回合4本", roll="核心没来就刷新", pivot="第 8 回合没核心转"),
+    ]
+    sched, provider = scheduler(answers, deep=True)
+    deep_turn(sched, 5)
+    assert plan_events(deep_turn(sched, 6)) == []
+    assert (sched.game_plan.tiers, sched.game_plan.turn) == ("第2回合2本，第6回合4本", 5)
+    deep_turn(sched, 7)
+    assert "| 节奏 第2回合2本，第6回合4本 |" in plan_line(provider.calls[-1].user)
+
+
+def test_key_cards_in_another_order_are_the_same_plan():
+    answers = [GOOD, planned(), GOOD, planned(key_cards=["飘荡祭品", "蚀脑怪"])]
+    sched, _ = scheduler(answers, deep=True)
+    deep_turn(sched, 5)
+    assert plan_events(deep_turn(sched, 6)) == []
+
+
+def test_undecided_plans_only_count_once_a_comp_is_chosen():
+    answers = [
+        GOOD,
+        planned(comp="未定", key_cards=["虚悯者"], stage="前期"),
+        GOOD,
+        planned(comp="未定", key_cards=["蚀脑怪", "虚悯者"], stage="前期"),
+        GOOD,
+        planned(comp="畸变神明", stage="过渡"),
+    ]
+    sched, _ = scheduler(answers, deep=True)
+    (first,) = plan_events(deep_turn(sched, 2))
+    assert first.previous is None and first.plan.undecided
+    assert plan_events(deep_turn(sched, 3)) == []  # 还没定，只换了想找的牌
+    assert sched.game_plan.key_cards == ("蚀脑怪", "虚悯者")
+    (chosen,) = plan_events(deep_turn(sched, 4))
+    assert chosen.previous.undecided and chosen.plan.comp == "畸变神明"
+
+
+def test_low_health_always_means_the_protect_stage():
+    sched, _ = scheduler([GOOD, planned(stage="过渡"), GOOD, planned(stage="过渡")], deep=True)
+    deep_turn(sched, 5)
+    low = confirmed_state(turn=6, seq=6)
+    low = low.model_copy(update={"me": low.me.model_copy(update={"health": 12, "armor": 3})})
+    observe(sched, low, EventType.RECRUIT_STARTED)
+    (event,) = plan_events(sched.tick())
+    assert (event.plan.stage, event.previous.stage) == ("保血", "过渡")  # 血量 + 护甲 15
+    assert sched.game_plan.stage == "保血"
+
+
+def test_health_above_the_floor_keeps_the_ais_stage():
+    sched, _ = scheduler([], deep=True)
+    st = confirmed_state(turn=6)
+    st = st.model_copy(update={"me": st.me.model_copy(update={"health": 14, "armor": 2})})
+    assert sched._sanitize_plan(raw_plan(stage="过渡"), st).stage == "过渡"  # 16
+    st = st.model_copy(update={"me": st.me.model_copy(update={"armor": 1})})
+    assert sched._sanitize_plan(raw_plan(stage="成型"), st).stage == "保血"  # 15
+
+
+# ---- 快速建议和计划（评审修正） ----
+
+
+def test_with_deep_analysis_off_the_fast_lane_is_asked_and_only_its_first_plan_counts():
+    clock = Clock()
+    answers = [
+        planned(comp="畸变神明"),
+        planned(comp="海盗金币流", entity=30),
+        planned(comp="鱼人流"),
+    ]
+    sched, provider = scheduler(answers, clock=clock)
+    st = confirmed_state(turn=5)
+    observe(sched, st, EventType.RECRUIT_STARTED)
+    (first,) = plan_events(sched.tick())
+    assert plan_line(provider.calls[0].user).startswith("【整局计划】还没定：请在 plan 里定下")
+    refreshed = st.model_copy(update={"seq": 2, "shop": state(shop_ids=(30, 31)).shop})
+    observe(sched, refreshed, EventType.SHOP_CHANGED)
+    clock.now += 1.0
+    assert plan_events(sched.tick()) == []  # 同一回合刷新后的快速建议：计划不采用
+    assert sched.game_plan.comp == "畸变神明" and len(provider.calls) == 2
+    (changed,) = plan_events(deep_turn(sched, 6))  # 下一回合的第一次又能改
+    assert changed.plan.comp == "鱼人流"
+
+
+def test_with_deep_analysis_off_the_fast_repair_keeps_the_plan():
+    """深度分析关闭时快速建议定计划：它的改正要求也要保留 plan（和深度分析的一样）。"""
+    assert repair_text("fast", "第 1 步：铸币不够", writes_plan=True) == repair_text(
+        "deep", "第 1 步：铸币不够"
+    )
+    assert "plan" not in repair_text("fast", "第 1 步：铸币不够")  # 深度分析打开时不提 plan
+
+
+def test_with_deep_analysis_on_only_the_deep_lane_gets_the_comps_block():
+    stats = meta_stats(BG36_098=0.5)
+    sched, provider = scheduler([GOOD, GOOD], deep=True, stats=lambda: stats, comps=sample_comps())
+    observe(sched, recruit_state(), EventType.RECRUIT_STARTED)
+    sched.tick()
+    fast, deep = (c.user.split("\n\n") for c in provider.calls)
+    assert "流派指南" not in provider.calls[0].user
+    assert deep[2].startswith("【本赛季流派指南")
+    # 快速建议的前缀（系统提示 + 卡池 + 战绩）就是深度分析消息的前缀：缓存照样命中
+    assert fast[:2] == deep[:2] and provider.calls[0].system == provider.calls[1].system
+    assert fast[2].startswith("【对手】") and fast[2] == deep[3]

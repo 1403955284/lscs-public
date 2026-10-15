@@ -270,6 +270,7 @@ def _ai_cli_setup(monkeypatch, tmp_path, answers, key="sk-cli-0123456789abcd", e
     monkeypatch.setattr(lscs.cli, "DEFAULT_CONFIG", config)
     monkeypatch.setattr(lscs.cli, "RECORDINGS_DIR", tmp_path / "recordings")
     monkeypatch.setattr(lscs.cli, "DEFAULT_HEROES", tmp_path / "no-heroes.md")
+    monkeypatch.setattr(lscs.cli, "DEFAULT_COMPS", tmp_path / "no-comps.md")
     monkeypatch.setattr(
         lscs.cli, "_load_cards", lambda: CardDB.from_json_file(FIXTURES / "cards_mini.json")
     )
@@ -430,6 +431,82 @@ def test_replay_sends_heroes_md_to_the_hero_lane(monkeypatch, tmp_path, capsys):
     assert main(["replay", str(MINI_LOG), "--ai"]) == 0
     assert fake.calls[0].system.endswith("【本月英雄强度资料】\n2026-10-20 英雄强度资料")
     assert "英雄强度资料" not in fake.calls[1].system  # 招募阶段的系统提示不变
+
+
+def test_replay_without_comps_md_says_so_and_sends_no_comps(monkeypatch, tmp_path, capsys):
+    from helpers import MINI_LOG
+
+    import lscs.cli
+    import lscs.llm.provider
+    from lscs.llm.provider import FakeProvider
+
+    _ai_cli_setup(monkeypatch, tmp_path, [], extra="deep_analysis = false\n")
+    fake = FakeProvider([MINI_HERO])
+    monkeypatch.setattr(lscs.llm.provider, "OpenAICompatProvider", lambda cfg: fake)
+    assert main(["replay", str(MINI_LOG), "--ai"]) == 0
+    out = capsys.readouterr().out
+    assert "流派指南：没有 strategy/current/comps.md，AI 只有通用攻略" in out
+    assert lscs.cli.DEFAULT_COMPS.name == "no-comps.md"
+    assert not any("流派指南" in call.user for call in fake.calls)
+
+
+def test_replay_sends_the_comps_of_the_lobby(monkeypatch, tmp_path, capsys):
+    import shutil
+
+    from helpers import FIXTURES, MINI_LOG
+
+    import lscs.cli
+    import lscs.llm.provider
+    from lscs.llm.provider import FakeProvider
+
+    _ai_cli_setup(monkeypatch, tmp_path, [], extra="deep_analysis = false\n")
+    fake = FakeProvider([MINI_HERO])
+    monkeypatch.setattr(lscs.llm.provider, "OpenAICompatProvider", lambda cfg: fake)
+    comps = tmp_path / "comps.md"
+    shutil.copy(FIXTURES / "comps_sample.md", comps)
+    monkeypatch.setattr(lscs.cli, "DEFAULT_COMPS", comps)
+    assert main(["replay", str(MINI_LOG), "--ai"]) == 0
+    out = capsys.readouterr().out
+    assert "流派指南：第 14 赛季流派指南（测试样例，不是真实资料），4 个流派" in out
+    recruit = fake.calls[1].user  # 第 0 次是选英雄
+    assert "## 海盗刀剑" in recruit and "## 畸变神明" not in recruit  # 本局没有畸变
+    assert "流派指南" not in fake.calls[0].user
+
+
+def test_replay_with_comp_guide_off(monkeypatch, tmp_path, capsys):
+    import shutil
+
+    from helpers import FIXTURES, MINI_LOG
+
+    import lscs.cli
+    import lscs.llm.provider
+    from lscs.llm.provider import FakeProvider
+
+    _ai_cli_setup(monkeypatch, tmp_path, [], extra="deep_analysis = false\ncomp_guide = false\n")
+    fake = FakeProvider([MINI_HERO])
+    monkeypatch.setattr(lscs.llm.provider, "OpenAICompatProvider", lambda cfg: fake)
+    comps = tmp_path / "comps.md"
+    shutil.copy(FIXTURES / "comps_sample.md", comps)
+    monkeypatch.setattr(lscs.cli, "DEFAULT_COMPS", comps)
+    assert main(["replay", str(MINI_LOG), "--ai"]) == 0
+    out = capsys.readouterr().out
+    assert "流派指南：关闭" in out and "4 个流派" not in out
+    assert "整局计划：关闭" not in out
+    assert not any("流派指南" in call.user for call in fake.calls)
+
+
+def test_replay_with_game_plan_off(monkeypatch, tmp_path, capsys):
+    from helpers import MINI_LOG
+
+    import lscs.llm.provider
+    from lscs.llm.provider import FakeProvider
+
+    _ai_cli_setup(monkeypatch, tmp_path, [], extra="deep_analysis = false\ngame_plan = false\n")
+    fake = FakeProvider([MINI_HERO])
+    monkeypatch.setattr(lscs.llm.provider, "OpenAICompatProvider", lambda cfg: fake)
+    assert main(["replay", str(MINI_LOG), "--ai"]) == 0
+    assert "整局计划：关闭" in capsys.readouterr().out
+    assert not any("整局计划" in call.user or "整局计划" in call.system for call in fake.calls)
 
 
 def test_replay_with_ai_and_broken_config_fails(monkeypatch, tmp_path, capsys):
@@ -612,8 +689,9 @@ def test_watch_catch_up_mid_game_calls_once_for_the_current_turn():
     for job in jobs:
         job()
     assert {c.thinking for c in provider.calls} == {"disabled", "low"}
-    # 去掉开头的本局卡池和对手
-    assert all(c.user.split("\n\n", 2)[2].startswith("第 7 回合") for c in provider.calls)
+    # 去掉开头的本局卡池、对手和整局计划那一行
+    situations = [c.user.split("\n\n", 2)[2].split("\n", 1)[1] for c in provider.calls]
+    assert all(text.startswith("第 7 回合") for text in situations)
 
 
 @NEEDS_USER_LOG

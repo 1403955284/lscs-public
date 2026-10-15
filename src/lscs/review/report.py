@@ -567,6 +567,8 @@ def history_entry(review: GameReview) -> dict:
         "triples": sum(len(t.triples) for t in turns),
         "advised": advised,
         "followed": followed,
+        "plan_comps": list(record.plan_comps),  # 整局计划走过的目标流派
+        "plan_changes": record.plan_changes,  # 整局计划改了几次
         "flags": flag_kinds(review.flags),
         "file": review.shown_path,
     }

@@ -216,6 +216,18 @@ def test_facts_message_with_advice_choices_and_history():
     assert turn_line(rec, rec.turns[0], card_name).endswith("| 场面 1 个（身材 4）：蚀脑怪 2/2")
 
 
+def test_turn_line_names_the_plan_in_force():
+    planned = advice(advised=1, followed=1, deep_summary="找核心", plan_comp="畸变神明")
+    turns = curve_turns({3: dict(advice=planned.model_copy(update={"plan_stage": "过渡"}))})
+    rec = record(turns, [])
+    assert turn_line(rec, rec.turns[2], card_name).endswith(
+        '| 建议：深度 "找核心"；计划 "畸变神明/过渡"；采纳 1/1'
+    )
+    turns = curve_turns({3: dict(advice=planned)})
+    rec = record(turns, [])
+    assert turn_line(rec, rec.turns[2], card_name).endswith('计划 "畸变神明"；采纳 1/1')
+
+
 # ---- 调用 ----
 
 

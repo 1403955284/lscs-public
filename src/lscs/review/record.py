@@ -24,7 +24,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict
 
 from lscs.advisor.context import MINION, hero_power_used, is_golden
-from lscs.advisor.models import Advice, Plan
+from lscs.advisor.models import Advice, GamePlan, Plan
 from lscs.state.models import Event, EventType, GameState, Minion, Phase, ShopItem
 from lscs.state.pool import base_card_id
 
@@ -57,6 +57,9 @@ class TurnAdvice(_Frozen):
     advised: int  # 建议过的动作数（去重）
     followed: int  # 其中做了的
     missed_buys: tuple[str, ...]  # 建议买而没买的卡牌 ID
+    # 这个回合结束时生效的整局计划（整局计划与流派指南设计文档第 8.3 节）；没有计划时 None
+    plan_comp: str | None = None
+    plan_stage: str | None = None
 
     @property
     def upgrade_advised(self) -> bool:
@@ -124,6 +127,8 @@ class GameRecord(_Frozen):
     final_health: int  # GAME_ENDED 时的有效血量（淘汰时 ≤ 0）
     uncertain: bool
     seen_cards: frozenset[str]  # 本局出现过的所有卡牌 ID（商店、场面、手牌、选项、对手阵容）
+    plan_comps: tuple[str, ...] = ()  # 本局整局计划走过的目标流派（去重保序）
+    plan_changes: int = 0  # 整局计划改了几次（流派或核心卡变了；只改阶段、从"未定"定下不算）
 
     def turn(self, number: int) -> TurnRecord | None:
         return next((t for t in self.turns if t.turn == number), None)
@@ -699,15 +704,35 @@ def attach_advice(
     *,
     hero_ai_pick: str | None = None,
     ai_choices: Mapping[int, str] | None = None,
+    plans: Sequence[tuple[int, GamePlan]] = (),
 ) -> GameRecord:
-    """把本局显示过的建议并进记录：每回合的 TurnAdvice、选英雄和选项的 AI 推荐。"""
+    """把本局显示过的建议并进记录：每回合的 TurnAdvice、选英雄和选项的 AI 推荐，以及整局计划
+    （plans：按到达的先后，(到达时的回合, 计划)；每回合记回合结束时生效的那一份）。"""
     ai_choices = ai_choices or {}
     turns = []
     for turn in record.turns:
         log = logs.get(turn.turn)
         advice = turn_advice(turn.turn, log, ops, entity_cards) if log is not None else None
+        current = next((p for t, p in reversed(plans) if t <= turn.turn), None)
+        if advice is not None and current is not None:
+            advice = advice.model_copy(
+                update={"plan_comp": current.comp, "plan_stage": current.stage}
+            )
         choices = tuple(
             c.model_copy(update={"ai_card_id": ai_choices.get(c.id)}) for c in turn.choices
         )
         turns.append(turn.model_copy(update={"advice": advice, "choices": choices}))
-    return record.model_copy(update={"turns": tuple(turns), "hero_ai_pick": hero_ai_pick})
+    comps = tuple(dict.fromkeys(p.comp for _, p in plans))
+    changes = sum(  # 从"未定"定下目标流派不算换方向
+        1
+        for (_, a), (_, b) in zip(plans, plans[1:], strict=False)
+        if not a.undecided and not b.undecided and a.signature() != b.signature()
+    )
+    return record.model_copy(
+        update={
+            "turns": tuple(turns),
+            "hero_ai_pick": hero_ai_pick,
+            "plan_comps": comps,
+            "plan_changes": changes,
+        }
+    )

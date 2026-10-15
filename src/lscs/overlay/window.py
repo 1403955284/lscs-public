@@ -30,6 +30,7 @@ from lscs.overlay.grip import GripWindow
 from lscs.overlay.model import (
     DIRECTION,
     GOAL,
+    PLAN,
     REASON,
     SOURCE_RULES,
     STRONGEST,
@@ -71,6 +72,7 @@ TONES = {"text": TEXT, "dim": DIM, "muted": MUTED}
 # 精简模式行首标签的颜色；其余标签（然后、护甲、名次、选项标题）是灰色
 LABEL_COLORS = {
     GOAL: AI_TAG,
+    PLAN: AI_TAG,
     REASON: AI_TAG,
     DIRECTION: RULES_TAG,
     WHY: RULES_TAG,

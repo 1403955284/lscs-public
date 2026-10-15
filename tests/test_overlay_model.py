@@ -2513,3 +2513,130 @@ def test_badge_and_then_numbers_follow_the_full_plan_after_a_step_is_done(detail
         assert texts(view)[:2] == ["② 买 蚀脑怪 3/4", "③ 刷新"]
     else:
         assert labeled(view, "然后") == "③ 刷新"
+
+
+# ---- 整局计划（整局计划与流派指南设计文档第 8.2 节） ----
+
+
+def game_plan(**fields):
+    from lscs.advisor.models import GamePlan
+
+    values = {
+        "comp": "畸变神明",
+        "tribe": "ABERRATION",
+        "key_cards": ("蚀脑怪", "小鬼"),
+        "tiers": "第 8 回合 5 本",
+        "roll": "血量低于 15 先补身材",
+        "stage": "保血",
+        "pivot": "第 8 回合没有核心卡就转海盗",
+        "turn": 3,
+    }
+    values.update(fields)
+    return GamePlan(**values)
+
+
+PLAN_LINE = Line("畸变神明 · 保血 · 核心 蚀脑怪、小鬼✓", "dim", "aside", label="计划", max_lines=1)
+
+
+def test_compact_plan_line_comes_after_the_goal():
+    model = OverlayModel(name)
+    model.on_update(T3, started(3))
+    model.show_ai(T3, ai_advice(summary="先保血"), agrees=False)
+    model.show_plan(T3, game_plan(), None)
+    assert model.snapshot().blocks == (
+        Block("lines", (Line("先保血", role="goal", label="目标", max_lines=2), PLAN_LINE)),
+    )
+
+
+def test_compact_plan_line_with_the_rules_plan_and_an_undecided_plan():
+    model = OverlayModel(name)
+    model.on_update(T3, started(3))
+    model.show_rules(T3, rules_advice())
+    model.show_plan(T3, game_plan(), None)
+    assert [tag for tag, _ in rows(model.snapshot())] == ["然后", "方向", "计划"]
+    undecided = game_plan(comp="未定", key_cards=("蚀脑怪",), stage="前期")
+    model.show_plan(T3, undecided, game_plan())
+    assert labeled(model.snapshot(), "计划") == "未定 · 前期 · 想找 蚀脑怪"
+    bare = game_plan(key_cards=(), stage=None)
+    model.show_plan(T3, bare, undecided)
+    assert labeled(model.snapshot(), "计划") == "畸变神明"
+
+
+def test_plan_line_goes_with_the_then_line_when_condensed():
+    model = OverlayModel(name)
+    model.on_update(T3, started(3))
+    model.show_rules(T3, rules_advice())
+    model.show_plan(T3, game_plan(), None)
+    assert [tag for tag, _ in rows(condense(model.snapshot(), 1))] == ["方向"]
+
+
+@MODES
+def test_plan_stays_for_the_next_turns_and_goes_with_a_new_game(detail):
+    model = OverlayModel(name, detail=detail)
+    model.on_update(T3, started(3))
+    model.show_plan(T3, game_plan(), None)
+    t4 = make_state(turn=4, gold=6, seq=2, board=[minion(10, "A", 1, 1)])
+    model.on_update(t4, started(4))
+    assert any("畸变神明" in text for text in texts(model.snapshot()))
+    model.on_update(make_state(turn=1, seq=3), [Event(type=EventType.GAME_STARTED, turn=0)])
+    model.on_update(make_state(turn=1, seq=4), started(1))
+    assert not any("畸变神明" in text for text in texts(model.snapshot()))
+
+
+@MODES
+def test_no_plan_line_while_choosing_or_in_combat(detail):
+    from factory import choice_event, choice_state
+
+    model = OverlayModel(choice_name, detail=detail)
+    model.on_update(T3, started(3))
+    model.show_plan(T3, game_plan(), None)
+    choice = choice_state(turn=3, shop=SHOP)
+    model.on_update(choice, [choice_event(choice)])
+    assert not any("畸变神明" in text for text in texts(model.snapshot()))
+    combat = make_state(turn=3, phase=Phase.COMBAT, seq=9)
+    model.on_update(combat, [Event(type=EventType.COMBAT_STARTED, turn=3)])
+    assert not any("畸变神明" in text for text in texts(model.snapshot()))
+
+
+NOTE = "商店里有核心卡 蚀脑怪，方案却没买它"
+
+
+def test_detail_plan_line_and_the_reminder_before_the_rules_alternative():
+    model = detailed()
+    model.on_update(T3, started(3))
+    model.show_rules(T3, rules_advice())
+    model.show_plan(T3, game_plan(key_cards=("蚀脑怪",)), None)
+    refresh = llm_advice((Action(type="refresh"),), summary="刷新找核心")
+    model.show_ai(T3, refresh.model_copy(update={"plan_note": NOTE}), False)
+    view = model.snapshot()
+    assert block(view, "plan").lines == (
+        Line("① 刷新", "text", "step"),
+        Line("目标：刷新找核心", role="goal"),
+        Line("计划：畸变神明（保血） · 核心 蚀脑怪 · 第 8 回合 5 本", role="goal", max_lines=2),
+        Line(f"提醒：{NOTE}", "muted", "alt"),
+        Line("规则另议：买 海盗", "muted", "alt", max_lines=1),
+    )
+    texts_two = [line.text for line in block(condense(view, 2, detail=True), "plan").lines]
+    assert texts_two == ["① 刷新", "目标：刷新找核心", view.blocks[0].lines[2].text]
+    # 买了那张核心卡：不再提醒，计划里的它打 ✓
+    bought = T3.model_copy(
+        update={
+            "seq": 2,
+            "shop": SHOP[:1],
+            "me": T3.me.model_copy(
+                update={"gold": 2, "board": (*T3.me.board, minion(11, "C", 3, 4))}
+            ),
+        }
+    )
+    model.on_update(bought, [])
+    lines_now = [line.text for line in block(model.snapshot(), "plan").lines]
+    assert "计划：畸变神明（保血） · 核心 蚀脑怪✓ · 第 8 回合 5 本" in lines_now
+    assert not any(text.startswith("提醒：") for text in lines_now)
+
+
+def test_detail_without_a_plan_has_no_plan_or_reminder_lines():
+    model = detailed()
+    model.on_update(T3, started(3))
+    advice = llm_advice((Action(type="refresh"),), summary="刷新")
+    model.show_ai(T3, advice.model_copy(update={"plan_note": NOTE}), False)
+    assert [line.text for line in block(model.snapshot(), "plan").lines] == ["① 刷新", "目标：刷新"]

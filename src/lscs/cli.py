@@ -52,6 +52,7 @@ DEFAULT_POOL = PROJECT_ROOT / "strategy" / "current" / "pool.toml"
 DEFAULT_RULES = PROJECT_ROOT / "strategy" / "current" / "rules.toml"
 DEFAULT_GUIDE = PROJECT_ROOT / "strategy" / "current" / "guide.md"
 DEFAULT_HEROES = PROJECT_ROOT / "strategy" / "current" / "heroes.md"  # 可选：当月英雄强度资料
+DEFAULT_COMPS = PROJECT_ROOT / "strategy" / "current" / "comps.md"  # 可选：本赛季流派指南
 RECORDINGS_DIR = PROJECT_ROOT / "recordings"
 REVIEW_BASE = PROJECT_ROOT  # [review] dir 是相对路径时相对它（测试里换成临时目录）
 # 本版本统计的缓存目录；None 表示和卡牌数据同一个缓存目录（测试里换成临时目录）
@@ -271,6 +272,9 @@ def _build_scheduler(cards, sync: bool, stats: Callable[[], MetaStats | None] | 
         print("不合法方案自动改正：关闭", flush=True)
     if not llm.all_opponents:
         print("对手摘要：只发下一个对手", flush=True)
+    comps = _load_comps(llm.comp_guide)
+    if not llm.game_plan:
+        print("整局计划：关闭", flush=True)
     heroes = load_guide(DEFAULT_HEROES) if DEFAULT_HEROES.exists() else None
     extra = {"debounce": 0.0, "hero_debounce": 0.0, "run_async": lambda job: job()} if sync else {}
     return LLMScheduler(
@@ -281,8 +285,27 @@ def _build_scheduler(cards, sync: bool, stats: Callable[[], MetaStats | None] | 
         heroes_note=heroes,
         recorder=Recorder(RECORDINGS_DIR),
         stats=stats,
+        comps=comps,
         **extra,
     )
+
+
+def _load_comps(enabled: bool):
+    """读本赛季流派指南并打印一行；没有文件时返回 None。enabled（[llm] comp_guide）为假时
+    照样读，只是调度器不发。"""
+    from lscs.llm.comps import parse_comps
+    from lscs.llm.prompt import load_guide
+
+    comps = parse_comps(load_guide(DEFAULT_COMPS)) if DEFAULT_COMPS.exists() else None
+    if not enabled:
+        print("流派指南：关闭", flush=True)
+    elif comps is None:
+        print("流派指南：没有 strategy/current/comps.md，AI 只有通用攻略", flush=True)
+    else:
+        print(
+            f"流派指南：{comps.title or DEFAULT_COMPS.name}，{comps.comp_count} 个流派", flush=True
+        )
+    return comps
 
 
 def _warn_old_highlight(cfg: HighlightConfig) -> None:

@@ -19,6 +19,10 @@ ACTION_TYPES: tuple[str, ...] = ("buy", "sell", "upgrade", "hero_power", "refres
 # 站位建议里一个随从为什么要挪（站位建议设计文档第 3 节）：战斗型亡语、进击放最左，复仇放最右，
 # 对面有劈砍时唯一的嘲讽靠边
 PositionRole = Literal["deathrattle", "rally", "avenge", "taunt_edge"]
+# 整局计划的阶段（整局计划与流派指南设计文档第 4.1 节）
+Stage = Literal["前期", "过渡", "成型", "保血"]
+STAGES: tuple[str, ...] = ("前期", "过渡", "成型", "保血")
+UNDECIDED = "未定"  # 前几回合还没定目标流派
 
 
 class _Frozen(BaseModel):
@@ -31,6 +35,29 @@ class Action(_Frozen):
     reason: str = ""
 
 
+class GamePlan(_Frozen):
+    """整局计划（深度分析定下并维护；快速建议和面板跟着它走）。每个字段都短，面板放得下。"""
+
+    comp: str  # 目标流派：指南里的名字或 AI 自己起的短名；还没定时 "未定"
+    tribe: str | None = None  # 主种族（Race 枚举名，如 "ABERRATION"）；没有或不在本局时 None
+    key_cards: tuple[str, ...] = ()  # 2~3 张核心卡的卡名（调度器校验过：本局卡池里有）
+    tiers: str = ""  # 升本节奏，一句话："第 6 回合 4 本，第 8 回合 5 本"
+    roll: str = ""  # 刷新 / 保血的规则，一句话
+    stage: Stage | None = None  # 现在的阶段
+    pivot: str = ""  # 换方向的条件，一句话
+    changed: str = ""  # 这次改计划的原因（没改为空）
+    turn: int = 0  # 定下 / 最近一次修改的回合
+
+    def signature(self) -> tuple:
+        """看计划本身有没有变：目标流派（调度器已经对到指南标题）和核心卡（不看顺序）。阶段另算；
+        主种族、升本节奏、刷新规则、换方向条件只是措辞，AI 每回合换个说法不算改计划。"""
+        return (self.comp, frozenset(self.key_cards))
+
+    @property
+    def undecided(self) -> bool:
+        return self.comp == UNDECIDED
+
+
 class Plan(_Frozen):
     source: Literal["rules", "llm"]
     actions: tuple[Action, ...] = ()
@@ -39,6 +66,8 @@ class Plan(_Frozen):
     confidence: float | None = None
     analysis: str = ""  # AI 的局势判断、本局方向、本回合目标
     look_for: tuple[str, ...] = ()  # AI 说接下来要找的牌
+    # AI 回答里的整局计划：解析时是原样（卡名没校验），调度器交付前校验过、填好回合
+    game_plan: GamePlan | None = None
 
     def signature(self) -> tuple[tuple[str, int | None], ...]:
         """只看动作和对象、不看理由，用于判断两个方案是否相同。"""
@@ -56,6 +85,8 @@ class Advice(_Frozen):
     expired: Expired | None = None  # 深度分析的操作已经不能用，只看思路
     # 对子和要找的牌在池里还剩约几张（advisor.pool.pool_notes）；没有卡牌数据时为空
     pool_notes: tuple[PoolNote, ...] = ()
+    # 方案和整局计划明显矛盾时的一句提醒（advisor.plan_check.off_plan_note）；只提醒不改方案
+    plan_note: str | None = None
 
 
 class HeroComment(_Frozen):
