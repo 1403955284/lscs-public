@@ -12,6 +12,7 @@ from lscs.llm.comps import (
     CompGuide,
     CompsFile,
     comps_block,
+    kept_comps,
     match_comp,
     parse_comps,
     select_comps,
@@ -60,6 +61,7 @@ def test_parse_keeps_the_body_without_the_tag_and_source_lines():
         "- 成型标志：场上有两张蚀脑怪\n"
         "- 打法要点：蚀脑怪放左边\n"
         "- 弱点：怕剧毒",
+        core_cards=("蚀脑怪", "飘荡祭品", "恩拉其工兵"),
     )
 
 
@@ -222,6 +224,21 @@ def test_core_cards_of_a_line_with_notes_and_alternatives():
 
 
 @NEEDS_COMPS
+@NEEDS_REAL_CARDS
+def test_repository_core_cards_are_parsed_and_are_pool_minions():
+    from lscs.cards.db import CardDB
+
+    cards = CardDB.from_json_file(REAL_CARDS)
+    for guide in parse_comps(load_guide(DEFAULT_COMPS)).guides:
+        if guide.general:
+            assert guide.core_cards == (), guide.name
+            continue
+        assert guide.core_cards == tuple(dict.fromkeys(_core_cards(guide.body))), guide.name
+        for card in guide.core_cards:  # 商店核心卡标记按这些卡名找
+            assert cards.find_pool_minion(card) is not None, (guide.name, card)
+
+
+@NEEDS_COMPS
 def test_repository_comp_names_fit_the_plan():
     from lscs.llm.parse import PLAN_COMP_CHARS
 
@@ -314,3 +331,114 @@ def test_equally_close_headings_are_not_guessed_and_no_guide_means_no_match():
     )
     assert match_comp("甲乙丙丁", both) is None  # 一样像：不猜
     assert match_comp("畸变怪养神流", None) is None
+
+
+# ---- 核心卡、上限和别名（流派指南自动更新设计文档第 3.3、5.1 节） ----
+
+
+def test_parse_fills_the_core_cards_of_each_section():
+    comps = sample()
+    assert comps.guides[0].core_cards == ("蚀脑怪", "飘荡祭品", "恩拉其工兵")
+    assert comps.guides[1].core_cards == ("刀剑收藏家",)
+    assert comps.guides[-1].core_cards == ()  # 通用运营没有核心卡行
+
+
+@pytest.mark.parametrize(
+    ("line", "cards"),
+    [
+        (
+            "- 核心卡：希望信使（5 本，补丁加强到 4/3、+4/+3）、执念诗心龙；自伤线：灰烬腐蚀者。",
+            ("希望信使", "执念诗心龙", "灰烬腐蚀者"),
+        ),
+        (
+            "- 核心卡：无面转化者（5 本）；弃牌线：神秘的克熙尔（5 本，削弱为 7/7（每弃 +7/+7））、"
+            "梦魇侵蚀怪（4 本）、无面转化者",
+            ("无面转化者", "神秘的克熙尔", "梦魇侵蚀怪"),
+        ),
+        ("* 核心卡: 甲, 乙，丙;丁", ("甲", "乙", "丙", "丁")),
+    ],
+)
+def test_core_card_lines_drop_notes_prefixes_and_repeats(line, cards):
+    text = f"# 标题\n## 流派\n种族标签：BEAST\n- 强度：高\n{line}\n- 打法要点：甲在左\n"
+    assert parse_comps(text).guides[0].core_cards == cards
+
+
+def test_block_uses_the_files_own_limit():
+    from dataclasses import replace
+
+    comps = sample()
+    tribes = frozenset({"ABERRATION", "PIRATE", "ELEMENTAL"})
+    assert comps.max_chars == 6000
+    full = comps_block(comps, tribes)
+    assert "放不下" not in full
+    first = full.index("## 海盗刀剑")
+    general = len("\n## 通用运营（本赛季）\n- 前期按节奏升本，血量低于 15 先保血。")
+    small = replace(comps, max_chars=first + general)
+    assert comps_block(small, tribes) == comps_block(comps, tribes, max_chars=first + general)
+    assert "（还有 3 个流派放不下" in comps_block(small, tribes)
+
+
+ALIASED = CompsFile(
+    "标题",
+    (
+        CompGuide(
+            "畸变·梦魇侵蚀怪", frozenset({"ABERRATION"}), "", aliases=("Aberrations - Sludge",)
+        ),
+        CompGuide(
+            "畸变·无面转化者",
+            frozenset({"ABERRATION"}),
+            "",
+            aliases=("Aberrations - Deathrattle/Spells",),
+        ),
+        CompGuide("鱼人·下水道逃生鱼人", frozenset({"MURLOC"}), "", aliases=("Murlocs - Keyword",)),
+        CompGuide("通用运营（本赛季）", None, "", aliases=("General",)),
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("name", "heading"),
+    [
+        ("Aberrations - Sludge", "畸变·梦魇侵蚀怪"),
+        ("aberrations sludge", "畸变·梦魇侵蚀怪"),
+        ("ABERRATIONS-DEATHRATTLE/SPELLS", "畸变·无面转化者"),
+        ("畸变·梦魇侵蚀怪", "畸变·梦魇侵蚀怪"),
+        ("梦魇侵蚀怪流", "畸变·梦魇侵蚀怪"),
+        ("Murlocs Keyword（下水道）", "鱼人·下水道逃生鱼人"),
+        ("Sludge", "畸变·梦魇侵蚀怪"),  # 别名里包含它
+    ],
+)
+def test_english_aliases_match_the_display_name(name, heading):
+    assert match_comp(name, ALIASED) == heading
+
+
+def test_aliases_of_the_general_section_are_ignored():
+    assert match_comp("General", ALIASED) is None
+
+
+@pytest.mark.parametrize("name", ["Aberrations", "Elementals - Tempest", "Pirates"])
+def test_aliases_need_one_name_inside_the_other(name):
+    # "Aberrations" 两条都包含（一样像，不猜）；其余的英文字母按顺序共有很多，但不算
+    assert match_comp(name, ALIASED) is None
+
+
+def test_kept_comps_are_what_the_block_sends():
+    comps = sample()
+    tribes = frozenset({"ABERRATION", "PIRATE", "ELEMENTAL"})
+    kept, dropped = kept_comps(comps, tribes)
+    assert names(kept) == ["畸变神明", "海盗刀剑", "元素刷新", "中立白板", "通用运营（本赛季）"]
+    assert dropped == ()
+    full = comps_block(comps, tribes)
+    limit = full.index("\n## 海盗刀剑") + len(
+        "\n## 通用运营（本赛季）\n- 前期按节奏升本，血量低于 15 先保血。"
+    )
+    kept, dropped = kept_comps(comps, tribes, limit)
+    assert names(kept) == ["畸变神明", "通用运营（本赛季）"]
+    assert dropped == ("海盗刀剑", "元素刷新", "中立白板")
+    block = comps_block(comps, tribes, limit)
+    assert all(f"## {g.name}" in block for g in kept)
+    assert all(f"## {name}" not in block for name in dropped)
+    assert kept_comps(comps, frozenset({"BEAST"})) == (
+        (comps.guides[3], comps.guides[4]),  # 中立白板、通用运营
+        (),
+    )

@@ -13,6 +13,7 @@ from collections.abc import Callable, Iterable, Iterator
 from datetime import date, datetime
 from datetime import time as day_time
 from pathlib import Path
+from typing import NamedTuple
 
 from lscs import __version__
 from lscs.advisor.display import AdviceDisplay, AdviceSink, DisplayGroup, deep_wait_hint
@@ -29,6 +30,9 @@ from lscs.config import (
     old_highlight_values,
 )
 from lscs.dump import Namer, describe
+from lscs.guides.store import GuidesStore
+from lscs.guides.store import start_text as guides_start_text
+from lscs.llm.comps import CompsFile
 from lscs.logwatch.logconfig import (
     default_log_config_path,
     fix_client_config,
@@ -57,6 +61,8 @@ RECORDINGS_DIR = PROJECT_ROOT / "recordings"
 REVIEW_BASE = PROJECT_ROOT  # [review] dir 是相对路径时相对它（测试里换成临时目录）
 # 本版本统计的缓存目录；None 表示和卡牌数据同一个缓存目录（测试里换成临时目录）
 STATS_CACHE_DIR: Path | None = None
+# HSReplay 流派指南的缓存目录；None 表示和本版本统计同一个目录（测试里换成临时目录）
+GUIDES_CACHE_DIR: Path | None = None
 POLL_INTERVAL = 0.2  # watch 默认的轮询间隔（秒）
 OVERLAY_REPLAY_SPEED = 20.0  # replay --overlay 没填 --speed 时的倍速（不等待的话面板一闪而过）
 RECOMMENDED_OUTPUT_TOKENS = 1500  # 快速建议要写分析和 JSON，800 容易截断
@@ -167,6 +173,56 @@ def _stats_getter(store: StatsStore | None) -> Callable[[], MetaStats | None] | 
     return store.get if store is not None else None
 
 
+def _read_comps() -> CompsFile | None:
+    """strategy/current/comps.md；没有文件时 None。不打印（那一行在 _build_scheduler 里）。"""
+    from lscs.llm.comps import parse_comps
+    from lscs.llm.prompt import load_guide
+
+    return parse_comps(load_guide(DEFAULT_COMPS)) if DEFAULT_COMPS.exists() else None
+
+
+def _guides_store(sync: bool, cards, manual: CompsFile | None) -> GuidesStore | None:
+    """config.toml 的 [guides]（流派指南自动更新设计文档第 3.7 节）：打开时创建、打印一行、开始
+    准备（sync：replay / review 同步准备，watch 在后台）；关闭（默认）时返回 None，不打印。
+    config.toml 有误、没有卡牌数据（翻译不了卡名）时打印原因，这次用 comps.md。"""
+    try:
+        cfg = load_config(DEFAULT_CONFIG).guides
+    except ConfigError as exc:
+        print(f"{exc}（这次用 comps.md）", flush=True)
+        return None
+    if not cfg.enabled:
+        return None
+    if cards is None:
+        print("流派指南：没有卡牌数据，HSReplay 指南用不了，这次用 comps.md", flush=True)
+        return None
+    from lscs.cards.fetch import default_cache_dir
+
+    cache_dir = GUIDES_CACHE_DIR or STATS_CACHE_DIR or default_cache_dir()
+    store = GuidesStore(cfg, cache_dir, cards, manual)
+    print(guides_start_text(cfg, sync), flush=True)
+    store.start(sync)
+    return store
+
+
+class _Comps(NamedTuple):
+    """流派指南的来源（_comps_source）。"""
+
+    manual: CompsFile | None  # strategy/current/comps.md；没有文件时 None
+    get: Callable[[], CompsFile | None]  # 交给调度器、运行器的取流派指南的函数
+    live: bool  # 打开了 HSReplay 流派指南（[guides]，GuidesStore 已经开始准备）
+
+
+def _comps_source(cards, sync: bool) -> _Comps:
+    """comps.md 和取流派指南的函数：打开 [guides] 时是 GuidesStore.comps（HSReplay 的指南够数时
+    是它，否则 comps.md），否则总是返回 comps.md。AI 关着（--no-ai）时运行器也要它（商店核心卡
+    标记）。"""
+    manual = _read_comps()
+    store = _guides_store(sync, cards, manual)
+    if store is not None:
+        return _Comps(manual, store.comps, True)
+    return _Comps(manual, lambda: manual, False)
+
+
 def _namer(args: argparse.Namespace) -> Namer:
     if not args.names:
         return _identity
@@ -215,9 +271,15 @@ def _load_rules() -> RulesConfig | None:
         return None
 
 
-def _build_scheduler(cards, sync: bool, stats: Callable[[], MetaStats | None] | None = None):
+def _build_scheduler(
+    cards,
+    sync: bool,
+    stats: Callable[[], MetaStats | None] | None = None,
+    comps: _Comps | None = None,
+):
     """按 config.toml 创建大模型调度器；不能用 AI 时打印原因并返回 None。
-    config.toml 有误时抛出 ConfigError。stats：取本版本统计的函数（统计关闭时为 None）。"""
+    config.toml 有误时抛出 ConfigError。stats：取本版本统计的函数（统计关闭时为 None）。
+    comps：流派指南的来源（_comps_source）；None 时没有流派指南。"""
     from lscs.llm.prompt import load_guide
     from lscs.llm.provider import OpenAICompatProvider
     from lscs.llm.record import Recorder
@@ -272,7 +334,7 @@ def _build_scheduler(cards, sync: bool, stats: Callable[[], MetaStats | None] | 
         print("不合法方案自动改正：关闭", flush=True)
     if not llm.all_opponents:
         print("对手摘要：只发下一个对手", flush=True)
-    comps = _load_comps(llm.comp_guide)
+    _comps_line(llm.comp_guide, comps)
     if not llm.game_plan:
         print("整局计划：关闭", flush=True)
     heroes = load_guide(DEFAULT_HEROES) if DEFAULT_HEROES.exists() else None
@@ -285,27 +347,33 @@ def _build_scheduler(cards, sync: bool, stats: Callable[[], MetaStats | None] | 
         heroes_note=heroes,
         recorder=Recorder(RECORDINGS_DIR),
         stats=stats,
-        comps=comps,
+        comps=comps.get if comps is not None else None,
         **extra,
     )
 
 
-def _load_comps(enabled: bool):
-    """读本赛季流派指南并打印一行；没有文件时返回 None。enabled（[llm] comp_guide）为假时
-    照样读，只是调度器不发。"""
-    from lscs.llm.comps import parse_comps
-    from lscs.llm.prompt import load_guide
-
-    comps = parse_comps(load_guide(DEFAULT_COMPS)) if DEFAULT_COMPS.exists() else None
+def _comps_line(enabled: bool, source: _Comps | None) -> None:
+    """comps.md 的一行（AI 打开时）。enabled（[llm] comp_guide）为假时照样读，只是调度器不发。
+    打开了 HSReplay 流派指南时不再写 comps.md 的标题和流派数（HSReplay 那几行已经说了它只作备用），
+    没有 comps.md 时写清楚是 HSReplay 的指南不够或下载失败时才只有通用攻略。"""
+    comps = source.manual if source is not None else None
+    live = source is not None and source.live
     if not enabled:
         print("流派指南：关闭", flush=True)
+    elif comps is None and live:
+        print(
+            "流派指南：没有 strategy/current/comps.md，"
+            "HSReplay 的指南不够或下载失败时 AI 只有通用攻略",
+            flush=True,
+        )
     elif comps is None:
         print("流派指南：没有 strategy/current/comps.md，AI 只有通用攻略", flush=True)
+    elif live:
+        return
     else:
         print(
             f"流派指南：{comps.title or DEFAULT_COMPS.name}，{comps.comp_count} 个流派", flush=True
         )
-    return comps
 
 
 def _warn_old_highlight(cfg: HighlightConfig) -> None:
@@ -506,11 +574,12 @@ def _cmd_replay(args: argparse.Namespace) -> int:
         rules = _load_rules()
         if rules is None:
             return 1
+        comps = _comps_source(cards, sync=True)
         stats = _stats_getter(_stats_store(sync=True))
         scheduler = None
         if args.ai:
             try:
-                scheduler = _build_scheduler(cards, sync=True, stats=stats)
+                scheduler = _build_scheduler(cards, sync=True, stats=stats, comps=comps)
             except ConfigError as exc:
                 print(exc)
                 return 1
@@ -538,6 +607,7 @@ def _cmd_replay(args: argparse.Namespace) -> int:
             cards=cards,
             positioning=_positioning(cards),
             stats=stats,
+            comps=comps.get,
         )
         if model is not None:
             handlers.append(model.on_update)  # 先更新面板的回合，再出建议
@@ -632,11 +702,13 @@ def _cmd_watch(args: argparse.Namespace) -> int:
         return 1
     cards = _load_cards()
     name = cards.name if cards is not None else _identity
-    stats = _stats_getter(_stats_store(sync=False))  # 卡牌数据之后、在后台：从不阻塞
+    # 卡牌数据之后、在后台：从不阻塞（流派指南在统计之前）
+    comps = _comps_source(cards, sync=False)
+    stats = _stats_getter(_stats_store(sync=False))
     scheduler = None
     if not args.no_ai:
         try:
-            scheduler = _build_scheduler(cards, sync=False, stats=stats)
+            scheduler = _build_scheduler(cards, sync=False, stats=stats, comps=comps)
         except ConfigError as exc:
             print(exc)
             return 1
@@ -653,6 +725,7 @@ def _cmd_watch(args: argparse.Namespace) -> int:
         cards=cards,
         positioning=_positioning(cards),
         stats=stats,
+        comps=comps.get,
     )
     print(f"正在监听 {install / 'Logs'}，按 Ctrl+C 退出。")
     if combat_result:
@@ -732,11 +805,12 @@ def _cmd_review(args: argparse.Namespace) -> int:
         return 1
     cards = _load_cards()  # 复盘是给人看的：总是显示中文卡名
     name = cards.name if cards is not None else _identity
+    comps = _comps_source(cards, sync=True)
     stats = _stats_getter(_stats_store(sync=True))
     scheduler = None
     if args.ai:
         try:
-            scheduler = _build_scheduler(cards, sync=True, stats=stats)
+            scheduler = _build_scheduler(cards, sync=True, stats=stats, comps=comps)
         except ConfigError as exc:
             print(exc)
             return 1
@@ -758,7 +832,13 @@ def _cmd_review(args: argparse.Namespace) -> int:
     assert reviewer is not None
     # 建议只交给复盘记下来，不打印
     runner = AdviceRunner(
-        rules, name, reviewer.tap, scheduler, pool=_pool_estimator(cards, args), stats=stats
+        rules,
+        name,
+        reviewer.tap,
+        scheduler,
+        pool=_pool_estimator(cards, args),
+        stats=stats,
+        comps=comps.get,
     )
     handlers: list[UpdateHandler] = [runner.on_update]
     if scheduler is not None:

@@ -15,10 +15,12 @@ class FakeShow:
     def __init__(self):
         self.calls = []
         self.banners = []
+        self.markers = []
 
-    def __call__(self, frames, client, seconds, preview, cfg, focus, banner):
+    def __call__(self, frames, client, seconds, preview, cfg, focus, banner, markers=()):
         self.calls.append((frames, client, seconds, preview, cfg, focus))
         self.banners.append(banner)
+        self.markers.append(list(markers))
 
 
 class Clock:
@@ -168,8 +170,8 @@ def test_show_tk_gives_focus_back_after_drawing(monkeypatch):
         def __init__(self, _root, _cfg, _preview):
             api.foreground = 0x999  # 第一次显示时抢走焦点
 
-        def draw(self, frames, client, banner=None):
-            order.append(("draw", len(frames), client, banner))
+        def draw(self, frames, client, banner=None, markers=()):
+            order.append(("draw", len(frames), client, banner, len(markers)))
 
         def destroy(self):
             pass
@@ -185,7 +187,7 @@ def test_show_tk_gives_focus_back_after_drawing(monkeypatch):
     client = Rect(0, 0, 1920, 1080)
     banner = calibrate.SAMPLE_BANNER
     calibrate.show_tk([], client, 1, False, HighlightConfig(), 1, banner, make_window=FakeHighlight)
-    assert order == [("draw", 0, client, banner), ("focus", 1), "timer", "mainloop", "destroy"]
+    assert order == [("draw", 0, client, banner, 0), ("focus", 1), "timer", "mainloop", "destroy"]
 
 
 def test_a_sample_banner_is_always_drawn(monkeypatch):
@@ -200,3 +202,24 @@ def test_a_sample_banner_is_always_drawn(monkeypatch):
     assert banner.text == "本场已定：赢 · 洛卡拉掉 5 血"
     assert (banner.tone, banner.expires_at) == ("win", None)
     assert "横幅" in calibrate.SCREENSHOT_HINT and "本场已定" in calibrate.SCREENSHOT_HINT
+
+
+def test_shop_rows_get_two_sample_core_badges(monkeypatch):
+    """画商店那一排时，第 2、5 个槽位的左上角各画一个示例"核"字徽章，截图时一起核对位置。"""
+    from lscs.overlay.layout import HighlightLayout, Marker, slot_rect
+
+    FakeWin32Api(
+        windows=[FakeWindow(1, pid=10, size=(1920, 1080), origin=(0, 0))], paths={10: HS}
+    ).install(monkeypatch)
+    show = FakeShow()
+    ok, out = run(show, rows=["shop", "buttons"])
+    client = Rect(0, 0, 1920, 1080)
+    layout = HighlightLayout()
+    assert ok and show.markers == [
+        [Marker(slot_rect(layout, "shop", i, 7, client), "核") for i in (1, 4)]
+    ]
+    assert any('2 个示例"核"字徽章' in line for line in out)
+    show = FakeShow()
+    ok, out = run(show, rows=["hero"])
+    assert ok and show.markers == [[]]
+    assert not any("徽章" in line for line in out)

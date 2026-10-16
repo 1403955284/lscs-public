@@ -23,6 +23,7 @@ ARM, ARM_MIN, ARM_MAX = 0.22, 0.012, 0.03  # 括号的臂长：短边的 22%，�
 UNDER_WIDTH, UNDER_MIN = 0.005, 4  # 深色衬底的宽度（H 的比例、最少几像素）
 LINE_WIDTH, LINE_MIN = 0.0022, 2  # 颜色线的宽度
 BADGE_RADIUS, BADGE_MIN = 0.0095, 9  # 徽章半径
+MARKER_RADIUS = 0.009  # 核心卡"核"字徽章的半径上限（比步骤徽章小一点）
 BADGE_FONT = 1.2  # 徽章字号 = 半径 × 1.2
 CORNER = 0.015  # 细线框（style = "frame"）和校准框的圆角半径
 DIM = 0.45  # 呼吸时的暗色：高亮颜色往 DARK 混 45%
@@ -83,6 +84,15 @@ def badge_circle(rect: Rect, height: int) -> Circle:
     深色衬底隔开半个衬底宽。往右只伸出半个圆，不会压到右边挨着的按钮（刷新旁边就是冻结）。"""
     r = max(BADGE_MIN, round(BADGE_RADIUS * height))
     return Circle(rect.right, rect.y - r - stroke_widths(height).under, r)
+
+
+def marker_circle(rect: Rect, height: int) -> Circle:
+    """核心卡的"核"字徽章（流派指南自动更新设计文档第 5.4 节）：在框左上角的上方，离框的距离和
+    步骤徽章一样；半径取 min(BADGE_RADIUS, MARKER_RADIUS) × H（最少 BADGE_MIN 像素）。圆心在
+    框的左边往右一个半径（cx = rect.x + r），整个圆在这张牌的上方、不往左伸：相邻两张牌只隔
+    0.018 H，圆心正对左边时会和左边那张牌的步骤徽章（0.0095 H）叠在一起。"""
+    r = max(BADGE_MIN, round(min(BADGE_RADIUS, MARKER_RADIUS) * height))
+    return Circle(rect.x + r, rect.y - r - stroke_widths(height).under, r)
 
 
 def badge_font_px(circle: Circle) -> int:

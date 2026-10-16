@@ -13,7 +13,8 @@
 底部一行提示（notice）和警告。精简模式只有一个没有标签的块，每行前面一个粗体标签：
 
 - 招募："然后"（剩下的步骤，短写）、"目标"（AI 的一句话；没有 AI 时规则的"方向"）、"计划"
-  （整局计划：目标流派 · 阶段 · 核心卡，✓ 是已经有的；还没有计划时没有这一行）；
+  （整局计划：目标流派 · 阶段 · 核心卡，✓ 是已经有的；还没有计划时没有这一行）、"核心"（商店里的
+  核心卡，流派指南自动更新设计文档第 5.3 节；"下一步"在商店那一排时小圆点里核心卡的位置写 ◆）；
 - 站位（方案做完后"下一步"是站位的第一步）：理由的标签是"为何"；
 - 弹出选项："理由"、选项标题 + 按顺序的选项名（★ AI 推荐，▲ 本版本战绩最好的饰品）；
 - 选英雄："理由"、"护甲"或"名次"（★ 是"下一步"指的那个）；
@@ -22,7 +23,7 @@
 
 详细模式（[overlay] detail = true）的"下一步"在一个带底色的"现在"块里，下面分块，块标签写
 用途：本回合（剩下的每一步、站位、目标、整局计划、"计划提醒"、"规则另议"）、留意（要找和
-对子、下个对手和最强）、
+对子、"◆ 核心"、下个对手和最强）、
 选择（每个选项一行，右列本版本统计）、备选和点评（选英雄）、对手（战斗中所有对手）、复盘。
 
 面板太高时 condense 逐级去掉次要的行（界面从第 0 级试到最后一级）。
@@ -40,7 +41,15 @@ from dataclasses import dataclass, replace
 from typing import Literal
 
 from lscs.advisor.context import build_context
-from lscs.advisor.display import CIRCLED, describe_action, hero_comment_lines
+from lscs.advisor.core_cards import CORE, PLAN_WHY, CoreMarks
+from lscs.advisor.display import (
+    CIRCLED,
+    CORE_CHOICES,
+    core_count,
+    core_groups,
+    describe_action,
+    hero_comment_lines,
+)
 from lscs.advisor.models import (
     Action,
     Advice,
@@ -60,7 +69,7 @@ from lscs.advisor.opponents import (
     eliminated_names,
     summarize_opponents,
 )
-from lscs.advisor.plan_check import key_cards_text, off_plan_note
+from lscs.advisor.plan_check import key_cards_text, off_plan_note, plain_name
 from lscs.advisor.pool import PoolNote, note_for
 from lscs.advisor.positioning import where_text
 from lscs.advisor.runner import remaining_plan
@@ -130,6 +139,8 @@ BEST = "▲"  # 本版本战绩最好的饰品（不是推荐）
 THEN = "然后"
 GOAL = "目标"
 PLAN = "计划"  # 整局计划（整局计划与流派指南设计文档第 8.2 节）
+CORE_LABEL = "核心"  # 商店里的核心卡（流派指南自动更新设计文档第 5.3 节）
+CORE_COMPS = "流派核心"  # 商店里有几张不同的核心卡时写它，不写每张的流派（放不下）
 DIRECTION = "方向"
 REASON = "理由"
 WHY = "为何"
@@ -206,10 +217,13 @@ class OverlayView:
     warning: str | None = None
     version: int = 0
     banner: Banner | None = None  # 棋盘顶部的战斗结果：画面高亮窗口画，面板不画
+    # 商店里的核心卡：画面高亮在它们左上角画"核"字徽章（招募时；弹出选项、战斗、选英雄时为空）
+    core_targets: tuple[Target, ...] = ()
 
 
-def slots_text(row: Row, index: int, count: int) -> str:
-    dots = " ".join("●" if i == index else "○" for i in range(count))
+def slots_text(row: Row, index: int, count: int, core: frozenset[int] = frozenset()) -> str:
+    """ "商店 ○ ● ◆ ○"：● 是"下一步"的位置，◆ 是核心卡（两者重合时 ● 优先）。"""
+    dots = " ".join("●" if i == index else CORE if i in core else "○" for i in range(count))
     return f"{ROW_LABELS[row]} {dots}"
 
 
@@ -547,6 +561,7 @@ class OverlayModel:
         self._position: PositionAdvice | None = None  # 本回合最近一次站位建议
         self._stats_note: StatsNote | None = None  # 这组备选英雄或饰品的本版本统计
         self._game_plan: GamePlan | None = None  # 整局计划：换回合保留，新对局清空
+        self._core_marks: CoreMarks | None = None  # 商店里的核心卡（换回合清空）
 
     # ---- 界面线程 ----
 
@@ -698,6 +713,15 @@ class OverlayModel:
             self._stats_note = note
             self._commit()
 
+    # ---- 商店核心卡 ----
+
+    def show_core_cards(self, state: GameState, marks: CoreMarks | None) -> None:
+        """商店里的核心卡；只在 marks.shop 和现在的商店对得上时显示（刷新后、运行器还没算完的
+        半秒里不标错牌）。None：这批商店没有核心卡。"""
+        with self._lock:
+            self._core_marks = marks
+            self._commit()
+
     # ---- 选英雄 ----
 
     def show_hero(self, state: GameState, advice: HeroAdvice, agrees: bool = False) -> None:
@@ -733,6 +757,59 @@ class OverlayModel:
             self._choice_ai = None
             self._position = None
             self._stats_note = None
+            self._core_marks = None
+
+    def _core(self, state: GameState) -> CoreMarks | None:
+        """对得上现在这批商店的核心卡标记；没有、旧的时为 None。"""
+        marks = self._core_marks
+        if marks is None or marks.turn != state.turn:
+            return None
+        if marks.shop != tuple(item.entity_id for item in state.shop):
+            return None
+        return marks
+
+    def _core_names(self, state: GameState, choice: Choice) -> frozenset[str]:
+        """弹出三连 / 发现时算"核心"的卡名（选项名前标 ◆）；别的选项种类、没有标记时为空。"""
+        marks = self._core(state)
+        if marks is None or choice.kind not in CORE_CHOICES:
+            return frozenset()
+        return frozenset(marks.names)
+
+    def _core_line(self, state: GameState) -> Line | None:
+        """商店里的核心卡一行：精简模式标签"核心"，"下水道逃生鱼人 · 鱼人·下水道逃生鱼人"（有计划时
+        "飘荡祭品 ×2 · 计划"，几张不同的卡时"甲 ×2、乙 · 流派核心"）；详细模式写在"留意"里：
+        "◆ 核心 下水道逃生鱼人（鱼人·……、鱼人·……）"。商店里没有核心卡时 None。"""
+        marks = self._core(state)
+        groups = core_groups(marks) if marks is not None else []
+        if marks is None or not groups:
+            return None
+        if self._detail:
+            parts = "；".join(f"{core_count(card, n)}（{why}）" for card, n, why in groups)
+            return Line(f"{CORE} {CORE_LABEL} {parts}", "dim", "aside", max_lines=ASIDE_LINES)
+        if marks.source == "plan":
+            why = PLAN_WHY
+        elif len(groups) == 1:
+            why = groups[0][2].split("、", 1)[0]
+        else:
+            why = CORE_COMPS
+        cards = "、".join(core_count(card, n) for card, n, _ in groups)
+        return Line(f"{cards}{NAME_SEP}{why}", "dim", "aside", label=CORE_LABEL, max_lines=1)
+
+    def _core_targets(self, state: GameState) -> tuple[Target, ...]:
+        marks = self._core(state)
+        if marks is None:
+            return ()
+        count = len(state.shop)
+        return tuple(Target(row="shop", index=m.index, count=count) for m in marks.marks)
+
+    def _with_core_dots(self, step: NextStep, state: GameState) -> NextStep:
+        """ "下一步"在商店那一排时，小圆点里核心卡的位置写 ◆。"""
+        target = step.target
+        marks = self._core(state)
+        if target is None or target.row != "shop" or marks is None or not marks.marks:
+            return step
+        core = frozenset(m.index for m in marks.marks)
+        return replace(step, slots=slots_text("shop", target.index, target.count, core))
 
     def _remaining(self, entry: _PlanEntry, state: GameState) -> Plan:
         if state is entry.base or state.turn != entry.base.turn:
@@ -907,6 +984,9 @@ class OverlayModel:
                 parts.append(pairs)
             if parts:
                 lines.append(Line(NAME_SEP.join(parts), "dim", "aside", max_lines=ASIDE_LINES))
+            core = self._core_line(state)
+            if core is not None:
+                lines.append(core)
         opponents = self._opponents_line(state)
         if opponents is not None:
             lines.append(opponents)
@@ -939,10 +1019,15 @@ class OverlayModel:
         note = self._trinket_note(choice)
         best = note.best if note is not None else None
         title = choice_title(choice, self._name)
+        core = self._core_names(state, choice)
 
         def marks(option) -> str:
-            return (STAR if option.index == star else "") + (
-                BEST if option.entity_id == best else ""
+            star_mark = STAR if option.index == star else ""
+            is_core = (
+                option.card_type == "MINION" and plain_name(self._name(option.card_id)) in core
+            )
+            return (
+                star_mark + (CORE if is_core else "") + (BEST if option.entity_id == best else "")
             )
 
         if self._detail:
@@ -1173,6 +1258,7 @@ class OverlayModel:
 
     def _recruit_view(self, state: GameState) -> OverlayView:
         r = self._recruit(state)
+        r = replace(r, step=self._with_core_dots(r.step, state))
         source, source_note = self._recruit_source(r)
         if self._detail:
             plan = Block("plan", self._plan_lines(state, r), label=THIS_TURN)
@@ -1188,9 +1274,12 @@ class OverlayModel:
             plan_line = self._plan_line(state)
             if plan_line is not None:
                 lines.append(plan_line)
+            core_line = self._core_line(state)
+            if core_line is not None:
+                lines.append(core_line)
             blocks = _single_block(lines)
         showing_ai = r.entry is not None and r.source != "rules"
-        return self._view(
+        view = self._view(
             _recruit_title(state),
             state,
             r.step,
@@ -1199,6 +1288,7 @@ class OverlayModel:
             source_note,
             self._notice(self._ai, showing_ai),
         )
+        return replace(view, core_targets=self._core_targets(state))
 
     def _plan_lines(self, state: GameState, r: _Recruit) -> tuple[Line, ...]:
         """详细模式的"本回合"：显示的方案剩下的每一步（完整写法，"下一步"那一步是正文色，
@@ -1389,7 +1479,8 @@ class OverlayModel:
                 if note is None:
                     number = str(h.armor) if h.armor > 0 else "未知"
                 elif h.entity_id in rows:
-                    number = f"{rows[h.entity_id].score:.2f}"
+                    row = rows[h.entity_id]
+                    number = f"{row.score:.2f}" + (f" {row.fit_short}" if row.fit else "")
                 else:
                     number = armor_zh(h.armor)  # 查不到统计的写护甲
                 heroes.append(f"{STAR if i == pick else ''}{self._name(h.card_id)} {number}")
@@ -1421,7 +1512,10 @@ class OverlayModel:
         lines = []
         for i, h in enumerate(select.offered):
             name = self._name(h.card_id)
-            right = rows[h.entity_id].text if h.entity_id in rows else armor_zh(h.armor)
+            row = rows.get(h.entity_id)
+            right = armor_zh(h.armor) if row is None else row.text
+            if row is not None and row.fit:
+                right += f"{NAME_SEP}{row.fit_short}"  # "第 4.04 名 · 选 27% · 第 59/116 · 配野兽"
             tone = "text" if i == pick else "dim"
             lines.append(Line(f"{STAR} {name}" if i == pick else name, tone, "stats", right=right))
         other = next((h for h in select.offered if h.entity_id == rules_pick), None)

@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 import math
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 from lscs.advisor.models import (
     ACTION_TYPES,
@@ -47,6 +47,7 @@ PLAN_PLACEHOLDERS: dict[str, object] = {
     "changed": "改了计划才写一句原因，没改留空",
 }
 PLACEHOLDER_COMP = "目标流派"  # 占位说明去掉括号后剩下的
+Canonical = Callable[[str], str | None]  # 流派名 → 流派指南的标题；对不上时 None
 PLACEHOLDER_CARD = "核心卡名"
 # 流派名末尾的括号（"畸变怪养神流（亡语/弃牌）""畸变神明（畸变）"）：截断前去掉，免得只剩半个括号
 _TRAILING_NOTE = re.compile(r"\s*[（(][^（）()]*[）)]\s*$")
@@ -125,15 +126,22 @@ def _card_name(raw: object) -> str:
     return _cut(plain_name(_one_line(raw, 10_000)), LOOK_FOR_CHARS)
 
 
-def _comp_name(raw: object) -> str:
-    """目标流派：去掉末尾的括号说明（一层层去，去光了就保留原样），再截到 PLAN_COMP_CHARS。"""
+def _comp_name(raw: object, canonical: Canonical | None = None) -> str:
+    """目标流派：去掉末尾的括号说明（一层层去，去光了就保留原样），再截到 PLAN_COMP_CHARS。
+    canonical（流派名对到流派指南的标题）在截断之前用：HSReplay 的英文名比 PLAN_COMP_CHARS 长，
+    截断后就对不上别名了（流派指南自动更新设计文档第 3.3 节）；占位说明和"未定"不对。"""
     name = _one_line(raw, 10_000)
     while True:
         shorter = _TRAILING_NOTE.sub("", name)
         if shorter == name or not shorter:
             break
         name = shorter
-    return _cut(name, PLAN_COMP_CHARS)
+    cut = _cut(name, PLAN_COMP_CHARS)
+    if canonical is not None and cut not in ("", PLACEHOLDER_COMP, UNDECIDED):
+        found = canonical(name)
+        if found:
+            return _cut(found, PLAN_COMP_CHARS)
+    return cut
 
 
 def _key_cards(raw: object) -> tuple[str, ...]:
@@ -158,11 +166,11 @@ def _plan_tribe(raw: object) -> str | None:
     return _ZH_TRIBES.get(text)
 
 
-def _game_plan(raw: object) -> GamePlan | None:
+def _game_plan(raw: object, canonical: Canonical | None = None) -> GamePlan | None:
     """回答里的 plan：不是对象、没有 comp 时为 None（不算错，不触发改正）。"""
     if not isinstance(raw, dict):
         return None
-    comp = _comp_name(raw.get("comp"))
+    comp = _comp_name(raw.get("comp"), canonical)
     if not comp:
         return None
     if comp == PLACEHOLDER_COMP:
@@ -185,7 +193,9 @@ def _game_plan(raw: object) -> GamePlan | None:
     )
 
 
-def parse_plan(text: str) -> Plan:
+def parse_plan(text: str, canonical: Canonical | None = None) -> Plan:
+    """canonical：把 AI 写的流派名对到流派指南的标题（llm.comps.match_comp），对不上时返回 None；
+    在截断到 PLAN_COMP_CHARS 之前用。"""
     data = _json_object(text)
     raw_actions = data.get("actions")
     if not isinstance(raw_actions, list):
@@ -215,7 +225,7 @@ def parse_plan(text: str) -> Plan:
         confidence=_confidence(data.get("confidence")),
         analysis=_text(data.get("analysis")),
         look_for=_look_for(data.get("look_for")),
-        game_plan=_game_plan(data.get("plan")),
+        game_plan=_game_plan(data.get("plan"), canonical),
     )
 
 

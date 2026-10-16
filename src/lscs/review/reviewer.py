@@ -24,6 +24,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 
+from lscs.advisor.core_cards import CoreMarks
 from lscs.advisor.display import AdviceSink
 from lscs.advisor.models import (
     Advice,
@@ -150,6 +151,9 @@ class AdviceCollector:
 
     def show_stats(self, state: GameState, note: StatsNote) -> None:
         pass  # 复盘不用本版本统计（本版本统计设计文档第 13 节）
+
+    def show_core_cards(self, state: GameState, marks: CoreMarks | None) -> None:
+        pass  # 复盘不用核心卡标记（流派指南自动更新设计文档第 9 节）
 
 
 @dataclass(frozen=True)

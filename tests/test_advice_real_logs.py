@@ -162,6 +162,14 @@ def test_user_game_hero_and_trinket_stats():
         (91, "第 3.91 名 · 选 29% · 第 4/10"),  # 洛，在世传奇
     ]
     assert [(a.pick, a.basis) for a in tap.heroes] == [(89, "stats")]  # 和用户实际选的一样
+    # 选英雄配种族（流派指南自动更新设计文档第 2.3、6.1 节）：只有杰弗里斯配野兽（-0.15）；
+    # 凯瑞尔最大 -0.07、泰瑟兰 -0.10、洛 -0.09 都不写，规则推荐不变
+    assert [(r.entity_id, r.fit) for r in hero.rows] == [
+        (92, "配野兽更好"),
+        (89, ""),
+        (90, ""),
+        (91, ""),
+    ]
     # 第 6 回合：用户选了战绩最好的精神鞭笞者肖像
     assert (early.kind, early.choice_id, early.best) == ("trinket", 6, 3026)
     assert [(r.entity_id, r.text) for r in early.rows] == [

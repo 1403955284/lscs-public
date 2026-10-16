@@ -822,7 +822,8 @@ def test_show_stats_for_heroes_sorted_best_first():
         "          ▲ 凯瑞尔·罗姆 第 3.67 名 · 选 28% · 第 2/10",
         "            洛，在世传奇 第 3.91 名 · 选 29% · 第 4/10",
         "            泰瑟兰·血望者 第 3.99 名 · 选 15% · 第 5/10",
-        "            了不起的杰弗里斯 第 4.04 名 · 选 27% · 第 7/10",
+        # 有野兽时比没有时好 0.15、两边样本都够：行末写"配野兽更好"（流派指南自动更新设计文档 6.2）
+        "            了不起的杰弗里斯 第 4.04 名 · 选 27% · 第 7/10 · 配野兽更好",
     ]
 
 
@@ -1026,3 +1027,101 @@ def test_choosing_a_comp_after_undecided_reads_like_a_new_plan():
 def test_rewording_alone_is_not_a_changed_plan_in_the_terminal():
     reworded = plan_of(key_cards=("飘荡祭品", "残忍的精神鞭笞者", "蚀脑怪"), stage="成型")
     assert plan_output(reworded, GAME_PLAN) == ["  🗺 阶段：成型（原来 过渡）"]
+
+
+# ---- 商店核心卡（流派指南自动更新设计文档第 5.2 节） ----
+
+
+def core(*marks, names=(), whys=(), turn=9, shop=(1, 2, 3, 4), source="guides"):
+    from lscs.advisor.core_cards import CoreMark, CoreMarks
+
+    found = tuple(CoreMark(entity_id=e, index=i, name=n, why=w) for e, i, n, w in marks)
+    names = names or tuple(dict.fromkeys(m.name for m in found))
+    whys = whys or tuple(next(m.why for m in found if m.name == n) for n in names)
+    return CoreMarks(turn=turn, shop=shop, marks=found, names=names, whys=whys, source=source)
+
+
+def test_core_line_for_a_plan_one_comp_and_several_cards():
+    out = []
+    display = AdviceDisplay(name, out.append)
+    plan = core((2, 1, "飘荡祭品", "计划"), (4, 3, "飘荡祭品", "计划"), source="plan")
+    display.show_core_cards(STATE, plan)
+    one = core((3, 2, "下水道逃生鱼人", "鱼人·下水道逃生鱼人、鱼人·怒胆喷毒鱼人"), turn=10)
+    display.show_core_cards(STATE, one)
+    several = core(
+        (1, 0, "灰烬腐蚀者", "恶魔·灰烬腐蚀者"),
+        (2, 1, "梦魇侵蚀怪", "畸变·梦魇侵蚀怪"),
+        (3, 2, "灰烬腐蚀者", "恶魔·灰烬腐蚀者"),
+        (4, 3, "青铜时光行者", "龙·赤红守备巨龙"),
+        turn=11,
+    )
+    display.show_core_cards(STATE, several)
+    assert out == [
+        "  ◆ 核心卡：飘荡祭品 ×2（计划）",
+        "  ◆ 核心卡：下水道逃生鱼人（鱼人·下水道逃生鱼人、鱼人·怒胆喷毒鱼人）",
+        "  ◆ 核心卡：灰烬腐蚀者 ×2（恶魔·灰烬腐蚀者）；梦魇侵蚀怪（畸变·梦魇侵蚀怪）；"
+        "青铜时光行者（龙·赤红守备巨龙）",
+    ]
+
+
+def test_core_line_once_per_turn_and_marks_and_none_or_empty_prints_nothing():
+    out = []
+    display = AdviceDisplay(name, out.append)
+    marks = core((3, 2, "下水道逃生鱼人", "鱼人·一号"))
+    display.show_core_cards(STATE, marks)
+    display.show_core_cards(STATE, marks.model_copy(update={"shop": (1, 2, 3, 9)}))  # 买了别的
+    display.show_core_cards(STATE, None)
+    display.show_core_cards(STATE, core(names=("甲",), whys=("计划",)))  # 商店里一张都没有
+    assert out == ["  ◆ 核心卡：下水道逃生鱼人（鱼人·一号）"]
+    display.show_core_cards(STATE, marks.model_copy(update={"turn": 10}))  # 冻结到下回合
+    assert len(out) == 2
+
+
+def test_core_options_of_a_triple_but_not_of_trinkets():
+    from factory import choice_option, choice_state, make_choice
+
+    names = {"BG36_318": "无面转化者", "BG36_115": "梦魇侵蚀怪", "X": "疑之影"}
+    out = []
+    display = AdviceDisplay(lambda c: names.get(c, c), out.append)
+    options = [
+        choice_option(31, "BG36_318", 0, 5, 5, tier=5),
+        choice_option(32, "X", 1, 4, 4, tier=5),
+        choice_option(33, "BG36_115", 2, 3, 3, tier=4),
+    ]
+    triple = choice_state(make_choice(options, choice_id=40, kind="triple"))
+    marks = core(names=("无面转化者", "蚀脑怪"), whys=("计划", "计划"), source="plan")
+    display.show_core_cards(triple, marks)
+    display.show_core_cards(triple, marks)  # 同一组只打一次
+    assert out == ["  ◆ 选项里有核心卡：无面转化者（计划）"]
+    trinkets = choice_state(make_choice(options, choice_id=41, kind="trinket"))
+    display.show_core_cards(trinkets, marks)
+    assert len(out) == 1
+
+
+def test_display_group_forwards_core_cards_and_the_review_tap_ignores_them():
+    from lscs.review.reviewer import AdviceCollector
+
+    first, last = Recorder(), Recorder()
+    marks = core((3, 2, "下水道逃生鱼人", "鱼人·一号"))
+    collector = AdviceCollector()
+    DisplayGroup(first, Broken(), collector, last).show_core_cards(STATE, marks)
+    DisplayGroup(first).show_core_cards(STATE, None)
+    assert first.calls == [("show_core_cards", (STATE, marks)), ("show_core_cards", (STATE, None))]
+    assert last.calls == [("show_core_cards", (STATE, marks))]
+    assert collector.logs == {}
+
+
+@NEEDS_STATS_FIXTURES
+def test_stat_rows_carry_the_tribe_fit():
+    from helpers import fixture_stats
+
+    from lscs.advisor.models import StatRow
+    from lscs.advisor.stats_note import fit_text
+
+    stats = fixture_stats()
+    assert fit_text(stats.hero("TB_BaconShop_HERO_91")) == "配野兽更好"
+    assert fit_text(stats.hero("TB_BaconShop_HERO_55")) == "配元素、野猪人更好"
+    assert fit_text(stats.hero("BG21_HERO_000")) == ""
+    row = StatRow(entity_id=1, text="第 4.04 名", score=4.04, fit="配元素、野猪人更好")
+    assert row.fit_short == "配元素、野猪人"
+    assert StatRow(entity_id=1, text="t", score=4.0).fit_short == ""

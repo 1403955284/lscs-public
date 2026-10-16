@@ -1,4 +1,8 @@
-"""把规则建议（以及 AI 建议）接到 Pipeline 的状态更新上。"""
+"""把规则建议（以及 AI 建议）接到 Pipeline 的状态更新上。
+
+商店核心卡（流派指南自动更新设计文档第 5.1 节）：招募时每次状态更新、整局计划变了、弹出三连 / 发现
+时算一次（advisor.core_cards），和上次交给显示端的不一样才交（show_core_cards）。流派指南由一个函数
+给出（comps.md 或后台准备好的 HSReplay 指南），和调度器一样一局里第一次取到之后整局复用。"""
 
 from __future__ import annotations
 
@@ -8,7 +12,8 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from lscs.advisor.context import MINION, TurnContext, build_context, hero_power_used
-from lscs.advisor.display import AdviceSink
+from lscs.advisor.core_cards import CoreMarks, core_marks
+from lscs.advisor.display import CORE_CHOICES, AdviceSink
 from lscs.advisor.hero_rules import rule_hero_pick
 from lscs.advisor.models import (
     Action,
@@ -33,6 +38,7 @@ from lscs.state.models import ChoiceKind, Event, EventType, GameState, Phase
 
 if TYPE_CHECKING:
     from lscs.cards.db import CardDB
+    from lscs.llm.comps import CompsFile
     from lscs.llm.scheduler import AIResult, LLMScheduler
     from lscs.stats.model import MetaStats
 
@@ -102,13 +108,20 @@ class AdviceRunner:
         cards: CardDB | None = None,
         positioning: bool = True,
         stats: Callable[[], MetaStats | None] | None = None,
+        comps: Callable[[], CompsFile | None] | None = None,
     ) -> None:
         """pool：查过卡牌库的卡池估计；没有卡牌数据时为 None，"还剩约 N 张"都不显示。
         cards：卡牌数据，站位建议要看卡牌说明（亡语、进击、复仇、劈砍）；为 None 时不提示站位。
         positioning：config.toml 的 [positioning] enabled。
-        stats：取本版本统计（StatsStore.get，还没准备好时返回 None）；统计关闭时为 None。"""
+        stats：取本版本统计（StatsStore.get，还没准备好时返回 None）；统计关闭时为 None。
+        comps：取流派指南（cli._comps_source；商店核心卡标记用）；和调度器一样一局里第一次取到
+        之后整局复用；没有时为 None。"""
         self._rules = rules
         self._stats = stats
+        self._comps = comps
+        self._game_comps: CompsFile | None = None  # 本局第一次取到的流派指南
+        self._last_core: CoreMarks | None = None  # 最近一次交给显示端的商店核心卡
+        self._core_failed = False  # 计算核心卡出过错（完整堆栈只记一次）
         self._name = name
         self._display = display
         self._scheduler = scheduler
@@ -134,6 +147,8 @@ class AdviceRunner:
             self._position_intro = False
             self.last_hero = None
             self.off_plan = 0
+            self._game_comps = None
+            self._last_core = None
             if self._scheduler is not None:
                 self._scheduler.reset_game()
         if state.phase == Phase.HERO_SELECT and EventType.HEROES_OFFERED in types:
@@ -230,10 +245,29 @@ class AdviceRunner:
                 )
                 self.last_rules = advice
                 self._display.show_rules(state, advice)
+        self._show_core_cards(state)
         if self._scheduler is not None:
             self._scheduler.observe(state, events, ctx)
         settled = bought_everything(ctx, plans)
         self._display.show_position(state, self._position(state) if settled else None)
+
+    def _show_core_cards(self, state: GameState, choice: bool = False) -> None:
+        """商店核心卡（流派指南自动更新设计文档第 5.1 节）：商店、计划、本局种族变了，算出来的
+        和上次交给显示端的不一样时才交（None：换了一批商店又没有核心卡，清掉上一批的）；弹出选项
+        时（choice）有核心卡就再交一次，选项标记用。出错只记日志。"""
+        try:
+            marks = core_marks(state, self._game_plan(), self._comps_for_game(), self._name)
+        except Exception:
+            if self._core_failed:
+                log.debug("计算商店核心卡时又出错", exc_info=True)
+            else:
+                self._core_failed = True
+                log.warning("计算商店核心卡时出错", exc_info=True)
+            return
+        if marks == self._last_core and not (choice and marks is not None):
+            return
+        self._last_core = marks
+        self._display.show_core_cards(state, marks)
 
     def _position(self, state: GameState) -> PositionAdvice | None:
         """买完牌后的站位建议（规则，不等 AI）；没有卡牌数据、功能关闭、少于 2 个随从时为 None。
@@ -271,8 +305,19 @@ class AdviceRunner:
                 if stats is not None:
                     self._show_stats(state, lambda: trinket_note(choice, stats))
             self._display.show_choice(state, None)
+            if choice.kind in CORE_CHOICES:  # 三连、发现：选项名前标核心卡
+                self._show_core_cards(state, choice=True)
         if self._scheduler is not None:
             self._scheduler.observe_choice(state, events)
+
+    def _comps_for_game(self) -> CompsFile | None:
+        """本局的流派指南：还没有时每次都再取，第一次取到之后整局复用；出错只记日志。"""
+        if self._game_comps is None and self._comps is not None:
+            try:
+                self._game_comps = self._comps()
+            except Exception:
+                log.warning("取流派指南时出错", exc_info=True)
+        return self._game_comps
 
     def _current_stats(self) -> MetaStats | None:
         """本版本统计：关闭、还没准备好、取的时候出错都是 None（出错只记日志）。"""
@@ -340,6 +385,8 @@ class AdviceRunner:
                     self._show_result(event)
                 elif isinstance(event, PlanUpdated) and self._state is not None:
                     self._display.show_plan(self._state, event.plan, event.previous)
+                    if self._state.phase == Phase.RECRUIT and self._state.main_action:
+                        self._show_core_cards(self._state)  # 计划的核心卡变了
         except Exception:
             # 这里在 watch 主循环里运行，出错只记日志，不能让 watch 退出
             log.warning("处理 AI 结果时出错", exc_info=True)

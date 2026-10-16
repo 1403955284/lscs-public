@@ -1756,3 +1756,191 @@ def test_replay_with_ai_sends_the_stats_to_the_hero_lane(monkeypatch, tmp_path, 
     record = next((tmp_path / "recordings").glob("llm-*.jsonl")).read_text(encoding="utf-8")
     hero = json.loads(record.splitlines()[0])
     assert hero["lane"] == "hero" and "本版本：第 4.08 名，被选率 10%" in hero["user"]
+
+
+# ---- 流派指南自动更新（流派指南自动更新设计文档第 3.6、3.7 节） ----
+
+
+class FakeGuidesStore:
+    """代替 GuidesStore：只记下怎么创建、怎么开始的，不下载。"""
+
+    def __init__(self, made, value=None):
+        self.made, self.value, self.started = made, value, []
+
+    def __call__(self, cfg, cache_dir, cards, manual, **kwargs):
+        self.made.append((cfg, cache_dir, cards, manual))
+        return self
+
+    def start(self, sync=False):
+        self.started.append(sync)
+
+    def comps(self):
+        return self.value
+
+
+def _guides_on(monkeypatch, tmp_path, text="[guides]\nenabled = true\n", value=None):
+    import lscs.cli
+
+    config = tmp_path / "config.toml"
+    config.write_text(text, encoding="utf-8")
+    monkeypatch.setattr(lscs.cli, "DEFAULT_CONFIG", config)
+    store = FakeGuidesStore([], value)
+    monkeypatch.setattr(lscs.cli, "GuidesStore", store)
+    return store
+
+
+def _live_comps():
+    from lscs.llm.comps import CompGuide, CompsFile
+
+    pirates = CompGuide("海盗·上进的逃兵", frozenset({"PIRATE"}), "- 强度：第 2 梯队第 4 位")
+    return CompsFile("本赛季流派指南（数据来自 HSReplay，测试）", (pirates,), max_chars=9000)
+
+
+def test_guides_are_off_by_default(monkeypatch, capsys):
+    from helpers import MINI_LOG
+
+    import lscs.cli
+
+    def refuse(*_args, **_kwargs):
+        raise AssertionError("默认关闭时不该创建")
+
+    monkeypatch.setattr(lscs.cli, "GuidesStore", refuse)
+    made = _spy_runner(monkeypatch)
+    _mini_cards(monkeypatch)
+    assert main(["replay", str(MINI_LOG), "--advice", "--names"]) == 0
+    out = capsys.readouterr().out
+    assert "流派指南" not in out  # 没有 AI 时也不打 comps.md 那一行（和以前一样）
+    assert made[-1]["comps"]() is not None  # 运行器照样拿到 comps.md（商店核心卡标记用）
+    assert made[-1]["comps"]().title.startswith("第 14 赛季流派指南")
+
+
+def test_replay_prepares_guides_synchronously_and_passes_them_on(monkeypatch, tmp_path, capsys):
+    from helpers import MINI_LOG
+
+    import lscs.cli
+
+    store = _guides_on(monkeypatch, tmp_path)
+    made = _spy_runner(monkeypatch)
+    cards = _mini_cards(monkeypatch)
+    assert main(["replay", str(MINI_LOG), "--advice", "--names"]) == 0
+    out = capsys.readouterr().out
+    assert (
+        "流派指南：HSReplay 自动更新开启（数据来自 HSReplay，本补丁从 2026-10-01 起），正在准备…"
+    ) in out
+    assert store.started == [True]
+    cfg, cache_dir, got_cards, manual = store.made[0]
+    assert cfg.enabled and cards is got_cards
+    assert cache_dir == lscs.cli.GUIDES_CACHE_DIR  # 测试里是临时目录
+    assert manual is not None and manual.title.startswith("第 14 赛季流派指南")
+    assert made[-1]["comps"] == store.comps
+
+
+def test_watch_prepares_guides_in_the_background_before_the_stats(monkeypatch, tmp_path, capsys):
+    import lscs.cli
+
+    store = _guides_on(monkeypatch, tmp_path, "[guides]\nenabled = true\n[stats]\nenabled = true\n")
+    stats = FakeStatsStore([])
+    monkeypatch.setattr(lscs.cli, "StatsStore", stats)
+    made = _spy_runner(monkeypatch)
+    _mini_cards(monkeypatch)
+    install = tmp_path / "hs"
+    (install / "Logs").mkdir(parents=True)
+    monkeypatch.setattr(lscs.cli, "_install_dir", lambda args: install)
+    monkeypatch.setattr(lscs.cli, "watch", lambda *args, **kwargs: None)
+    assert main(["watch", "--no-ai", "--no-overlay"]) == 0
+    out = capsys.readouterr().out
+    assert out.index("流派指南：HSReplay 自动更新开启") < out.index("版本统计：开启")
+    assert "正在后台准备…" in out
+    assert store.started == [False]
+    assert made[-1]["comps"] == store.comps  # --no-ai 时运行器也拿到（商店核心卡标记用）
+
+
+def test_review_prepares_guides_synchronously(monkeypatch, tmp_path, capsys):
+    from helpers import MINI_LOG
+
+    store = _guides_on(monkeypatch, tmp_path)
+    made = _spy_runner(monkeypatch)
+    _mini_cards(monkeypatch)
+    assert main(["review", str(MINI_LOG)]) == 0
+    assert store.started == [True] and made[-1]["comps"] == store.comps
+    assert "流派指南：HSReplay 自动更新开启" in capsys.readouterr().out
+
+
+def test_guides_need_card_data(monkeypatch, tmp_path, capsys):
+    from helpers import MINI_LOG
+
+    store = _guides_on(monkeypatch, tmp_path)
+    made = _spy_runner(monkeypatch)
+    assert main(["replay", str(MINI_LOG), "--advice"]) == 0  # 没有 --names：不加载卡牌数据
+    out = capsys.readouterr().out
+    assert "流派指南：没有卡牌数据，HSReplay 指南用不了，这次用 comps.md" in out
+    assert store.made == [] and made[-1]["comps"]().title.startswith("第 14 赛季")
+
+
+def test_broken_guides_config_is_reported_and_advice_goes_on(monkeypatch, tmp_path, capsys):
+    from helpers import MINI_LOG
+
+    store = _guides_on(monkeypatch, tmp_path, '[guides]\npatch_date = "10/01"\n')
+    _mini_cards(monkeypatch)
+    assert main(["replay", str(MINI_LOG), "--advice", "--names"]) == 0
+    out = capsys.readouterr().out
+    assert "guides.patch_date" in out and "（这次用 comps.md）" in out
+    assert "  📋 规则：" in out and store.made == []
+
+
+def test_replay_with_ai_sends_the_hsreplay_comps_to_the_plan_lane(monkeypatch, tmp_path, capsys):
+    from helpers import MINI_LOG
+
+    import lscs.cli
+    import lscs.llm.provider
+    from lscs.llm.provider import FakeProvider
+
+    _ai_cli_setup(
+        monkeypatch, tmp_path, [], extra="deep_analysis = false\n[guides]\nenabled = true\n"
+    )
+    fake = FakeProvider([MINI_HERO])
+    monkeypatch.setattr(lscs.llm.provider, "OpenAICompatProvider", lambda cfg: fake)
+    store = FakeGuidesStore([], _live_comps())
+    monkeypatch.setattr(lscs.cli, "GuidesStore", store)
+    assert main(["replay", str(MINI_LOG), "--ai"]) == 0
+    out = capsys.readouterr().out
+    # 测试里没有 comps.md：写清楚是 HSReplay 的指南不够或下载失败时才只有通用攻略
+    no_manual = (
+        "流派指南：没有 strategy/current/comps.md，HSReplay 的指南不够或下载失败时 AI 只有通用攻略"
+    )
+    assert out.index("流派指南：HSReplay 自动更新开启") < out.index(no_manual)
+    recruit = fake.calls[1].user  # 第 0 次是选英雄
+    assert "## 海盗·上进的逃兵" in recruit and "数据来自 HSReplay，测试" in recruit
+
+
+def test_with_guides_on_the_comps_md_line_is_not_repeated(monkeypatch, tmp_path, capsys):
+    """打开 HSReplay 流派指南时，AI 那几行里不再写"流派指南：第 14 赛季……，N 个流派"（HSReplay 的
+    行已经说了 comps.md 只作备用）；关着时和以前一样。"""
+    import shutil
+
+    from helpers import FIXTURES, MINI_LOG
+
+    import lscs.cli
+    import lscs.llm.provider
+    from lscs.llm.provider import FakeProvider
+
+    comps_md = tmp_path / "comps.md"
+    shutil.copy(FIXTURES / "comps_sample.md", comps_md)
+    sample_line = "流派指南：第 14 赛季流派指南（测试样例，不是真实资料），4 个流派"
+    for guides, shown in (("true", False), ("false", True)):
+        _ai_cli_setup(
+            monkeypatch,
+            tmp_path,
+            [],
+            extra=f"deep_analysis = false\n[guides]\nenabled = {guides}\n",
+        )
+        monkeypatch.setattr(lscs.cli, "DEFAULT_COMPS", comps_md)
+        monkeypatch.setattr(
+            lscs.llm.provider, "OpenAICompatProvider", lambda cfg: FakeProvider([MINI_HERO])
+        )
+        store = FakeGuidesStore([], _live_comps())
+        monkeypatch.setattr(lscs.cli, "GuidesStore", store)
+        assert main(["replay", str(MINI_LOG), "--ai"]) == 0
+        out = capsys.readouterr().out
+        assert (sample_line in out) is shown, guides
+        assert ("流派指南：HSReplay 自动更新开启" in out) is not shown

@@ -6,6 +6,7 @@ import logging
 from collections.abc import Callable, Sequence
 from typing import Protocol
 
+from lscs.advisor.core_cards import CORE, CoreMarks
 from lscs.advisor.models import (
     Action,
     Advice,
@@ -25,11 +26,11 @@ from lscs.advisor.opponents import (
     contested_parts,
     eliminated_names,
 )
-from lscs.advisor.plan_check import comp_with_tribe, key_cards_text
+from lscs.advisor.plan_check import comp_with_tribe, key_cards_text, plain_name
 from lscs.advisor.pool import PoolNote, note_for
 from lscs.advisor.positioning import INTRO, step_texts
 from lscs.review.report import GameReview, ai_terminal_lines, terminal_lines
-from lscs.state.models import GameState
+from lscs.state.models import ChoiceKind, GameState
 
 log = logging.getLogger(__name__)
 
@@ -306,6 +307,46 @@ def opponent_line(summary: OpponentSummary, state: GameState, name: Namer) -> st
     return " · ".join(parts)
 
 
+# 弹出时标核心卡的选项（饰品、黑暗之赐、技能升级不标：不是随从，或随从本身不是选择的重点）
+CORE_CHOICES = frozenset({ChoiceKind.TRIPLE, ChoiceKind.DISCOVER})
+
+
+def core_groups(marks: CoreMarks) -> list[tuple[str, int, str]]:
+    """商店里的核心卡按卡名合并：(卡名, 张数, why)，按第一次出现的位置。"""
+    counts: dict[str, int] = {}
+    whys: dict[str, str] = {}
+    for mark in marks.marks:
+        counts[mark.name] = counts.get(mark.name, 0) + 1
+        whys.setdefault(mark.name, mark.why)
+    return [(card, count, whys[card]) for card, count in counts.items()]
+
+
+def core_count(card: str, count: int) -> str:
+    return f"{card} ×{count}" if count > 1 else card
+
+
+def core_line(marks: CoreMarks) -> str | None:
+    """终端的一行"◆ 核心卡：飘荡祭品 ×2（计划）"，几张不同的卡用"；"连；商店里没有时 None。"""
+    groups = core_groups(marks)
+    if not groups:
+        return None
+    return f"{CORE} 核心卡：" + "；".join(f"{core_count(n, c)}（{why}）" for n, c, why in groups)
+
+
+def core_options(state: GameState, marks: CoreMarks, name: Namer) -> list[str]:
+    """弹出的三连 / 发现里是核心卡的随从选项的卡名（按选项顺序）；别的选项种类没有。"""
+    choice = state.choice
+    if choice is None or choice.kind not in CORE_CHOICES:
+        return []
+    names = set(marks.names)
+    found = []
+    for option in choice.options:
+        card = plain_name(name(option.card_id))
+        if option.card_type == "MINION" and card in names and card not in found:
+            found.append(card)
+    return found
+
+
 def opponents_header(overview: OpponentOverview) -> str:
     parts = contested_parts(overview)
     if overview.unknown:
@@ -332,6 +373,7 @@ class AdviceSink(Protocol):
     def show_review(self, state: GameState, review: GameReview) -> None: ...
     def show_position(self, state: GameState, advice: PositionAdvice | None) -> None: ...
     def show_stats(self, state: GameState, note: StatsNote) -> None: ...
+    def show_core_cards(self, state: GameState, marks: CoreMarks | None) -> None: ...
 
 
 def stats_labels(state: GameState, note: StatsNote, name: Namer) -> dict[int, str]:
@@ -353,6 +395,8 @@ class AdviceDisplay:
         self._last_rules: tuple | None = None
         # 最近一次打印过的站位：(回合, 场上的实体集合, 每一步的 (实体, 槽位))
         self._last_position: tuple[int, frozenset[int], tuple] | None = None
+        self._last_core: tuple | None = None  # 最近一次打印过的商店核心卡：(回合, 标记)
+        self._last_core_choice: int | None = None  # 打印过"选项里有核心卡"的那组选项
 
     def _block(self, label: str, lines: list[str]) -> None:
         self._out(f"  {label}{lines[0]}")
@@ -477,7 +521,7 @@ class AdviceDisplay:
 
     def show_stats(self, state: GameState, note: StatsNote) -> None:
         """本版本统计（本版本统计设计文档第 6.3、7.1 节）：署名一行，下面每个条目一行，按平均
-        名次从好到差，战绩最好的前面 ▲（只是战绩，不是推荐）。"""
+        名次从好到差，战绩最好的前面 ▲（只是战绩，不是推荐）；英雄配某族更好时行末写出来。"""
         what = "本版本战绩" if note.kind == "hero" else "饰品本版本战绩"
         self._out(f"  📊 {what}（{note.source}）：")
         labels = stats_labels(state, note, self._name)
@@ -486,7 +530,27 @@ class AdviceDisplay:
             label = labels.get(row.entity_id, f"#{row.entity_id}")
             mark = "▲ " if row.entity_id == note.best else "  "
             gap = "" if label.endswith("）") else " "  # "神秘魔方（5 金）第 3.95 名"
-            self._out(f"{INDENT}{mark}{label}{gap}{row.text}")
+            fit = f" · {row.fit}" if row.fit else ""  # "配野兽更好"
+            self._out(f"{INDENT}{mark}{label}{gap}{row.text}{fit}")
+
+    def show_core_cards(self, state: GameState, marks: CoreMarks | None) -> None:
+        """商店核心卡（流派指南自动更新设计文档第 5.2 节）：商店里有核心卡时一行，同样的标记在同一
+        回合只打一次；弹出三连 / 发现、选项里有核心卡时一行（每组选项一次）。None 不打。"""
+        if marks is None:
+            return
+        line = core_line(marks)
+        key = (marks.turn, marks.marks)
+        if line is not None and key != self._last_core:
+            self._last_core = key
+            self._out(f"  {line}")
+        choice = state.choice
+        if choice is None or choice.id == self._last_core_choice:
+            return
+        found = core_options(state, marks, self._name)
+        if found:
+            self._last_core_choice = choice.id
+            parts = "、".join(f"{card}（{marks.why(card)}）" for card in found)
+            self._out(f"  {CORE} 选项里有核心卡：{parts}")
 
     def show_choice(self, state: GameState, advice: ChoiceAdvice | None) -> None:
         """advice 为 None 表示游戏刚弹出一组选项：不打印（选项那一行由时间线打印）。"""
@@ -575,3 +639,6 @@ class DisplayGroup:
 
     def show_stats(self, state: GameState, note: StatsNote) -> None:
         self._each("show_stats", state, note)
+
+    def show_core_cards(self, state: GameState, marks: CoreMarks | None) -> None:
+        self._each("show_core_cards", state, marks)

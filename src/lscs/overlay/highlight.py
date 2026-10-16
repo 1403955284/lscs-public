@@ -8,7 +8,9 @@
 - 换到新目标时"呼吸"约 1.2 秒（style.Breathing，用 after 定时器、只改线条颜色、不重建图形）；
   换目标、隐藏、销毁时取消定时器，回调里的异常只记日志；
 - 战斗中在棋盘顶部正中画一条战斗结果的横幅（提前显示战斗结果设计文档第 5.3 节）：深色圆角框，
-  边框和字用结果的颜色，画在框之后（最上层），不呼吸。
+  边框和字用结果的颜色，画在框之后（最上层），不呼吸；
+- 招募时在商店核心卡的左上角画"核"字小徽章（流派指南自动更新设计文档第 5.4 节）：深色小圆，
+  外圈和字用 [highlight] core_color（粉红），不呼吸、不画括号（括号只属于下一步）。
 
 几何和呼吸的状态机都在 overlay.style（纯函数），这里只管画。只在主线程使用。出错时抛出异常，
 由调用方（OverlayWindow、highlight-test）决定怎么处理。
@@ -19,6 +21,7 @@ from __future__ import annotations
 import sys
 import tkinter as tk
 import tkinter.font as tkfont
+from collections.abc import Sequence
 from functools import partial
 
 from lscs.config import HighlightConfig
@@ -28,13 +31,15 @@ from lscs.overlay.geometry import Rect, clip, wrap
 from lscs.overlay.layout import (
     Frame,
     HighlightLayout,
+    Marker,
     banner_box,
     banner_font_px,
     banner_text_width,
     content_rect,
+    marker_frames,
     step_frames,
 )
-from lscs.overlay.model import NextStep
+from lscs.overlay.model import NextStep, Target
 from lscs.overlay.style import (
     BADGE_FILL,
     BADGE_RING,
@@ -50,6 +55,7 @@ from lscs.overlay.style import (
     badge_font_px,
     corner_brackets,
     dimmed,
+    marker_circle,
     rounded_points,
     stroke_widths,
 )
@@ -74,6 +80,7 @@ class HighlightWindow:
     def __init__(self, root: tk.Misc, cfg: HighlightConfig, preview: bool = False) -> None:
         self._layout = HighlightLayout.from_config(cfg)
         self._color = cfg.color
+        self._core_color = cfg.core_color
         self._dim_color = dimmed(cfg.color)
         self._style = cfg.style
         self._preview = preview
@@ -143,23 +150,36 @@ class HighlightWindow:
     # ---- 显示 ----
 
     def show(
-        self, step: NextStep | None, client: Rect | None, banner: Banner | None = None
+        self,
+        step: NextStep | None,
+        client: Rect | None,
+        banner: Banner | None = None,
+        markers: Sequence[Target] = (),
     ) -> bool:
         """client 是炉石客户区（屏幕坐标）；None 表示面板隐藏了：清空，整窗透明。
-        banner：棋盘顶部的战斗结果（None 不画）。返回 True 表示 Tk 重建了顶层窗口（见 draw）。"""
+        banner：棋盘顶部的战斗结果（None 不画）。markers：商店核心卡的槽位（画"核"字徽章）。
+        返回 True 表示 Tk 重建了顶层窗口（见 draw）。"""
         if client is None:
             return self.draw([], None)
-        return self.draw(step_frames(self._layout, step, client), client, banner)
+        frames = step_frames(self._layout, step, client)
+        return self.draw(frames, client, banner, marker_frames(self._layout, markers, client))
 
-    def draw(self, frames: list[Frame], client: Rect | None, banner: Banner | None = None) -> bool:
-        """把框（和横幅）画在 client 上（框的坐标和 client 同一个坐标系）；client 为 None 时
-        只清空。返回 True 表示 Tk 重建了顶层窗口（新的句柄，样式已经重新加上）。"""
+    def draw(
+        self,
+        frames: list[Frame],
+        client: Rect | None,
+        banner: Banner | None = None,
+        markers: Sequence[Marker] = (),
+    ) -> bool:
+        """把框（核心卡的徽章和横幅）画在 client 上（坐标和 client 同一个坐标系）；client 为
+        None 时只清空。返回 True 表示 Tk 重建了顶层窗口（新的句柄，样式已经重新加上）。"""
         if client is not None and client != self._client:
             self._top.geometry(f"{client.width}x{client.height}+{client.x}+{client.y}")
             self._client = client
         rebuilt = self._apply_style() if not self._preview else False
         shown = (banner.text, banner.tone) if banner is not None and client is not None else None
-        key = (tuple(frames), client, shown)  # 文字或位置变了才重画；到期时间不算
+        # 文字或位置变了才重画；到期时间不算
+        key = (tuple(frames), client, shown, tuple(markers))
         if key == self._drawn:
             return rebuilt
         self._drawn = key
@@ -171,6 +191,8 @@ class HighlightWindow:
             height = content_rect(client, self._layout.aspect).height
             for frame in frames:
                 self._draw_frame(frame, client, height)
+            for marker in markers:
+                self._draw_marker(marker, client, height)
             if banner is not None:
                 self._draw_banner(banner, client)
         return rebuilt
@@ -222,6 +244,28 @@ class HighlightWindow:
                 anchor="center",
                 justify="center",
             )
+
+    def _draw_marker(self, marker: Marker, client: Rect, height: int) -> None:
+        """核心卡的"核"字徽章：深色小圆，外圈和字用 core_color；不呼吸（没有 PULSE 标签）。"""
+        rect = Rect(
+            marker.rect.x - client.x,
+            marker.rect.y - client.y,
+            marker.rect.width,
+            marker.rect.height,
+        )
+        circle = marker_circle(rect, height)
+        cx, cy, r = circle.cx, circle.cy, circle.r
+        self._canvas.create_oval(
+            cx - r,
+            cy - r,
+            cx + r,
+            cy + r,
+            fill=BADGE_FILL,
+            outline=self._core_color,
+            width=BADGE_RING,
+        )
+        font = self._font(badge_font_px(circle))
+        self._canvas.create_text(cx, cy, text=marker.label, fill=self._core_color, font=font)
 
     def _draw_banner(self, banner: Banner, client: Rect) -> None:
         """棋盘顶部正中的战斗结果：深色圆角框，边框和粗体字用结果的颜色。文字比半个内容区还宽

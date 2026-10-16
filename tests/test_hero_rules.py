@@ -141,3 +141,18 @@ def test_stats_recommend_a_hero_even_without_armor():
     advice = rule_hero_pick(heroes, fixture_stats())
     assert (advice.pick, advice.basis) == (94, "stats")  # 范达尔·雷矛 3.89
     assert advice.comments[2].text == "第 4.08 名 · 选 10% · 第 9/10"
+
+
+@NEEDS_STATS_FIXTURES
+def test_tribe_fits_do_not_change_the_rule_pick():
+    """选英雄配种族只是小小的加分（种族还不知道）：规则按平均名次推荐，不看它
+    （流派指南自动更新设计文档第 6.2 节）。"""
+    from helpers import fixture_stats
+
+    stats = fixture_stats()
+    assert stats.hero("TB_BaconShop_HERO_91").fits  # 杰弗里斯配野兽
+    without = stats.model_copy(
+        update={"heroes": {k: v.model_copy(update={"fits": ()}) for k, v in stats.heroes.items()}}
+    )
+    heroes = user_select()
+    assert rule_hero_pick(heroes, stats) == rule_hero_pick(heroes, without)

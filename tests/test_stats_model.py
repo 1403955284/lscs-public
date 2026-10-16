@@ -281,3 +281,81 @@ def test_missing_bracket_falls_back_with_a_debug_log(tmp_path, caplog):
     with caplog.at_level(logging.DEBUG, logger="lscs.stats.model"):
         load_meta_stats(HERO, path, None, StatsConfig(mmr_percentile=25))
     assert "T1" in caplog.text and "前 25%" in caplog.text
+
+
+# ---- 选英雄配种族（流派指南自动更新设计文档第 6.1 节） ----
+
+
+def test_tribe_fit_thresholds():
+    from lscs.stats.model import MAX_FIT_TRIBES, MIN_TRIBE_POINTS, TRIBE_FIT
+
+    assert (MIN_TRIBE_POINTS, TRIBE_FIT, MAX_FIT_TRIBES) == (1000, -0.15, 2)
+
+
+def test_fits_from_the_fixture():
+    from lscs.stats.model import TribeFit
+
+    stats = load()
+    jeffries = stats.hero("TB_BaconShop_HERO_91")
+    # 野兽 -0.15 正好到门槛；元素 -1.47 只有 9 局，挡掉
+    assert jeffries.fits == (
+        TribeFit(race="BEAST", impact=-0.15, with_points=3097, without_points=2124),
+    )
+    assert stats.hero("BG21_HERO_000").fits == ()  # 凯瑞尔：最大只有 -0.07
+    assert stats.hero("BG28_HERO_800").fits == ()  # 泰瑟兰：-0.10 不够
+    # 菌菇术士：三个都够，按从好到差最多两个
+    froggle = stats.hero("TB_BaconShop_HERO_55")
+    assert [(f.race, f.impact) for f in froggle.fits] == [("ELEMENTAL", -0.21), ("QUILBOAR", -0.18)]
+    assert stats.hero("BG99_HERO_LOW").fits == ()  # 没有野兽的那边只有 50 局
+
+
+def _hero_with_tribes(tribes):
+    return {
+        "heroCardId": "H1",
+        "dataPoints": 5000,
+        "totalOffered": 10,
+        "totalPicked": 5,
+        "averagePosition": 3.9,
+        "tribeStats": tribes,
+    }
+
+
+def _tribe(tribe, impact, points=2000, missing=2000):
+    return {
+        "tribe": tribe,
+        "dataPoints": points,
+        "dataPointsOnMissingTribe": missing,
+        "impactAveragePositionVsMissingTribe": impact,
+    }
+
+
+def test_fits_skip_unknown_races_broken_entries_and_small_samples(tmp_path):
+    tribes = [
+        _tribe(20, -0.3),
+        _tribe(999, -0.5),  # Race 里没有
+        _tribe(0, -0.5),  # INVALID
+        _tribe(26, -0.5),  # ALL：不是一个种族
+        {"tribe": 14, "dataPoints": 2000},  # 缺字段
+        _tribe(15, "很多"),  # 类型不对
+        _tribe(23, -0.2, points=999),  # 有这个种族的局数不够
+        _tribe(24, -0.149),  # 不到门槛
+        _tribe(11, -0.16, missing=1000),  # 两边都正好够
+        "not a tribe",
+    ]
+    hero = {"lastUpdateDate": "2026-10-14T03:10:27Z", "heroStats": [_hero_with_tribes(tribes)]}
+    stats = load_meta_stats(write(tmp_path, "hero.json", hero), TRINKET, None, StatsConfig())
+    assert [(f.race, f.impact) for f in stats.hero("H1").fits] == [
+        ("BEAST", -0.3),
+        ("UNDEAD", -0.16),
+    ]
+
+
+def test_heroes_without_tribe_stats_have_no_fits(tmp_path):
+    raw = _hero_with_tribes(None)
+    del raw["tribeStats"]
+    hero = {"lastUpdateDate": "2026-10-14T03:10:27Z", "heroStats": [raw]}
+    stats = load_meta_stats(write(tmp_path, "hero.json", hero), TRINKET, None, StatsConfig())
+    assert stats.hero("H1").fits == ()
+    bad = {"lastUpdateDate": "2026-10-14T03:10:27Z", "heroStats": [_hero_with_tribes("坏了")]}
+    stats = load_meta_stats(write(tmp_path, "bad.json", bad), TRINKET, None, StatsConfig())
+    assert stats.hero("H1").fits == ()  # 种族数据坏了不连累英雄本身

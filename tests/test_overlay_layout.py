@@ -301,3 +301,20 @@ def test_banner_width_is_capped_at_half_the_content_width():
     assert banner_text_width(client, LAYOUT.aspect, 37) == 1280 - 2 * 37
     box = banner_box(client, LAYOUT.aspect, 5000, 37)
     assert box.width == 1280 and box.x == 640
+
+
+# ---- 核心卡的"核"字徽章（流派指南自动更新设计文档第 5.4 节） ----
+
+
+def test_marker_frames_use_the_shop_slots():
+    from lscs.overlay.layout import CORE_BADGE, Marker, marker_frames
+
+    targets = [Target(row="shop", index=1, count=7), Target(row="shop", index=4, count=7)]
+    markers = marker_frames(LAYOUT, targets, FULL_HD)
+    assert CORE_BADGE == "核"
+    assert markers == [
+        Marker(slot_rect(LAYOUT, "shop", 1, 7, FULL_HD), "核"),
+        Marker(slot_rect(LAYOUT, "shop", 4, 7, FULL_HD), "核"),
+    ]
+    assert marker_frames(LAYOUT, [Target(button="refresh"), Target(row="shop")], FULL_HD) == []
+    assert marker_frames(LAYOUT, [], FULL_HD) == []

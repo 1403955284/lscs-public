@@ -77,6 +77,8 @@ def test_example_file_matches_defaults():
     assert "\ngame_plan = true " in text
     assert "\ndrag_handle = true " in text
     assert "\nenabled = false" in text  # [stats]：本版本统计默认关闭
+    assert "\npatch_date = " in text  # [guides]：流派指南自动更新的补丁日期
+    assert "\ncore_marks = true" in text  # [highlight]：核心卡徽章
 
 
 def test_values_are_read(tmp_path):
@@ -441,3 +443,63 @@ def test_combat_result_defaults_on_and_can_be_switched_off(tmp_path):
 def test_combat_result_unknown_key_is_rejected(tmp_path):
     with pytest.raises(ConfigError, match="combat_result.banner"):
         load_config(write(tmp_path, "[combat_result]\nbanner = true\n"))
+
+
+# ---- 流派指南自动更新、核心卡徽章（流派指南自动更新设计文档第 7 节） ----
+
+
+def test_guides_defaults_off(tmp_path):
+    from lscs.config import GuidesConfig
+
+    cfg = load_config(tmp_path / "config.toml").guides
+    assert cfg == GuidesConfig() == AppConfig().guides
+    assert (cfg.enabled, cfg.patch_date) == (False, "2026-10-01")
+
+
+def test_guides_values_are_read(tmp_path):
+    text = '[guides]\nenabled = true\npatch_date = "2026-10-21"\n'
+    cfg = load_config(write(tmp_path, text)).guides
+    assert (cfg.enabled, cfg.patch_date) == (True, "2026-10-21")
+    assert cfg.patch_day.isoformat() == "2026-10-21"
+
+
+@pytest.mark.parametrize(
+    ("line", "field"),
+    [
+        ('patch_date = "10/01"', "guides.patch_date"),
+        ('patch_date = "2026-13-01"', "guides.patch_date"),
+        ("patch_date = 20261001", "guides.patch_date"),
+        ("enabled = 1.5", "guides.enabled"),
+        ('url = "x"', "guides.url"),
+    ],
+)
+def test_guides_invalid_values_are_rejected(tmp_path, line, field):
+    with pytest.raises(ConfigError, match=field):
+        load_config(write(tmp_path, f"[guides]\n{line}\n"))
+
+
+def test_guides_patch_date_error_says_the_format(tmp_path):
+    with pytest.raises(ConfigError, match="YYYY-MM-DD"):
+        load_config(write(tmp_path, '[guides]\npatch_date = "10/01"\n'))
+
+
+def test_guides_section_in_the_example_file():
+    text = EXAMPLE.read_text(encoding="utf-8")
+    assert text.index("[stats]") < text.index("[guides]") < text.index("[highlight]")
+    section = text[text.index("[guides]") : text.index("[highlight]")]
+    assert "\nenabled = false" in section and "HSReplay" in section
+    assert '\npatch_date = "2026-10-01" ' in section
+
+
+def test_highlight_core_marks_defaults_and_values(tmp_path):
+    from lscs.config import HighlightConfig
+
+    cfg = HighlightConfig()
+    assert (cfg.core_marks, cfg.core_color) == (True, "#ff8fc2")  # 粉红
+    text = '[highlight]\ncore_marks = false\ncore_color = "#00ff00"\n'
+    cfg = load_config(write(tmp_path, text)).highlight
+    assert (cfg.core_marks, cfg.core_color) == (False, "#00ff00")
+    with pytest.raises(ConfigError, match="highlight.core_color"):
+        load_config(write(tmp_path, '[highlight]\ncore_color = "pink"\n'))
+    example = EXAMPLE.read_text(encoding="utf-8")
+    assert "\ncore_marks = true" in example and '\ncore_color = "#ff8fc2"' in example

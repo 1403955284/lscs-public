@@ -723,7 +723,7 @@ def test_banner_alone_still_opens_the_highlight_and_expires(monkeypatch):
         def __init__(self, _root, cfg):
             calls.append(("open", cfg.enabled))
 
-        def show(self, step, client, banner=None):
+        def show(self, step, client, banner=None, markers=()):
             calls.append((step, client, banner))
             return False
 
@@ -799,9 +799,9 @@ def test_highlight_test_preview_window_draws_once(monkeypatch):
     drawn = []
     real = calibrate.show_tk
 
-    def show(frames, client, seconds, preview, cfg, focus, banner):
-        drawn.append((len(frames), preview, banner.text))
-        real(frames, client, seconds, preview, cfg, focus, banner)
+    def show(frames, client, seconds, preview, cfg, focus, banner, markers=()):
+        drawn.append((len(frames), preview, banner.text, len(markers)))
+        real(frames, client, seconds, preview, cfg, focus, banner, markers)
 
     out = []
     ok = calibrate.run_highlight_test(
@@ -810,7 +810,7 @@ def test_highlight_test_preview_window_draws_once(monkeypatch):
     if not ok and out[-1].startswith("× 无法打开高亮窗口"):
         pytest.skip(f"没有图形界面：{out[-1]}")
     assert ok, out
-    assert drawn == [(29, True, "本场已定：赢 · 洛卡拉掉 5 血")]
+    assert drawn == [(29, True, "本场已定：赢 · 洛卡拉掉 5 血", 2)]  # 商店上两个示例"核"字徽章
 
 
 def test_focus_taken_by_the_highlight_is_given_back(monkeypatch):
@@ -830,7 +830,7 @@ def test_focus_taken_by_the_highlight_is_given_back(monkeypatch):
         def __init__(self, _root, _cfg):
             api.foreground = self.hwnd  # 第一次显示时抢走了焦点
 
-        def show(self, step, client, banner=None):
+        def show(self, step, client, banner=None, markers=()):
             pass
 
         def destroy(self):
@@ -1090,7 +1090,7 @@ def test_panel_stays_when_the_highlight_is_foreground_and_lifts_after_a_rebuild(
         def __init__(self, _root, _cfg):
             pass
 
-        def show(self, step, client, banner=None):
+        def show(self, step, client, banner=None, markers=()):
             rebuilt, FakeHighlight.rebuilt = FakeHighlight.rebuilt, False
             return rebuilt
 
@@ -1811,3 +1811,125 @@ def test_focus_warning_only_mentions_drag_handle_when_the_grip_is_on(drag_handle
     OverlayWindow._note_focus_lost(fake)  # 只提醒一次
     assert len(out) == 1 and expected in out[0]
     assert (out[0] == FOCUS_LOST_NO_GRIP) is (not drag_handle)
+
+
+def test_highlight_draws_core_badges_without_brackets_or_breathing():
+    tk = pytest.importorskip("tkinter")
+    from lscs.config import HighlightConfig
+    from lscs.overlay.geometry import Rect
+    from lscs.overlay.highlight import HighlightWindow
+    from lscs.overlay.model import NextStep, Target
+
+    try:
+        root = tk.Tk()
+    except tk.TclError as exc:
+        pytest.skip(f"没有图形界面：{exc}")
+    try:
+        root.withdraw()
+        window = HighlightWindow(root, HighlightConfig(), preview=True)
+        client = Rect(40, 60, 640, 360)
+        cores = [Target(row="shop", index=1, count=7), Target(row="shop", index=4, count=7)]
+        window.show(NextStep("▶ 等建议…", tone="muted"), client, None, cores)
+        root.update()
+        assert window.texts() == ["核", "核"]
+        assert window.shapes() == 2 * 2  # 每个徽章一个圆和一个字，没有括号
+        circles = [i for i in window._canvas.find_all() if window._canvas.type(i) == "oval"]
+        assert {window._canvas.itemcget(i, "outline") for i in circles} == {"#ff8fc2"}
+        assert all("pulse" not in " ".join(window._canvas.gettags(i)) for i in circles)
+        first = window._canvas.find_all()
+        window.show(NextStep("▶ 等建议…", tone="muted"), client, None, list(cores))
+        assert window._canvas.find_all() == first  # 同一组徽章：不重画
+        buy = NextStep("▶ 买 左数第 2 个 海盗", Target(row="shop", index=1, count=7), badge="2")
+        window.show(buy, client, None, cores)  # 同一张牌既是下一步又是核心卡：两个徽章都画
+        assert sorted(window.texts()) == sorted(["2", "核", "核"])
+        window.show(buy, client)
+        assert window.texts() == ["2"]  # 没有核心卡：只剩步骤徽章
+        window.show(buy, None, None, cores)  # 面板隐藏：清空
+        assert window.shapes() == 0
+        window.destroy()
+    finally:
+        root.destroy()
+
+
+def test_core_color_comes_from_the_config():
+    tk = pytest.importorskip("tkinter")
+    from lscs.config import HighlightConfig
+    from lscs.overlay.geometry import Rect
+    from lscs.overlay.highlight import HighlightWindow
+    from lscs.overlay.layout import Marker
+
+    try:
+        root = tk.Tk()
+    except tk.TclError as exc:
+        pytest.skip(f"没有图形界面：{exc}")
+    try:
+        root.withdraw()
+        window = HighlightWindow(root, HighlightConfig(core_color="#00ff00"), preview=True)
+        client = Rect(0, 0, 640, 360)
+        window.draw([], client, None, [Marker(Rect(100, 100, 70, 96), "核")])
+        canvas = window._canvas
+        texts = [i for i in canvas.find_all() if canvas.type(i) == "text"]
+        assert canvas.itemcget(texts[0], "fill") == "#00ff00"
+        window.destroy()
+    finally:
+        root.destroy()
+
+
+@pytest.mark.parametrize("core_marks", [True, False])
+def test_panel_passes_the_core_targets_to_the_highlight(monkeypatch, core_marks):
+    """招募时面板把商店核心卡的槽位交给画面高亮；[highlight] core_marks = false 时不交。"""
+    tk = pytest.importorskip("tkinter")
+    from fake_win32 import FakeWin32Api, FakeWindow
+
+    from lscs.advisor.core_cards import CoreMark, CoreMarks
+    from lscs.config import HighlightConfig
+    from lscs.overlay.model import Target
+    from lscs.overlay.window import OverlayWindow
+
+    hs = r"C:\Program Files (x86)\Hearthstone\Hearthstone.exe"
+    api = FakeWin32Api(
+        windows=[FakeWindow(1, pid=10, size=(1600, 900), origin=(100, 50))], paths={10: hs}
+    ).install(monkeypatch)
+    api.foreground = 1
+    calls = []
+
+    class FakeHighlight:
+        hwnd = 0x999
+
+        def __init__(self, _root, _cfg):
+            pass
+
+        def show(self, step, client, banner=None, markers=()):
+            calls.append(tuple(markers))
+            return False
+
+        def destroy(self):
+            pass
+
+    try:
+        window = OverlayWindow(
+            OverlayConfig(),
+            out=lambda _l: None,
+            highlight=HighlightConfig(core_marks=core_marks),
+            make_highlight=FakeHighlight,
+        )
+    except tk.TclError as exc:
+        pytest.skip(f"没有图形界面：{exc}")
+    model = OverlayModel(lambda c: NAMES.get(c, c))
+    shop = [shop_minion(20, "B", 3, 2), shop_minion(21, "C", 3, 4)]
+    state = make_state(turn=3, gold=5, shop=shop)
+    model.on_update(state, [Event(type=EventType.RECRUIT_STARTED, turn=3)])
+    mark = CoreMark(entity_id=21, index=1, name="C", why="计划")
+    model.show_core_cards(
+        state,
+        CoreMarks(turn=3, shop=(20, 21), marks=(mark,), names=("C",), source="plan"),
+    )
+    polls = [0]
+
+    def keep_running():
+        polls[0] += 1
+        return not calls and polls[0] < 60
+
+    window.run(model, keep_running)
+    expected = (Target(row="shop", index=1, count=2),) if core_marks else ()
+    assert calls and calls[-1] == expected

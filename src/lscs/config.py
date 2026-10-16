@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import tomllib
+from datetime import date
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -122,6 +123,9 @@ class HighlightConfig(BaseModel):
     refresh: ButtonPlace = (0.588, 0.175, 0.05)
     freeze: ButtonPlace = (0.646, 0.175, 0.05)
     hero_power: ButtonPlace = (0.593, 0.78, 0.055)
+    # 商店里的核心卡（流派指南自动更新设计文档第 5.4 节）：左上角画"核"字小徽章，不呼吸、没有括号
+    core_marks: bool = True
+    core_color: str = Field(default="#ff8fc2", pattern=r"^#[0-9a-fA-F]{6}$")  # 粉红
 
 
 # 老版本 config.example.toml 的 [highlight]（2026-10-12 校准之前、10-13 换样式之前）里和现在
@@ -219,6 +223,30 @@ class StatsConfig(BaseModel):
     cards: bool = True  # 把本版本战绩好的随从发给 AI（只给 AI，不显示）
 
 
+class GuidesConfig(BaseModel):
+    """流派指南自动更新（流派指南自动更新设计文档第 3、7 节）：HSReplay 的公开接口，非官方，
+    默认关闭。"""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    enabled: bool = False
+    # 当前补丁上线日期（YYYY-MM-DD）；只用这天起更新过的指南
+    patch_date: str = "2026-10-01"
+
+    @field_validator("patch_date")
+    @classmethod
+    def _check_patch_date(cls, value: str) -> str:
+        try:
+            date.fromisoformat(value.strip())
+        except ValueError:
+            raise ValueError("应为 YYYY-MM-DD") from None
+        return value.strip()
+
+    @property
+    def patch_day(self) -> date:
+        return date.fromisoformat(self.patch_date)
+
+
 class AppConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -228,6 +256,7 @@ class AppConfig(BaseModel):
     positioning: PositioningConfig = PositioningConfig()
     combat_result: CombatResultConfig = CombatResultConfig()
     stats: StatsConfig = StatsConfig()
+    guides: GuidesConfig = GuidesConfig()
     highlight: HighlightConfig = HighlightConfig()
 
 

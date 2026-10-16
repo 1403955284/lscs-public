@@ -69,7 +69,12 @@ def scheduler(
 ):
     """deep=False：只有快速一路（大部分测试只关心快速建议的时机）。
     hero_debounce=0：选英雄这一路不等（等待只在专门的测试里看）。
-    step：每次调用让时钟前进几秒。stats：取本版本统计的函数。comps：流派指南（CompsFile）。"""
+    step：每次调用让时钟前进几秒。stats：取本版本统计的函数。comps：流派指南（CompsFile，包成
+    总是返回它的函数）或取流派指南的函数。"""
+    from lscs.llm.comps import CompsFile
+
+    if isinstance(comps, CompsFile):
+        comps = (lambda fixed: lambda: fixed)(comps)
     clock = clock or Clock()
     provider = SteppingProvider(responses, clock, step) if step else FakeProvider(responses)
     sched = LLMScheduler(
@@ -1897,6 +1902,70 @@ def test_hero_and_choice_messages_get_no_comps():
     assert all("流派指南" not in c.user for c in provider.calls)
 
 
+class CompsSource:
+    """取流派指南的函数：按 files 的顺序每次返回下一个（最后一个之后一直返回最后一个）。"""
+
+    def __init__(self, *files):
+        self.files, self.taken = list(files), 0
+
+    def __call__(self):
+        self.taken += 1
+        return self.files.pop(0) if len(self.files) > 1 else self.files[0]
+
+
+def test_comps_are_taken_until_ready_then_kept_for_the_game():
+    from dataclasses import replace
+
+    first = sample_comps()
+    other = replace(first, title="另一份")
+    source = CompsSource(None, first, other)
+    sched, provider = scheduler([GOOD] * 4, comps=source)
+    observe(sched, recruit_state(turn=3), EventType.RECRUIT_STARTED)
+    sched.tick()
+    assert "流派指南" not in provider.calls[0].user  # 后台还没准备好
+    observe(sched, recruit_state(turn=4, seq=2), EventType.RECRUIT_STARTED)
+    sched.tick()
+    assert "测试样例" in provider.calls[1].user
+    observe(sched, recruit_state(turn=5, seq=3), EventType.RECRUIT_STARTED)
+    sched.tick()
+    assert "测试样例" in provider.calls[2].user and "另一份" not in provider.calls[2].user
+    assert source.taken == 2  # 取到之后整局复用，不再取
+    sched.reset_game()
+    observe(sched, recruit_state(turn=1, seq=4), EventType.RECRUIT_STARTED)
+    sched.tick()
+    assert "另一份" in provider.calls[3].user  # 新的一局重新取
+    assert source.taken == 3
+
+
+def test_a_failing_comps_source_means_no_block():
+    def boom():
+        raise RuntimeError("坏了")
+
+    sched, provider = scheduler([GOOD], comps=boom)
+    observe(sched, recruit_state(), EventType.RECRUIT_STARTED)
+    sched.tick()
+    assert len(provider.calls) == 1 and "流派指南" not in provider.calls[0].user
+
+
+def test_plan_comp_written_as_the_hsreplay_name_becomes_the_display_name():
+    from lscs.llm.comps import CompGuide, CompsFile
+
+    guide = CompsFile(
+        "",
+        (
+            CompGuide(
+                "畸变·梦魇侵蚀怪",
+                frozenset({"ABERRATION"}),
+                "- 要点",
+                aliases=("Aberrations - Sludge",),
+            ),
+        ),
+    )
+    sched, _ = scheduler([GOOD, planned(comp="Aberrations - Sludge")], deep=True, comps=guide)
+    (event,) = plan_events(deep_turn(sched, 5))
+    assert event.plan.comp == "畸变·梦魇侵蚀怪"
+
+
 # ---- 整局计划：校验（整局计划与流派指南设计文档第 4.4 节） ----
 
 
@@ -2349,3 +2418,33 @@ def test_with_deep_analysis_on_only_the_deep_lane_gets_the_comps_block():
     # 快速建议的前缀（系统提示 + 卡池 + 战绩）就是深度分析消息的前缀：缓存照样命中
     assert fast[:2] == deep[:2] and provider.calls[0].system == provider.calls[1].system
     assert fast[2].startswith("【对手】") and fast[2] == deep[3]
+
+
+def test_plan_comps_are_matched_even_with_the_comp_guide_off():
+    from lscs.llm.comps import CompGuide, CompsFile
+
+    guide = CompsFile("", (CompGuide("畸变怪养神流", frozenset({"ABERRATION"}), "- 要点"),))
+    answers = [GOOD, planned(comp="畸变养神（亡语/弃牌）")]
+    sched, provider = scheduler(answers, deep=True, comps=guide, comp_guide=False)
+    (event,) = plan_events(deep_turn(sched, 5))
+    assert event.plan.comp == "畸变怪养神流"  # 不发指南块，但流派名照样对到标题
+    assert all("流派指南" not in c.user for c in provider.calls)
+
+
+def test_the_comps_snapshot_is_taken_on_the_main_thread():
+    import threading
+
+    taken = []
+
+    def source():
+        taken.append(threading.current_thread().name)
+        return sample_comps()
+
+    jobs = []
+    sched, _ = scheduler([GOOD, planned()], deep=True, comps=source, run_async=jobs.append)
+    observe(sched, confirmed_state(turn=5, seq=5), EventType.RECRUIT_STARTED)
+    sched.tick()
+    worker = threading.Thread(target=lambda: [job() for job in jobs], name="lscs-ai-test")
+    worker.start()
+    worker.join()
+    assert taken and set(taken) == {threading.main_thread().name}

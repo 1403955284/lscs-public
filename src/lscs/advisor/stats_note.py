@@ -7,7 +7,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from lscs.advisor.models import StatRow, StatsNote
+from lscs.advisor.models import FIT_SUFFIX, StatRow, StatsNote
+from lscs.advisor.names import tribe_zh
 from lscs.state.models import Choice, ChoiceKind, HeroSelect
 from lscs.stats.model import HeroStat, MetaStats, TrinketStat
 
@@ -24,6 +25,14 @@ def hero_row_text(stat: HeroStat, total: int) -> str:
     if stat.low or stat.rank is None:
         return f"第 {stat.average_position:.2f} 名（{LOW_SAMPLE}）"
     return f"第 {stat.average_position:.2f} 名 · 选 {pct(stat.pick_rate)} · 第 {stat.rank}/{total}"
+
+
+def fit_text(stat: HeroStat) -> str:
+    """ "配野兽更好"、"配野兽、亡灵更好"；没有配得好的种族时为空（流派指南自动更新设计文档
+    第 6.2 节）。"""
+    if not stat.fits:
+        return ""
+    return "配" + "、".join(tribe_zh(f.race) for f in stat.fits) + FIT_SUFFIX
 
 
 def trinket_row_text(stat: TrinketStat) -> str:
@@ -48,7 +57,13 @@ def hero_note(select: HeroSelect, stats: MetaStats) -> StatsNote | None:
             continue
         text = hero_row_text(stat, stats.hero_total)
         rows.append(
-            StatRow(entity_id=hero.entity_id, text=text, score=stat.average_position, low=stat.low)
+            StatRow(
+                entity_id=hero.entity_id,
+                text=text,
+                score=stat.average_position,
+                low=stat.low,
+                fit=fit_text(stat),
+            )
         )
     if not rows:
         return None

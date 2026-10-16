@@ -13,7 +13,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, fields
 from typing import TYPE_CHECKING
 
@@ -101,6 +101,19 @@ class Frame:
     calibration: bool = False  # highlight-test 的校准框：完整的框，不呼吸
 
 
+CORE_BADGE = "核"  # 商店核心卡的徽章上写的字（流派指南自动更新设计文档第 5.4 节）
+# highlight-test --rows shop 时画示例"核"徽章的商店槽位（第 2、5 个）
+CALIBRATION_CORE_SLOTS = (1, 4)
+
+
+@dataclass(frozen=True)
+class Marker:
+    """商店核心卡的小徽章：画在槽位左上角上方，不呼吸、不画括号（括号只属于下一步）。"""
+
+    rect: Rect  # 槽位的框（和 Frame 同一个坐标系）
+    label: str  # 徽章上的字："核"
+
+
 def content_rect(client: Rect, aspect: float) -> Rect:
     """客户区里最大的 aspect 矩形，居中。"""
     if client.width >= client.height * aspect:
@@ -165,6 +178,26 @@ def step_frames(layout: HighlightLayout, step: NextStep | None, client: Rect) ->
     if target.button is not None and not button_calibrated(layout, target.button):
         return []  # 这个按钮的位置还没校准，宁可不画也不画错地方
     return [target_frame(layout, target, client, step.badge)]
+
+
+def marker_frames(layout: HighlightLayout, targets: Sequence[Target], client: Rect) -> list[Marker]:
+    """商店核心卡的徽章：每个目标槽位一个（不是一排里的槽位、一排是空的时跳过）。"""
+    return [
+        Marker(slot_rect(layout, t.row, t.index, t.count, client), CORE_BADGE)
+        for t in targets
+        if t.row is not None and t.count > 0
+    ]
+
+
+def calibration_markers(layout: HighlightLayout, client: Rect, rows: Iterable[str]) -> list[Marker]:
+    """lscs highlight-test：画商店那一排时，在第 2、5 个槽位各画一个示例"核"徽章。"""
+    if "shop" not in rows:
+        return []
+    count = CALIBRATION_SLOTS["shop"]
+    return [
+        Marker(slot_rect(layout, "shop", i, count, client), CORE_BADGE)
+        for i in CALIBRATION_CORE_SLOTS
+    ]
 
 
 def calibration_frames(

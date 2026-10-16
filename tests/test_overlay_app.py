@@ -279,11 +279,25 @@ def test_highlight_gets_the_step_and_the_banner_by_their_switches():
 
     step = NextStep("▶ 刷新商店")
     view = OverlayView(title="t", next_step=step, banner=_banner())
-    assert highlight_inputs(view, steps=True, banner=True, now=0) == (step, _banner())
+    assert highlight_inputs(view, steps=True, banner=True, now=0) == (step, _banner(), ())
     # [highlight] enabled = false 但开着横幅：高亮窗口照样开，只是不画"下一步"
-    assert highlight_inputs(view, steps=False, banner=True, now=0) == (None, _banner())
-    assert highlight_inputs(view, steps=True, banner=False, now=0) == (step, None)
-    assert highlight_inputs(None, steps=True, banner=True, now=0) == (None, None)
+    assert highlight_inputs(view, steps=False, banner=True, now=0) == (None, _banner(), ())
+    assert highlight_inputs(view, steps=True, banner=False, now=0) == (step, None, ())
+    assert highlight_inputs(None, steps=True, banner=True, now=0) == (None, None, ())
+
+
+def test_highlight_gets_the_core_targets_only_when_core_marks_are_on():
+    import pytest
+
+    pytest.importorskip("tkinter")
+    from lscs.overlay.model import OverlayView, Target
+    from lscs.overlay.window import highlight_inputs
+
+    targets = (Target(row="shop", index=2, count=7),)
+    view = OverlayView(title="t", core_targets=targets)
+    assert highlight_inputs(view, steps=True, banner=True, now=0, core=True)[2] == targets
+    assert highlight_inputs(view, steps=True, banner=True, now=0, core=False)[2] == ()
+    assert highlight_inputs(view, steps=True, banner=True, now=0)[2] == ()
 
 
 def test_banner_past_its_deadline_is_not_drawn():
@@ -294,5 +308,5 @@ def test_banner_past_its_deadline_is_not_drawn():
     from lscs.overlay.window import highlight_inputs
 
     view = OverlayView(title="对局结束 · 第 3 名", banner=_banner(expires_at=120.0))
-    assert highlight_inputs(view, steps=True, banner=True, now=119.5) == (None, view.banner)
-    assert highlight_inputs(view, steps=True, banner=True, now=120.0) == (None, None)
+    assert highlight_inputs(view, steps=True, banner=True, now=119.5) == (None, view.banner, ())
+    assert highlight_inputs(view, steps=True, banner=True, now=120.0) == (None, None, ())

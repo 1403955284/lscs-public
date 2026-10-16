@@ -1,7 +1,8 @@
 """lscs highlight-test：把画面高亮能画的位置画出来，框里写标签，供用户截图核对、开发者校准
 （选项建议设计文档第 9 节）。默认只画招募阶段的商店、场面每个槽位和已校准的按钮；--rows 可以
 选别的排（选项、饰品、英雄），免得几排框叠在一起看不清。不管选了哪几排，棋盘顶部都画一条
-战斗结果的样例横幅（提前显示战斗结果设计文档第 5.3 节），截图时一起核对它的位置。
+战斗结果的样例横幅（提前显示战斗结果设计文档第 5.3 节），截图时一起核对它的位置；画商店那一排时
+在第 2、5 个槽位的左上角各画一个示例"核"字徽章（流派指南自动更新设计文档第 5.4 节）。
 
 - Windows：找炉石窗口（和 overlay-check 同样的查找和提示），在炉石客户区上盖一个透明、
   鼠标穿透的高亮窗口，画好后把焦点还给炉石（高亮窗口第一次显示时可能抢走焦点，全屏的炉石
@@ -23,7 +24,9 @@ from lscs.overlay.geometry import Rect
 from lscs.overlay.layout import (
     Frame,
     HighlightLayout,
+    Marker,
     calibration_frames,
+    calibration_markers,
     content_rect,
     parameter_lines,
 )
@@ -31,8 +34,11 @@ from lscs.overlay.layout import (
 log = logging.getLogger(__name__)
 
 Output = Callable[[str], None]
-# (框, 客户区, 秒数, 是否预览, [highlight], 画好后把焦点还给哪个窗口, 横幅)
-Show = Callable[[list[Frame], Rect, float, bool, HighlightConfig, int | None, Banner | None], None]
+# (框, 客户区, 秒数, 是否预览, [highlight], 画好后把焦点还给哪个窗口, 横幅, 示例"核"字徽章)
+Show = Callable[
+    [list[Frame], Rect, float, bool, HighlightConfig, int | None, Banner | None, Sequence[Marker]],
+    None,
+]
 SAMPLE_BANNER = Banner("本场已定：赢 · 洛卡拉掉 5 血", "win")  # 样例：战斗中棋盘顶部的横幅
 PREVIEW_CLIENT = Rect(60, 60, 1280, 720)  # 非 Windows 的预览窗口
 WAIT_SECONDS = 15.0  # 炉石最小化时最多等多久
@@ -76,9 +82,10 @@ def show_tk(
     cfg: HighlightConfig,
     focus: int | None = None,
     banner: Banner | None = None,
+    markers: Sequence[Marker] = (),
     make_window: Callable = _highlight_window,
 ) -> None:
-    """开一个隐藏的 Tk 根窗口和高亮窗口，画上 frames（和横幅），seconds 秒后关闭。
+    """开一个隐藏的 Tk 根窗口和高亮窗口，画上 frames（示例"核"徽章和横幅），seconds 秒后关闭。
     focus：画好（穿透样式也加上了）之后把焦点还给这个窗口（炉石）。"""
     import tkinter as tk
 
@@ -86,7 +93,7 @@ def show_tk(
     try:
         root.withdraw()
         window = make_window(root, cfg, preview)
-        window.draw(frames, client, banner)
+        window.draw(frames, client, banner, markers)
         if focus is not None:
             give_focus_to(focus)
         root.after(max(1, round(seconds * 1000)), root.quit)
@@ -167,11 +174,13 @@ def run_highlight_test(
     for line in parameter_lines(layout):
         out(f"  {line}")
     frames = calibration_frames(layout, client, rows)
-    out(f"画了 {len(frames)} 个框和顶部一条样例横幅，{seconds:g} 秒后自动关闭。")
+    markers = calibration_markers(layout, client, rows)
+    samples = f'、商店第 2、5 个上方 {len(markers)} 个示例"核"字徽章' if markers else ""
+    out(f"画了 {len(frames)} 个框{samples}和顶部一条样例横幅，{seconds:g} 秒后自动关闭。")
     if not preview:
         out(SCREENSHOT_HINT)
     try:
-        show(frames, client, seconds, preview, cfg, hearthstone, SAMPLE_BANNER)
+        show(frames, client, seconds, preview, cfg, hearthstone, SAMPLE_BANNER, markers)
     except Exception as exc:
         log.debug("highlight-test：窗口出错", exc_info=True)
         out(f"× 无法打开高亮窗口：{_reason(exc)}")

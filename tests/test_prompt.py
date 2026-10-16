@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 
 from factory import hand_minion, make_state, minion, power, shop_minion
-from helpers import FIXTURES, NEEDS_STATS_FIXTURES, TEST_POOL
+from helpers import FIXTURES, NEEDS_GUIDES_FIXTURES, NEEDS_STATS_FIXTURES, TEST_POOL
 
 from lscs.advisor.context import build_context
 from lscs.advisor.rules_config import load_rules_config
@@ -657,7 +657,7 @@ EXPECTED_HERO_SYSTEM = """你是《炉石传说》酒馆战棋的高分教练，
 - 护甲：官方用起始护甲做平衡——越强的英雄给的护甲越少，护甲最少的英雄通常就是当前版本最强的。这是最可靠的强度信号，默认按它选；只有技能明显不适合新手、或明显依赖本局没有的条件时才偏离。
 - 局面里给了"本版本战绩"（平均名次、被选率、排名）时，以它为主、护甲为辅：平均名次差 0.1 以上就是明显差距，差不到 0.1 再看技能是否适合新手；没给战绩就按护甲。
 - 技能：看技能描述。新手优先选"每回合都有稳定收益、不需要复杂操作"的技能（加属性、给铸币、减费、免费刷新），少选要靠特定种族、特定卡或精细计算才强的技能。
-- 本局种族在选英雄时还看不到，所以依赖某个种族的技能要打折扣；只有本局机制（如神明）是已知的，可以结合它判断。
+- 本局种族在选英雄时还看不到，所以依赖某个种族的技能要打折扣；只有本局机制（如神明）是已知的，可以结合它判断。局面里写了"有某族时再好 N"的，只当加分项：两个英雄的平均名次差不到 0.1 时可以用它打破平手，差 0.1 以上还是按名次。
 - 不知道的事不要编：没有给出的数据不要假装知道。
 
 只输出一个 json 对象，格式：
@@ -1172,15 +1172,34 @@ def test_hero_message_with_stats():
         "本局种族：未知（选英雄时还看不到）",
         "本版本战绩：数据来自 Firestone，本补丁 938474 局，全部玩家，10-14 更新。平均名次越小越强，"
         "只在这几个英雄之间比较（全部英雄的中位数约 4.0，不要拿 4.5 当基准）；"
-        '标了"样本少"的不可靠。',
+        '标了"样本少"的不可靠。"有某族时再好 N"是本局有那个种族时它的平均名次比没有时好多少'
+        "（两边样本都够才写）；选英雄时还看不到本局种族，只能当作小小的加分。",
         "备选英雄：",
         "  [#92] 了不起的杰弗里斯 | 护甲 17 | 本版本：第 4.04 名，被选率 27%，10 个英雄里第 7（5221 局）"
-        " | 技能 三个愿望（3 金）：如果你有两个相同的随从，找到第三个。",
+        "；有野兽时平均名次再好 0.15 | 技能 三个愿望（3 金）：如果你有两个相同的随从，找到第三个。",
         "  [#89] 凯瑞尔·罗姆 | 护甲 10 | 本版本：第 3.67 名，被选率 28%，10 个英雄里第 2（11258 局）"
         " | 技能 定罪（0 金）：随机使1个友方随从获得+1/+1。",
         "  [#90] BG99_HERO_LOW | 护甲 未知 | 本版本：第 4.20 名（样本少，只有 400 局） | 技能 未知",
         "  [#15] UNKNOWN_HERO | 护甲 12 | 本版本：没有数据 | 技能 未知",
     ]
+
+
+@NEEDS_STATS_FIXTURES
+def test_hero_message_with_two_fits_and_without_any_fit():
+    from helpers import fixture_stats
+
+    stats = fixture_stats()
+    heroes = [(55, "TB_BaconShop_HERO_55", 10, 64486), (89, "BG21_HERO_000", 10, 73941)]
+    text = build_hero_message(hero_state(heroes), HERO_CARDS, stats=stats)
+    assert "；有元素时再好 0.21、有野猪人时 0.18 |" in text  # 菌菇术士：两个种族
+    assert "再好" not in text.splitlines()[-1]  # 凯瑞尔没有
+    no_fits = stats.model_copy(
+        update={"heroes": {k: v.model_copy(update={"fits": ()}) for k, v in stats.heroes.items()}}
+    )
+    plain = build_hero_message(hero_state(STATS_HEROES), HERO_CARDS, stats=no_fits)
+    # 这几个英雄都没有 fits：和加这个功能之前逐字相同（说明行没有新句子）
+    assert "有某族" not in plain and "再好" not in plain
+    assert plain.splitlines()[3].endswith('标了"样本少"的不可靠。')
 
 
 def test_hero_message_without_stats_is_unchanged():
@@ -1715,3 +1734,80 @@ def test_budget_is_restated_as_the_last_line():
     full = make_state(gold=3, board=[minion(10 + i, "BG21_029", 1, 1) for i in range(7)])
     ctx = build_context(full, 3)
     assert budget_reminder(ctx) == "预算：铸币 3，还能再买 0 个随从（场上 7/7）"
+
+
+# ---- HSReplay 的流派指南块（流派指南自动更新设计文档第 3.3、4 节） ----
+
+
+def _live_comps_file():
+    from helpers import FIXTURES, fixture_live_guides
+
+    from lscs.guides.model import to_comps_file
+    from lscs.llm.comps import parse_comps
+    from lscs.llm.prompt import load_guide
+
+    return to_comps_file(
+        fixture_live_guides(), parse_comps(load_guide(FIXTURES / "comps_sample.md"))
+    )
+
+
+@NEEDS_GUIDES_FIXTURES
+def test_hsreplay_comps_block_for_an_aberration_and_murloc_lobby():
+    from lscs.llm.comps import comps_block
+
+    block = comps_block(_live_comps_file(), frozenset({"ABERRATION", "MURLOC"}))
+    lines = block.splitlines()
+    assert lines[0] == (
+        "【本赛季流派指南（第 14 赛季流派指南（数据来自 HSReplay，10-15 更新，7 条本补丁的指南；"
+        "强度写梯队，同一梯队里新手优先难度低的；打法要点是英文原文）；只列本局种族能走的流派，"
+        "按强度从高到低；定计划、选核心卡时以它为准，卡名和卡池块一致）】"
+    )
+    sections = block.split("\n## ")[1:]
+    assert [s.split("\n", 1)[0] for s in sections] == [
+        "中立·守门融合怪",
+        "鱼人·下水道逃生鱼人",
+        "畸变·无面转化者",
+        "畸变·梦魇侵蚀怪",
+        "通用运营（本赛季）",
+    ]
+    for section in sections[:-1]:
+        heads = [line.split("：", 1)[0] for line in section.splitlines()[1:]]
+        assert heads == [
+            "- 强度",
+            "- 一句话",
+            "- 核心卡",
+            "- 配合卡",
+            "- 什么时候走",
+            "- 打法要点（英文原文）",
+            "- 英文名",
+        ]
+    from helpers import fixture_live_guides
+
+    keyword = next(g for g in fixture_live_guides().guides if g.name == "Murlocs - Keyword")
+    assert sections[1].splitlines()[1:4] == [
+        "- 强度：第 2 梯队第 1 位；难度 中；HSReplay 10-13 更新",
+        f"- 一句话：{keyword.summary}",  # HSReplay 的原文不抄进公开的测试
+        "- 核心卡：下水道逃生鱼人（5 本）、怒胆喷毒鱼人（5 本）、布莱恩·铜须（5 本）、黑客鱼人（5 本）、"
+        "海藻护卫（4 本）",
+    ]
+    assert sections[-1] == "通用运营（本赛季）\n- 前期按节奏升本，血量低于 15 先保血。"
+    # 两段畸变的 tier_rank 在第 3 梯队里有并列：强度只写"第 3 梯队"
+    assert sections[2].splitlines()[1].startswith("- 强度：第 3 梯队；难度 低；")
+    assert len(block) == 2904 and "放不下" not in block
+
+
+@NEEDS_GUIDES_FIXTURES
+def test_hsreplay_comps_block_over_its_limit_names_the_rest():
+    from dataclasses import replace
+
+    from lscs.llm.comps import comps_block
+
+    comps = _live_comps_file()
+    tribes = frozenset({"ABERRATION", "MURLOC"})
+    full = comps_block(comps, tribes)
+    limit = full.index("\n## 畸变·无面转化者") + len(
+        "\n## 通用运营（本赛季）\n- 前期按节奏升本，血量低于 15 先保血。"
+    )
+    block = comps_block(replace(comps, max_chars=limit), tribes)
+    assert "## 鱼人·下水道逃生鱼人" in block and "## 畸变·无面转化者" not in block
+    assert block.splitlines()[-1] == "（还有 2 个流派放不下：畸变·无面转化者、畸变·梦魇侵蚀怪）"

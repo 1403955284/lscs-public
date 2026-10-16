@@ -365,6 +365,33 @@ def test_game_plan_comp_drops_trailing_notes_before_cutting(comp, expected):
     assert parse_plan(plan_answer(dict(PLAN, comp=comp))).game_plan.comp == expected
 
 
+def test_long_comp_names_are_matched_before_cutting():
+    # HSReplay 的英文名比 PLAN_COMP_CHARS 长：截断成"Aberrations…"就对不上别名了
+    seen = []
+
+    def canonical(name):
+        seen.append(name)
+        return "畸变·梦魇侵蚀怪" if name == "Aberrations - Sludge" else None
+
+    answer = plan_answer(dict(PLAN, comp="Aberrations - Sludge（弃牌）"))
+    assert parse_plan(answer, canonical).game_plan.comp == "畸变·梦魇侵蚀怪"
+    assert seen == ["Aberrations - Sludge"]  # 去掉末尾的括号说明之后
+    other = plan_answer(dict(PLAN, comp="Dragons - Spell Power"))
+    assert parse_plan(other, canonical).game_plan.comp == "Dragons - S…"  # 对不上：照旧截断
+    assert parse_plan(answer).game_plan.comp == "Aberrations…"
+
+
+def test_placeholder_and_undecided_comps_are_not_matched():
+    from lscs.llm.parse import PLAN_PLACEHOLDERS
+
+    def canonical(name):
+        raise AssertionError(f"不该对 {name}")
+
+    assert parse_plan(plan_answer(dict(PLAN, comp="未定")), canonical).game_plan.comp == "未定"
+    placeholder = plan_answer(dict(PLAN, comp=PLAN_PLACEHOLDERS["comp"]))
+    assert parse_plan(placeholder, canonical).game_plan.comp == "未定"
+
+
 def test_game_plan_key_cards_drop_the_display_marks():
     cards = ["蚀脑怪✓", "残忍的精神鞭笞者 ✔", "飘荡祭品(金)✓"]
     plan = parse_plan(plan_answer(dict(PLAN, key_cards=cards))).game_plan

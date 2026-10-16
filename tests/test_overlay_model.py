@@ -1730,7 +1730,8 @@ def test_hero_view_with_stats():
     assert rows(view) == [
         (
             "名次",
-            "★凯瑞尔·罗姆 3.67 · 泰瑟兰·血望者 3.99 · 洛，在世传奇 3.91 · 了不起的杰弗里斯 4.04",
+            "★凯瑞尔·罗姆 3.67 · 泰瑟兰·血望者 3.99 · 洛，在世传奇 3.91 · "
+            "了不起的杰弗里斯 4.04 配野兽",  # 选英雄配种族（流派指南自动更新设计文档 6.2）
         )
     ]
     assert view.next_step.text == "▶ 选 左数第 1 个 凯瑞尔·罗姆"  # ★ 是规则推荐，AI 优先
@@ -1997,6 +1998,7 @@ def _all_views(detail=False):
     over.on_update(GAME_OVER, [])
     over.show_review(GAME_OVER, _review())
     views.append(over.snapshot())
+    views.append(_core_view(detail))  # 商店里有核心卡（◆）
     return views
 
 
@@ -2009,7 +2011,9 @@ def test_symbols_mean_one_thing_each(detail):
         texts += [line.label for block in view.blocks for line in block.lines]
         assert not any("▶" in text for text in texts), view
         assert sum(text.count("★") for text in texts) <= 1, view
-        assert "▶★" not in str(view)
+        assert "▶★" not in str(view) and "▶◆" not in str(view)
+        # ◆ 只在小圆点、"◆ 核心"那一行和选项名前（见 test_the_core_symbol_means_one_thing）
+        assert not any("◆" in line.label for block in view.blocks for line in block.lines)
 
 
 # ---- 详细模式（[overlay] detail = true，面板精简设计文档第 5 节） ----
@@ -2278,6 +2282,19 @@ def test_detail_hero_stats_in_the_right_column():
     assert [(line.text, line.right) for line in candidates.lines] == [
         ("★ 凯瑞尔·罗姆", "第 3.67 名 · 选 28% · 第 2/10"),
         ("UNKNOWN_HERO", "护甲 12"),
+    ]
+
+
+@NEEDS_STATS_FIXTURES
+def test_detail_hero_fit_in_the_right_column():
+    heroes = ((92, "TB_BaconShop_HERO_91", 17, 0), (89, "BG21_HERO_000", 10, 1))
+    model = detailed()
+    st = choosing(model, hero_select_state(heroes))
+    hero_stats(model, st)
+    candidates = block(model.snapshot(), "heroes")
+    assert [line.right for line in candidates.lines] == [
+        "第 4.04 名 · 选 27% · 第 7/10 · 配野兽",  # 流派指南自动更新设计文档第 6.2 节
+        "第 3.67 名 · 选 28% · 第 2/10",
     ]
 
 
@@ -2640,3 +2657,257 @@ def test_detail_without_a_plan_has_no_plan_or_reminder_lines():
     advice = llm_advice((Action(type="refresh"),), summary="刷新")
     model.show_ai(T3, advice.model_copy(update={"plan_note": NOTE}), False)
     assert [line.text for line in block(model.snapshot(), "plan").lines] == ["① 刷新", "目标：刷新"]
+
+
+# ---- 商店核心卡（流派指南自动更新设计文档第 5.3 节） ----
+
+CORE_NAMES = {
+    "E": "下水道逃生鱼人",
+    "F": "辛多雷直射手",
+    "G": "飘荡祭品",
+    "H": "灰烬腐蚀者",
+    "I": "梦魇侵蚀怪",
+    "J": "青铜时光行者",
+    "K": "无面转化者",
+    "L": "疑之影",
+    "M": "提图斯·瑞文戴尔",
+}
+SEWER_WHY = "鱼人·下水道逃生鱼人、鱼人·怒胆喷毒鱼人"
+
+
+def core_name(card_id):
+    return CORE_NAMES.get(card_id, name(card_id))
+
+
+def core_shop(*cards, first=30):
+    return [shop_minion(first + i, c, 3, 3) for i, c in enumerate(cards)]
+
+
+T9C = make_state(
+    turn=9, gold=6, tier=6, shop=core_shop("X1", "X2", "E", "X3", "X4", "F", "X5"), board=[]
+)
+
+
+def marks_of(state, *picks, source="guides", names=None, whys=None):
+    """picks：(商店位置, why)。"""
+    from lscs.advisor.core_cards import CoreMark, CoreMarks
+
+    found = tuple(
+        CoreMark(
+            entity_id=state.shop[i].entity_id,
+            index=i,
+            name=core_name(state.shop[i].card_id),
+            why=why,
+        )
+        for i, why in picks
+    )
+    names = names or tuple(dict.fromkeys(m.name for m in found))
+    whys = whys or tuple(next(m.why for m in found if m.name == n) for n in names)
+    return CoreMarks(
+        turn=state.turn,
+        shop=tuple(s.entity_id for s in state.shop),
+        marks=found,
+        names=names,
+        whys=whys,
+        source=source,
+    )
+
+
+def buy_rules(entity_id, turn=9, direction="畸变"):
+    plan = Plan(
+        source="rules", actions=(Action(type="buy", entity_id=entity_id),), direction=direction
+    )
+    return Advice(state_seq=1, turn=turn, plan=plan)
+
+
+def core_model(state=T9C, detail=False, buy=32, **kw):
+    model = OverlayModel(core_name, detail=detail, **kw)
+    model.on_update(state, started(state.turn))
+    model.show_rules(state, buy_rules(buy, turn=state.turn))
+    return model
+
+
+def test_core_line_and_dot_on_the_next_step():
+    model = core_model()
+    model.show_core_cards(T9C, marks_of(T9C, (2, SEWER_WHY)))
+    view = model.snapshot()
+    assert view.next_step.text == "▶ 买 左数第 3 个 下水道逃生鱼人"
+    assert view.next_step.slots == "商店 ○ ○ ● ○ ○ ○ ○"  # ● 优先
+    assert rows(view)[-1] == ("核心", "下水道逃生鱼人 · 鱼人·下水道逃生鱼人")
+    line = view.blocks[0].lines[-1]
+    assert (line.tone, line.role, line.max_lines) == ("dim", "aside", 1)
+    assert view.core_targets == (Target(row="shop", index=2, count=7),)
+
+
+def test_core_dots_beside_the_next_step():
+    model = core_model(buy=33)
+    model.show_core_cards(T9C, marks_of(T9C, (0, "龙·一号"), (1, "龙·一号"), (4, "龙·一号")))
+    view = model.snapshot()
+    assert view.next_step.slots == "商店 ◆ ◆ ○ ● ◆ ○ ○"
+    assert rows(view)[-1] == ("核心", "X1、X2、X4 · 流派核心")
+    assert [t.index for t in view.core_targets] == [0, 1, 4]
+
+
+def test_core_line_wordings():
+    from lscs.advisor.models import GamePlan
+
+    shop = make_state(turn=5, shop=core_shop("X1", "G", "X2", "G", "X3"))
+    model = core_model(shop, buy=30)
+    model.show_core_cards(shop, marks_of(shop, (1, "计划"), (3, "计划"), source="plan"))
+    assert labeled(model.snapshot(), "核心") == "飘荡祭品 ×2 · 计划"
+    model.show_plan(shop, GamePlan(comp="畸变神明", key_cards=("飘荡祭品",)), None)
+    assert [tag for tag, _ in rows(model.snapshot())][-2:] == ["计划", "核心"]  # 计划之后
+    mixed = make_state(turn=10, shop=core_shop("H", "I", "H", "J", "X1"))
+    model = core_model(mixed, buy=34)
+    whys = ((0, "恶魔·灰烬腐蚀者"), (1, "畸变·梦魇侵蚀怪"), (2, "恶魔·灰烬腐蚀者"))
+    model.show_core_cards(mixed, marks_of(mixed, *whys, (3, "龙·赤红守备巨龙")))
+    assert labeled(model.snapshot(), "核心") == "灰烬腐蚀者 ×2、梦魇侵蚀怪、青铜时光行者 · 流派核心"
+
+
+def test_no_shop_dots_when_the_next_step_is_not_in_the_shop():
+    model = OverlayModel(core_name)
+    model.on_update(T9C, started(9))
+    plan = Plan(source="rules", actions=(Action(type="refresh"),))
+    model.show_rules(T9C, Advice(state_seq=1, turn=9, plan=plan))
+    model.show_core_cards(T9C, marks_of(T9C, (2, SEWER_WHY)))
+    view = model.snapshot()
+    assert view.next_step.slots == ""  # 不另加一行商店圆点
+    assert labeled(view, "核心") == "下水道逃生鱼人 · 鱼人·下水道逃生鱼人"
+
+
+def test_stale_marks_are_not_shown_and_a_new_turn_clears_them():
+    model = core_model()
+    model.show_core_cards(T9C, marks_of(T9C, (2, SEWER_WHY)))
+    refreshed = T9C.model_copy(update={"shop": tuple(core_shop("E", "X9", first=50)), "seq": 2})
+    model.on_update(refreshed, [])  # 刷新了，运行器还没算完
+    view = model.snapshot()
+    assert labeled(view, "核心") is None and view.core_targets == ()
+    model.on_update(T9C.model_copy(update={"seq": 3}), [])  # 同一批商店：又对得上
+    assert labeled(model.snapshot(), "核心") is not None
+    next_turn = T9C.model_copy(update={"turn": 10, "seq": 4})  # 冻结的商店到了下一回合
+    model.on_update(next_turn, started(10))
+    assert labeled(model.snapshot(), "核心") is None
+    model.show_core_cards(next_turn, None)
+    assert model.snapshot().core_targets == ()
+
+
+def test_condensing_drops_the_core_line_but_keeps_the_dots():
+    model = core_model(buy=33)
+    model.show_core_cards(T9C, marks_of(T9C, (2, SEWER_WHY)))
+    view = condense(model.snapshot(), 1)
+    assert labeled(view, "核心") is None
+    assert view.next_step.slots == "商店 ○ ○ ◆ ● ○ ○ ○"
+
+
+def test_detail_watch_block_has_the_core_line_before_the_opponents():
+    from lscs.state.models import OpponentView
+
+    rival = OpponentView(player_id=3, hero_card_id="H", health=30, armor=0, place=2, tavern_tier=2)
+    state = T9C.model_copy(update={"opponents": {3: rival}, "next_opponent_id": 3})
+    model = core_model(state, detail=True)
+    model.show_core_cards(state, marks_of(state, (2, SEWER_WHY)))
+    view = model.snapshot()
+    assert view.next_step.slots == "商店 ○ ○ ● ○ ○ ○ ○"
+    watch = block(view, "aside")
+    assert watch.lines[0] == Line(
+        "◆ 核心 下水道逃生鱼人（鱼人·下水道逃生鱼人、鱼人·怒胆喷毒鱼人）",
+        "dim",
+        "aside",
+        max_lines=2,
+    )
+    assert watch.lines[1].text.startswith("下个对手")
+    plan = make_state(turn=5, shop=core_shop("X1", "G", "X2", "G"))
+    model = core_model(plan, detail=True, buy=30)
+    model.show_core_cards(plan, marks_of(plan, (1, "计划"), (3, "计划"), source="plan"))
+    assert block(model.snapshot(), "aside").lines[0].text == "◆ 核心 飘荡祭品 ×2（计划）"
+    assert block(condense(model.snapshot(), 1, detail=True), "aside") is None
+
+
+def triple_choice_state(kind="triple"):
+    from factory import choice_option, choice_state, make_choice
+
+    options = [
+        choice_option(61, "K", 0, 5, 5, tier=5),
+        choice_option(62, "L", 1, 4, 4, tier=6),
+        choice_option(63, "M", 2, 5, 6, tier=5),
+    ]
+    choice = make_choice(options, choice_id=21, kind=kind, source="")
+    return choice_state(choice, turn=9, shop=T9C.shop)
+
+
+@MODES
+def test_core_cards_among_the_triple_options(detail):
+    from factory import choice_event
+
+    from lscs.advisor.models import ChoiceAdvice
+
+    state = triple_choice_state()
+    model = OverlayModel(core_name, detail=detail)
+    model.on_update(state, [choice_event(state)])
+    names = ("无面转化者", "提图斯·瑞文戴尔")
+    model.show_core_cards(state, marks_of(state, names=names, whys=("计划", "计划"), source="plan"))
+    model.show_choice(state, ChoiceAdvice(choice_id=21, pick=63, reason="好"))
+    view = model.snapshot()
+    if detail:
+        assert texts(view)[:3] == ["◆ 无面转化者", "疑之影", "★◆ 提图斯·瑞文戴尔"]
+    else:
+        assert rows(view) == [("三连奖励", "◆无面转化者 · 疑之影 · ★◆提图斯·瑞文戴尔")]
+    assert view.core_targets == ()  # 弹出选项时不画徽章
+
+
+def test_trinkets_and_other_choices_are_not_marked():
+    from factory import choice_event
+
+    state = triple_choice_state(kind="dark_gift")
+    model = OverlayModel(core_name)
+    model.on_update(state, [choice_event(state)])
+    marks = marks_of(state, names=("无面转化者",), whys=("计划",), source="plan")
+    model.show_core_cards(state, marks)
+    assert "◆" not in str(model.snapshot().blocks)
+
+
+@MODES
+def test_core_marks_only_in_recruit_views(detail):
+    model = core_model(detail=detail)
+    model.show_core_cards(T9C, marks_of(T9C, (2, SEWER_WHY)))
+    assert model.snapshot().core_targets
+    model.on_update(make_state(turn=9, phase=Phase.COMBAT, seq=5), [])
+    view = model.snapshot()
+    assert view.core_targets == () and "◆" not in str(view)
+
+
+def _core_view(detail):
+    """带核心卡标记的招募视图（_all_views 用）。"""
+    model = core_model(detail=detail, buy=33)
+    model.show_core_cards(T9C, marks_of(T9C, (2, SEWER_WHY), (4, SEWER_WHY)))
+    return model.snapshot()
+
+
+@MODES
+def test_the_core_symbol_means_one_thing(detail):
+    from factory import choice_event
+
+    from lscs.advisor.models import ChoiceAdvice
+
+    state = triple_choice_state()
+    choice = OverlayModel(core_name, detail=detail)
+    choice.on_update(state, [choice_event(state)])
+    names = ("无面转化者", "提图斯·瑞文戴尔")
+    choice.show_core_cards(
+        state, marks_of(state, names=names, whys=("计划", "计划"), source="plan")
+    )
+    choice.show_choice(state, ChoiceAdvice(choice_id=21, pick=63, reason="好"))
+    for view in [*_all_views(detail), _core_view(detail), choice.snapshot()]:
+        assert "▶◆" not in str(view)
+        for b in view.blocks:
+            for line in b.lines:
+                if "◆" not in line.text and "◆" not in line.label:
+                    continue
+                assert "◆" not in line.label, line
+                if line.text.startswith("◆ 核心"):
+                    assert line.text.count("◆") == 1
+                    continue
+                # 选项行：◆ 紧挨在卡名前（前面只能是行首、"★"、分隔符或空格）
+                assert b.kind == "choice" or line.label == "三连奖励", line
+                for part in line.text.split(" · "):
+                    assert part.lstrip("★").lstrip().startswith("◆") or "◆" not in part, line

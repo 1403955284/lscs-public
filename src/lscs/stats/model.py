@@ -3,6 +3,10 @@
 只做相对比较：Firestone 的用户偏强，几乎所有英雄的平均名次都在 4.5 以下，所以英雄按平均名次
 在样本够的英雄里排名，饰品只在同一组选项里比。随从按"打出当回合"比较（回合修正），避开
 "活到后期的人本来名次就好"的幸存者偏差。样本少的条目标出来、不参与推荐。
+
+英雄的 tribeStats 读成"配某族更好"（流派指南自动更新设计文档第 6.1 节）：本局有这个种族时比没有时
+平均名次好 0.15 以上（impactAveragePositionVsMissingTribe ≤ TRIBE_FIT）、两边样本都够的种族，
+从好到差最多 MAX_FIT_TRIBES 个。选英雄时本局种族还不知道，只当小小的加分。
 """
 
 from __future__ import annotations
@@ -15,8 +19,10 @@ from datetime import UTC, datetime, tzinfo
 from pathlib import Path
 from typing import Any
 
+from hearthstone.enums import Race
 from pydantic import BaseModel, ConfigDict
 
+from lscs.advisor.names import TRIBE_ZH
 from lscs.config import StatsConfig
 
 log = logging.getLogger(__name__)
@@ -25,6 +31,9 @@ MIN_HERO_POINTS = 1000  # 全部英雄现在最少 1863；补丁刚更新那两�
 MIN_TRINKET_POINTS = 500  # 241 个饰品里 7 个低于它
 MIN_CARD_PLAYS = 2000  # 有数据的卡池随从全部 ≥ 5000，只为防补丁初期
 MIN_TURN_PLAYS = 200  # 回合修正只算打出 ≥ 200 次的回合
+MIN_TRIBE_POINTS = 1000  # 有这个种族、没有这个种族的局数都要够
+TRIBE_FIT = -0.15  # 有 vs 没有的平均名次差（负数是更好）
+MAX_FIT_TRIBES = 2
 PERIOD_ZH = {"last-patch": "本补丁", "past-seven": "最近 7 天"}
 MMR_ZH = {100: "全部玩家", 50: "前 50%", 25: "前 25%", 10: "前 10%", 1: "前 1%"}
 PANEL_SOURCE = "Firestone"
@@ -35,6 +44,15 @@ class _Frozen(BaseModel):
     model_config = ConfigDict(frozen=True)
 
 
+class TribeFit(_Frozen):
+    """本局有这个种族时，这个英雄的平均名次比没有时好多少。"""
+
+    race: str  # Race 枚举名
+    impact: float  # impactAveragePositionVsMissingTribe，保留两位（负数是更好）
+    with_points: int  # dataPoints：本局有这个种族的局数
+    without_points: int  # dataPointsOnMissingTribe：没有的局数
+
+
 class HeroStat(_Frozen):
     card_id: str
     data_points: int
@@ -42,6 +60,7 @@ class HeroStat(_Frozen):
     pick_rate: float  # totalPicked / totalOffered，0~1
     rank: int | None  # 在样本够的英雄里按平均名次排第几（1 起）；样本少时为 None
     low: bool  # data_points < MIN_HERO_POINTS
+    fits: tuple[TribeFit, ...] = ()  # 配哪个种族更好：按 impact 从好到差，最多 MAX_FIT_TRIBES 个
 
 
 class TrinketStat(_Frozen):
@@ -156,6 +175,48 @@ def _entries(data: dict, key: str, what: str, parse: Any) -> list:
     return parsed
 
 
+def _fit(raw: dict) -> TribeFit | None:
+    """一条 tribeStats：不认识的种族、样本不够、差得不够多时为 None；缺字段、类型不对时抛出。"""
+    tribe = raw["tribe"]
+    if isinstance(tribe, bool) or not isinstance(tribe, int):
+        raise TypeError("tribe 不是整数")
+    try:
+        race = Race(tribe).name
+    except ValueError:
+        return None
+    if race not in TRIBE_ZH or race == "ALL":
+        return None
+    with_points = int(_num(raw, "dataPoints"))
+    without_points = int(_num(raw, "dataPointsOnMissingTribe"))
+    impact = _num(raw, "impactAveragePositionVsMissingTribe")
+    if min(with_points, without_points) < MIN_TRIBE_POINTS or impact > TRIBE_FIT:
+        return None
+    return TribeFit(
+        race=race,
+        impact=round(impact, 2),
+        with_points=with_points,
+        without_points=without_points,
+    )
+
+
+def _fits(raw: dict) -> tuple[TribeFit, ...]:
+    """英雄的 tribeStats → 配哪个种族更好；没有、不是列表时为空，有误的条目跳过。"""
+    tribes = raw.get("tribeStats")
+    if not isinstance(tribes, list):
+        return ()
+    fits = []
+    for entry in tribes:
+        try:
+            fit = _fit(entry) if isinstance(entry, dict) else None
+        except (KeyError, TypeError, ValueError):
+            log.debug("跳过一条有误的种族统计：%r", entry, exc_info=True)
+            continue
+        if fit is not None:
+            fits.append(fit)
+    fits.sort(key=lambda f: (f.impact, f.race))
+    return tuple(fits[:MAX_FIT_TRIBES])
+
+
 def _hero(raw: dict) -> HeroStat:
     card_id = raw["heroCardId"]
     if not isinstance(card_id, str):
@@ -169,6 +230,7 @@ def _hero(raw: dict) -> HeroStat:
         pick_rate=picked / offered if offered else 0.0,
         rank=None,
         low=points < MIN_HERO_POINTS,
+        fits=_fits(raw),
     )
 
 

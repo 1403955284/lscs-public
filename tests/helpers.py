@@ -89,8 +89,8 @@ def fixture_stats(cards: bool = True, **cfg):
 
 def keep_away_from_real_files(monkeypatch, home):
     """命令行默认读项目目录下的 config.toml、把复盘写进 reviews/、把 AI 调用记在 recordings/、
-    把面板拖到的位置写进 overlay-position.json、把本版本统计缓存在本机的缓存目录：都换到 home
-    下面。也不让测试碰网络：urllib 的 urlopen 一调用就报错。conftest 的 autouse 守卫（每个用例）
+    把面板拖到的位置写进 overlay-position.json、把本版本统计和 HSReplay 流派指南缓存在本机的缓存
+    目录：都换到 home 下面。也不让测试碰网络：urllib 的 urlopen 一调用就报错。conftest 的 autouse 守卫（每个用例）
     和在模块级 fixture 里回放录像的测试（守卫还没生效时）都用它。"""
     import urllib.request
 
@@ -100,6 +100,7 @@ def keep_away_from_real_files(monkeypatch, home):
     monkeypatch.setattr(lscs.cli, "DEFAULT_CONFIG", home / "config.toml")
     monkeypatch.setattr(lscs.cli, "REVIEW_BASE", home)
     monkeypatch.setattr(lscs.cli, "STATS_CACHE_DIR", home / "cache")
+    monkeypatch.setattr(lscs.cli, "GUIDES_CACHE_DIR", home / "cache")
     monkeypatch.setattr(lscs.cli, "RECORDINGS_DIR", home / "recordings")
     monkeypatch.setattr(position, "DEFAULT_PATH", home / "overlay-position.json")
 
@@ -107,3 +108,29 @@ def keep_away_from_real_files(monkeypatch, home):
         raise OSError("测试不碰网络")
 
     monkeypatch.setattr(urllib.request, "urlopen", no_network)
+
+
+GUIDES_DIR = FIXTURES / "guides"  # 裁剪过的 HSReplay 流派指南和用到的卡（trim_guides.py 生成）
+GUIDES_FILE = GUIDES_DIR / "hsreplay-comp-guides.json"
+GUIDES_CARDS = GUIDES_DIR / "cards_guides.json"
+# HSReplay 的样本没有授权，不放进公开仓库（scripts/export_public.py）；没有时跳过依赖它的测试
+NEEDS_GUIDES_FIXTURES = pytest.mark.skipif(
+    not (GUIDES_FILE.exists() and GUIDES_CARDS.exists()),
+    reason="没有流派指南的夹具（公开版不带）",
+)
+
+
+def guides_cards():
+    """夹具里的卡牌数据（指南引用到的卡和用户那局商店里的几张）。"""
+    from lscs.cards.db import CardDB
+
+    return CardDB.from_json_file(GUIDES_CARDS)
+
+
+def fixture_live_guides(patch="2026-10-01"):
+    """夹具里的 HSReplay 流派指南（LiveGuides）；时间按 UTC。"""
+    from datetime import UTC, date
+
+    from lscs.guides.model import load_live_guides
+
+    return load_live_guides(GUIDES_FILE, date.fromisoformat(patch), guides_cards(), tz=UTC)

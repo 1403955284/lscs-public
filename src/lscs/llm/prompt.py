@@ -8,7 +8,12 @@
 流派指南与整局计划（整局计划与流派指南设计文档第 7 节）：招募的消息在战绩块之后多一块"本赛季
 流派指南"（只随本局种族变，llm.comps），对手块之后、回合行之前一行整局计划（还没定时请 AI 定
 一个）；系统提示多了长线运营的两条和【整局计划】一节，示例里有 plan；选项的消息在手牌之后多一行
-计划。选英雄的提示和消息不变。"""
+计划。选英雄的提示和消息不变。
+
+流派指南自动更新（流派指南自动更新设计文档第 4、6.3 节）：打开 [guides] 时"本赛季流派指南"块换成
+HSReplay 的指南（guides.model.to_comps_file，块标题自带"数据来自 HSReplay"和梯队、难度的说明），
+招募的系统提示不变；选英雄时有"配某族更好"的英雄在"本版本：…"后面多一段"有野兽时平均名次再好
+0.15"，说明行末尾多一句，选英雄的系统提示多一句"只当加分项"。没有这些数据时和以前逐字相同。"""
 
 from __future__ import annotations
 
@@ -49,7 +54,7 @@ from lscs.state.models import (
     ShopItem,
     TribesConfidence,
 )
-from lscs.stats.model import MetaStats
+from lscs.stats.model import MetaStats, TribeFit
 
 # 系统提示里的 JSON 示例（快速和深度共用同一个系统提示，方便 DeepSeek 缓存前缀）
 EXAMPLE = {
@@ -139,7 +144,7 @@ HERO_SYSTEM_TEMPLATE = """你是《炉石传说》酒馆战棋的高分教练，
 - 护甲：官方用起始护甲做平衡——越强的英雄给的护甲越少，护甲最少的英雄通常就是当前版本最强的。这是最可靠的强度信号，默认按它选；只有技能明显不适合新手、或明显依赖本局没有的条件时才偏离。
 - 局面里给了"本版本战绩"（平均名次、被选率、排名）时，以它为主、护甲为辅：平均名次差 0.1 以上就是明显差距，差不到 0.1 再看技能是否适合新手；没给战绩就按护甲。
 - 技能：看技能描述。新手优先选"每回合都有稳定收益、不需要复杂操作"的技能（加属性、给铸币、减费、免费刷新），少选要靠特定种族、特定卡或精细计算才强的技能。
-- 本局种族在选英雄时还看不到，所以依赖某个种族的技能要打折扣；只有本局机制（如神明）是已知的，可以结合它判断。
+- 本局种族在选英雄时还看不到，所以依赖某个种族的技能要打折扣；只有本局机制（如神明）是已知的，可以结合它判断。局面里写了"有某族时再好 N"的，只当加分项：两个英雄的平均名次差不到 0.1 时可以用它打破平手，差 0.1 以上还是按名次。
 - 不知道的事不要编：没有给出的数据不要假装知道。
 
 只输出一个 json 对象，格式：
@@ -722,25 +727,47 @@ def _hero_power_part(dbf: int | None, cards: CardDB) -> str:
     return f"技能 {power.name}（{cost} 金）{text}"
 
 
-def _hero_stats_line(stats: MetaStats) -> str:
+FIT_NOTE = (
+    '"有某族时再好 N"是本局有那个种族时它的平均名次比没有时好多少（两边样本都够才写）；'
+    "选英雄时还看不到本局种族，只能当作小小的加分。"
+)
+
+
+def _hero_stats_line(stats: MetaStats, fits: bool = False) -> str:
+    """fits：备选英雄里有"配某族更好"的（流派指南自动更新设计文档第 6.3 节），末尾说明它。"""
     median = stats.hero_median
     basis = f"全部英雄的中位数约 {median:.1f}，" if median is not None else ""
     return (
         f"本版本战绩：数据来自 Firestone，{stats.period_text} {stats.games} 局，{stats.mmr_text}，"
         f"{stats.date_text} 更新。平均名次越小越强，只在这几个英雄之间比较（{basis}不要拿 4.5 当"
-        '基准）；标了"样本少"的不可靠。'
+        '基准）；标了"样本少"的不可靠。' + (FIT_NOTE if fits else "")
     )
+
+
+def _fit_part(fits: Sequence[TribeFit]) -> str:
+    """ "；有野兽时平均名次再好 0.15"，两个种族时"；有野兽时再好 0.15、有亡灵时 0.16"。"""
+    if not fits:
+        return ""
+    if len(fits) == 1:
+        return f"；有{tribe_zh(fits[0].race)}时平均名次再好 {-fits[0].impact:.2f}"
+    first, *rest = fits
+    parts = [f"有{tribe_zh(first.race)}时再好 {-first.impact:.2f}"]
+    parts += [f"有{tribe_zh(f.race)}时 {-f.impact:.2f}" for f in rest]
+    return "；" + "、".join(parts)
 
 
 def _hero_stats_part(card_id: str, stats: MetaStats) -> str:
     stat = stats.hero(card_id)
     if stat is None:
         return "本版本：没有数据"
+    fit = _fit_part(stat.fits)
     if stat.low or stat.rank is None:
-        return f"本版本：第 {stat.average_position:.2f} 名（样本少，只有 {stat.data_points} 局）"
+        return (
+            f"本版本：第 {stat.average_position:.2f} 名（样本少，只有 {stat.data_points} 局）{fit}"
+        )
     return (
         f"本版本：第 {stat.average_position:.2f} 名，被选率 {pct(stat.pick_rate)}，"
-        f"{stats.hero_total} 个英雄里第 {stat.rank}（{stat.data_points} 局）"
+        f"{stats.hero_total} 个英雄里第 {stat.rank}（{stat.data_points} 局）{fit}"
     )
 
 
@@ -759,7 +786,8 @@ def build_hero_message(
         lines.append(mechanics)
     lines.append("本局种族：未知（选英雄时还看不到）")
     if stats is not None:
-        lines.append(_hero_stats_line(stats))
+        found = (stats.hero(h.card_id) for h in select.offered)
+        lines.append(_hero_stats_line(stats, any(s is not None and s.fits for s in found)))
     lines.append("备选英雄：")
     for h in select.offered:
         parts = [f"  [#{h.entity_id}] {w.name(h.card_id)}", armor_zh(h.armor)]

@@ -8,6 +8,7 @@ RULES_TAG = "#e6b450"  # 金黄
 AI_TAG = "#4fc9e0"  # 青色
 OPP_TAG = "#c9a0dc"  # 淡紫
 REVIEW_TAG = "#9fd3a0"  # 淡绿
+CORE_TAG = "#ff8fc2"  # 粉红：商店里的核心卡（"核心"标签；和金、青、淡紫、淡绿、橙都分得开）
 TEXT = "#f0f0f4"
 DIM = "#b4b4bc"  # 次要文字：比 MUTED 亮一点，仍然退后
 WARN = "#ff9f43"  # 橙色

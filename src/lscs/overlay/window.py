@@ -18,7 +18,7 @@ import sys
 import time
 import tkinter as tk
 import tkinter.font as tkfont
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from typing import Protocol
 
@@ -28,6 +28,7 @@ from lscs.overlay.banner import Banner
 from lscs.overlay.geometry import Anchor, Drag, Layout, Rect
 from lscs.overlay.grip import GripWindow
 from lscs.overlay.model import (
+    CORE_LABEL,
     DIRECTION,
     GOAL,
     PLAN,
@@ -40,12 +41,14 @@ from lscs.overlay.model import (
     NextStep,
     OverlayModel,
     OverlayView,
+    Target,
     condense,
     reason_lines,
 )
 from lscs.overlay.theme import (
     AI_TAG,
     BG,
+    CORE_TAG,
     DIM,
     DIVIDER,
     MUTED,
@@ -77,6 +80,7 @@ LABEL_COLORS = {
     DIRECTION: RULES_TAG,
     WHY: RULES_TAG,
     STRONGEST: OPP_TAG,
+    CORE_LABEL: CORE_TAG,
 }
 # 详细模式块标签的颜色
 BLOCK_COLORS = {
@@ -115,24 +119,30 @@ class HighlightLike(Protocol):
     def hwnd(self) -> int | None: ...  # Windows 上的窗口句柄（预览时为 None）
 
     def show(
-        self, step: NextStep | None, client: Rect | None, banner: Banner | None = None
+        self,
+        step: NextStep | None,
+        client: Rect | None,
+        banner: Banner | None = None,
+        markers: Sequence[Target] = (),
     ) -> bool | None:
-        """返回 True 表示 Tk 重建了高亮的顶层窗口（新的句柄）：面板要重新放到它上面。"""
+        """markers：商店核心卡的槽位（画"核"字徽章）。返回 True 表示 Tk 重建了高亮的顶层窗口
+        （新的句柄）：面板要重新放到它上面。"""
 
     def destroy(self) -> None: ...
 
 
 def highlight_inputs(
-    view: OverlayView | None, *, steps: bool, banner: bool, now: float
-) -> tuple[NextStep | None, Banner | None]:
-    """交给画面高亮的 (下一步, 横幅)：steps 是 [highlight] enabled，banner 是 [combat_result]
-    enabled；对局结束那场的横幅过了 expires_at 就不画（定位每 500 毫秒一次，最多晚半秒清掉）。"""
+    view: OverlayView | None, *, steps: bool, banner: bool, now: float, core: bool = False
+) -> tuple[NextStep | None, Banner | None, tuple[Target, ...]]:
+    """交给画面高亮的 (下一步, 横幅, 核心卡的槽位)：steps 是 [highlight] enabled，banner 是
+    [combat_result] enabled，core 是 [highlight] enabled 且 core_marks；对局结束那场的横幅过了
+    expires_at 就不画（定位每 500 毫秒一次，最多晚半秒清掉）。"""
     if view is None:
-        return None, None
+        return None, None, ()
     shown = view.banner if banner else None
     if shown is not None and shown.expires_at is not None and now >= shown.expires_at:
         shown = None
-    return (view.next_step if steps else None), shown
+    return (view.next_step if steps else None), shown, (view.core_targets if core else ())
 
 
 def _tk_highlight(root: tk.Misc, cfg: HighlightConfig) -> HighlightLike:
@@ -176,6 +186,8 @@ class OverlayWindow:
         self._out = out
         self._position_path = position_path
         self._steps = highlight is not None and highlight.enabled  # 画"下一步"
+        # 画商店核心卡的"核"字徽章（[highlight] core_marks；关掉高亮时也不画）
+        self._core = self._steps and highlight is not None and highlight.core_marks
         self._banner = highlight is not None and banner  # 画战斗结果的横幅
         self._highlight_cfg = highlight if self._steps or self._banner else None
         self._clock = clock
@@ -338,11 +350,11 @@ class OverlayWindow:
         """client 为 None：面板隐藏了，高亮也清空。画错不影响面板，同一种错误只记一次。"""
         if self._highlight is None:
             return
-        step, banner = highlight_inputs(
-            self._view, steps=self._steps, banner=self._banner, now=self._clock()
+        step, banner, markers = highlight_inputs(
+            self._view, steps=self._steps, banner=self._banner, now=self._clock(), core=self._core
         )
         try:
-            if self._highlight.show(step, client, banner):
+            if self._highlight.show(step, client, banner, markers):
                 self._lift_panel()  # 高亮换了新的顶层窗口：面板和标签重新放到它上面
         except Exception:
             self._report("画面高亮出错")

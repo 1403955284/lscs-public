@@ -23,6 +23,7 @@ PositionRole = Literal["deathrattle", "rally", "avenge", "taunt_edge"]
 Stage = Literal["前期", "过渡", "成型", "保血"]
 STAGES: tuple[str, ...] = ("前期", "过渡", "成型", "保血")
 UNDECIDED = "未定"  # 前几回合还没定目标流派
+FIT_SUFFIX = "更好"  # StatRow.fit 的结尾："配野兽更好"
 
 
 class _Frozen(BaseModel):
@@ -115,6 +116,14 @@ class StatRow(_Frozen):
     text: str  # 短句："第 3.67 名 · 选 28% · 第 5/116"（样本少："第 4.20 名（样本少）"）
     score: float  # 排序用：平均名次，越小越好
     low: bool = False  # 样本少：照样显示，不参与"战绩最好"
+    # 选英雄配种族（流派指南自动更新设计文档第 6.2 节）："配野兽更好"、"配野兽、亡灵更好"；
+    # 没有时为空
+    fit: str = ""
+
+    @property
+    def fit_short(self) -> str:
+        """面板精简模式用的短写："配野兽"。"""
+        return self.fit.removesuffix(FIT_SUFFIX)
 
 
 class StatsNote(_Frozen):

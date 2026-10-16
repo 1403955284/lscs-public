@@ -41,7 +41,9 @@
   按本局种族缓存，和卡池块一样只在种族变化时才变。
 - 流派指南（整局计划与流派指南设计文档第 3 节）：招募消息里的"本赛季流派指南"块同样按本局种族
   缓存（comp_guide 关闭或没有 comps.md 时没有）；只发给定计划的那一路（深度分析，深度关闭时是
-  快速建议），深度分析打开时快速建议不拿。
+  快速建议），深度分析打开时快速建议不拿。流派指南由一个函数给出（comps.md，或打开 [guides] 时
+  后台准备好的 HSReplay 指南，流派指南自动更新设计文档第 3.4 节）：和本版本统计一样，一局里第一次
+  取到之后整局复用，后台中途换了不影响这局的缓存前缀和计划的流派名。
 - 整局计划（同上第 4~6 节）：交付前校验回答里的 plan（_sanitize_plan）；深度分析的结果（操作过期、
   只看思路的也算；深度关闭时是快速建议的）带着计划时采用它，晚到的更早回合的不覆盖新的；定下、
   改了、只改阶段时在 AIResult 之后发 PlanUpdated，照抄时不发。计划写进之后的招募消息（对手块之后）
@@ -250,10 +252,11 @@ class LLMScheduler:
         run_async: Callable[[Callable[[], None]], None] = _run_in_thread,
         hero_debounce: float = HERO_DEBOUNCE,
         stats: Callable[[], MetaStats | None] | None = None,
-        comps: CompsFile | None = None,
+        comps: Callable[[], CompsFile | None] | None = None,
     ) -> None:
         """stats：取本版本统计（StatsStore.get，还没准备好时返回 None）；统计关闭时为 None。
-        comps：本赛季流派指南（strategy/current/comps.md）；没有文件时为 None。"""
+        comps：取本赛季流派指南（GuidesStore.comps，或总是返回 comps.md 的函数；还没有时返回
+        None）；没有指南时为 None。"""
         self._provider = provider
         self._stats = stats
         self._comps = comps
@@ -352,8 +355,10 @@ class LLMScheduler:
         self._game_stats: MetaStats | None = None
         # (本局种族, 战绩块)：种族变了才重算
         self._stats_block: tuple[frozenset[str], str | None] | None = None
-        # (本局种族, 流派指南块)：同上
-        self._comps_block: tuple[frozenset[str], str | None] | None = None
+        # 本局的流派指南：第一次取到（不是 None）之后整局复用
+        self._game_comps: CompsFile | None = None
+        # (流派指南, 本局种族, 流派指南块)：指南或种族变了才重算
+        self._comps_block: tuple[CompsFile, frozenset[str], str | None] | None = None
 
     def observe(self, state: GameState, events: Sequence[Event], ctx: TurnContext | None) -> None:
         """每次状态更新都调用；只记下要发的请求，不在这里发出。"""
@@ -619,6 +624,9 @@ class LLMScheduler:
                     pending.state, self._cards, self._memory, stats, self._game_plan
                 )
             assert pending.ctx is not None
+            # 在主线程里定下本局的流派指南：工作线程里的解析和计划校验（_parse、_sanitize_plan）
+            # 只读这份快照，不再去取（comp_guide 关闭时也要它把流派名对到指南的标题）
+            comps = self._comps_for_game()
             return build_user_message(
                 pending.state,
                 pending.ctx,
@@ -627,7 +635,9 @@ class LLMScheduler:
                 opponents_block=self._opponents_block(pending.state),
                 stats_block=self._stats_block_for(pending.state.tribes, stats),
                 comps_block=(
-                    self._comps_block_for(pending.state.tribes) if self._writes_plan(lane) else None
+                    self._comps_block_for(pending.state.tribes, comps)
+                    if self._writes_plan(lane)
+                    else None
                 ),
                 game_plan=self._game_plan,
                 plan_enabled=self._cfg.game_plan,
@@ -664,15 +674,26 @@ class LLMScheduler:
             self._stats_block = cached
         return cached[1]
 
-    def _comps_block_for(self, tribes: frozenset[str]) -> str | None:
-        """本局种族能走的流派；没有流派指南或 comp_guide 关闭时为 None。"""
-        if self._comps is None or not self._cfg.comp_guide:
+    def _comps_for_game(self) -> CompsFile | None:
+        """本局的流派指南：还没有（None）时每次都再取一次，第一次取到之后整局都用这一份（后台在
+        对局中途准备好 HSReplay 的指南也不换，前缀和计划的流派名不变）。取的时候出错就当这次
+        没有。"""
+        if self._game_comps is None and self._comps is not None:
+            try:
+                self._game_comps = self._comps()
+            except Exception:
+                log.warning("取流派指南时出错，这次的 AI 消息不用指南", exc_info=True)
+        return self._game_comps
+
+    def _comps_block_for(self, tribes: frozenset[str], comps: CompsFile | None) -> str | None:
+        """本局种族能走的流派（comps：本局的流派指南）；没有流派指南或 comp_guide 关闭时为 None。"""
+        if comps is None or not self._cfg.comp_guide:
             return None
         cached = self._comps_block
-        if cached is None or cached[0] != tribes:
-            cached = (tribes, comps_block(self._comps, tribes))
+        if cached is None or cached[0] is not comps or cached[1] != tribes:
+            cached = (comps, tribes, comps_block(comps, tribes))
             self._comps_block = cached
-        return cached[1]
+        return cached[2]
 
     def _opponents_block(self, state: GameState) -> str:
         cached = self._opponents
@@ -774,7 +795,8 @@ class LLMScheduler:
             offered = [o.entity_id for o in choice.options] if choice is not None else []
             return parse_choice_pick(text, offered, request.choice_id or 0)
         if lane is not self._hero:
-            return parse_plan(text)
+            comps = self._game_comps  # 工作线程：只读发出请求时定下的快照
+            return parse_plan(text, lambda name: match_comp(name, comps))
         select = request.state.hero_select
         offered = [h.entity_id for h in select.offered] if select is not None else []
         return parse_hero_pick(text, offered, request.signature)
@@ -826,7 +848,7 @@ class LLMScheduler:
         if tribe is not None and confirmed and tribe not in state.tribes:
             tribe = None
         update: dict[str, object] = {"key_cards": tuple(kept), "tribe": tribe, "turn": state.turn}
-        canonical = match_comp(raw.comp, self._comps)
+        canonical = match_comp(raw.comp, self._game_comps)  # 工作线程：只读本局的快照
         if canonical is not None and canonical != raw.comp:
             update["comp"] = canonical  # AI 换个说法写同一个流派：用指南里的标题
         me = state.me

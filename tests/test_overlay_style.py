@@ -282,3 +282,46 @@ def test_cancel_errors_are_ignored():
     pulse.show(("商店1",))
     pulse.stop()
     assert not pulse.active
+
+
+def test_core_label_is_pink_and_distinct_from_the_other_tags():
+    pytest.importorskip("tkinter")
+    from lscs.config import HighlightConfig
+    from lscs.overlay import theme, window
+
+    assert theme.CORE_TAG == "#ff8fc2" == HighlightConfig().core_color
+    assert window.LABEL_COLORS["核心"] == theme.CORE_TAG
+    others = {theme.RULES_TAG, theme.AI_TAG, theme.OPP_TAG, theme.REVIEW_TAG, theme.WARN}
+    assert theme.CORE_TAG not in others
+
+
+# ---- 核心卡的"核"字徽章（流派指南自动更新设计文档第 5.4 节） ----
+
+
+def _overlap(a, b):
+    return ((a.cx - b.cx) ** 2 + (a.cy - b.cy) ** 2) ** 0.5 < a.r + b.r
+
+
+@pytest.mark.parametrize("height", [1080, 1440, 2160])
+def test_marker_circle_sits_on_the_top_left_and_is_small(height):
+    from lscs.overlay.style import marker_circle
+
+    rect = slot_rect(LAYOUT, "shop", 2, 7, Rect(0, 0, height * 16 // 9, height))
+    circle = marker_circle(rect, height)
+    assert circle.r <= 0.009 * height + 0.5  # 比步骤徽章小一点
+    assert circle.cy + circle.r <= rect.y  # 整个圆在框的上方
+    assert rect.x <= circle.cx - circle.r  # 不往左伸到旁边那张牌的上方
+    assert circle.cx < rect.x + rect.width / 2  # 在左半边
+
+
+@pytest.mark.parametrize("height", [720, 1080, 1369, 1440, 2160])
+def test_step_and_core_badges_never_overlap(height):
+    from lscs.overlay.style import marker_circle
+
+    client = Rect(0, 0, height * 16 // 9, height)
+    for index in range(1, 7):
+        left = slot_rect(LAYOUT, "shop", index - 1, 7, client)
+        here = slot_rect(LAYOUT, "shop", index, 7, client)
+        core = marker_circle(here, height)
+        assert not _overlap(core, badge_circle(left, height))  # 左边那张是下一步
+        assert not _overlap(core, badge_circle(here, height))  # 同一张既是下一步又是核心卡

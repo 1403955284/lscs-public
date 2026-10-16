@@ -443,3 +443,120 @@ def test_stats_errors_do_not_stop_the_rules(caplog):
     runner.on_update(state, [offered_event(state)])
     assert [method for method, _ in display.calls] == ["show_hero"]
     assert "坏了" in caplog.text
+
+
+# ---- 商店核心卡（流派指南自动更新设计文档第 5.1 节） ----
+
+CORE_NAMES = {"BGS_061": "海盗无赖", "BG36_099": "蚀脑怪", "BG36_113": "飘荡祭品"}
+
+
+def core_name(card_id):
+    return CORE_NAMES.get(card_id, card_id)
+
+
+def core_comps():
+    from lscs.llm.comps import CompGuide, CompsFile
+
+    pirates = CompGuide("海盗·一号", frozenset({"PIRATE"}), "", core_cards=("海盗无赖",))
+    return CompsFile("标题", (pirates,))
+
+
+class PlanScheduler(SpyScheduler):
+    """带整局计划的调度器替身；tick 时可以交出 PlanUpdated。"""
+
+    def __init__(self):
+        super().__init__()
+        self.game_plan, self.events = None, []
+
+    def tick(self):
+        events, self.events = self.events, []
+        return events
+
+
+def core_calls(display):
+    return [args[1] for method, args in display.calls if method == "show_core_cards"]
+
+
+def recruit(turn=3, seq=1, shop_ids=(20, 21), card="BGS_061", event=EventType.RECRUIT_STARTED):
+    shop = [shop_minion(i, card, 3, 1) for i in shop_ids]
+    state = make_state(turn=turn, seq=seq, shop=shop, tribes={"PIRATE", "BEAST"})
+    return state, [Event(type=event, turn=turn)]
+
+
+def test_core_cards_are_shown_only_when_the_marks_change():
+    display = RecordingDisplay()
+    taken = []
+
+    def comps():
+        taken.append(1)
+        return core_comps()
+
+    runner = AdviceRunner(RULES, core_name, display, comps=comps)
+    runner.on_update(*recruit())
+    (marks,) = core_calls(display)
+    assert [m.entity_id for m in marks.marks] == [20, 21] and marks.source == "guides"
+    runner.on_update(*recruit(seq=2, event=EventType.GOLD_CHANGED))  # 商店没变
+    assert len(core_calls(display)) == 1
+    runner.on_update(*recruit(seq=3, shop_ids=(21,), event=EventType.SHOP_CHANGED))  # 买了一张
+    assert [m.entity_id for m in core_calls(display)[-1].marks] == [21]
+    runner.on_update(*recruit(seq=4, shop_ids=(30,), card="X", event=EventType.SHOP_CHANGED))
+    assert core_calls(display)[-1].marks == ()  # 刷新后没有核心卡：清掉上一批
+    assert len(taken) == 1  # 本局第一次取到之后复用
+    runner.on_update(make_state(turn=1, seq=5), [Event(type=EventType.GAME_STARTED, turn=0)])
+    runner.on_update(*recruit(turn=1, seq=6))
+    assert len(taken) == 2  # 新的一局重新取
+
+
+def test_core_cards_follow_the_plan_and_its_updates():
+    from lscs.advisor.models import GamePlan
+    from lscs.llm.scheduler import PlanUpdated
+
+    display = RecordingDisplay()
+    scheduler = PlanScheduler()
+    runner = AdviceRunner(RULES, core_name, display, scheduler, comps=core_comps)
+    state, events = recruit(shop_ids=(20, 22))
+    state = state.model_copy(update={"shop": (*state.shop[:1], shop_minion(22, "BG36_113", 2, 3))})
+    runner.on_update(state, events)
+    assert core_calls(display)[-1].source == "guides"
+    plan = GamePlan(comp="畸变神明", key_cards=("蚀脑怪", "飘荡祭品"))
+    scheduler.game_plan = plan
+    scheduler.events = [PlanUpdated(plan, None, 3)]
+    runner.tick()
+    marks = core_calls(display)[-1]
+    assert marks.source == "plan" and [m.name for m in marks.marks] == ["飘荡祭品"]
+    runner.tick()
+    assert len(core_calls(display)) == 2  # 没有新的计划：不重算
+
+
+def test_core_cards_on_a_triple_choice_but_not_on_trinkets():
+    from factory import choice_event, choice_option, choice_state, make_choice
+
+    display = RecordingDisplay()
+    runner = AdviceRunner(RULES, core_name, display, comps=core_comps)
+    options = [choice_option(31, "BGS_061", 0, 3, 1, tier=1)]
+    for kind, calls in (("triple", 1), ("trinket", 1)):  # 饰品：不再交
+        state = choice_state(make_choice(options, kind=kind), turn=6, tribes={"PIRATE"})
+        runner.on_update(state, [choice_event(state)])
+        assert len(core_calls(display)) == calls, kind
+    triple = choice_state(make_choice(options, choice_id=13, kind="triple"), tribes={"PIRATE"})
+    runner.on_update(triple, [choice_event(triple)])
+    assert len(core_calls(display)) == 2  # 和上次一样也再交一次：选项要标
+
+
+def test_no_core_cards_without_a_plan_or_guides_and_errors_only_log(monkeypatch, caplog):
+    import lscs.advisor.runner
+
+    display = RecordingDisplay()
+    runner = AdviceRunner(RULES, core_name, display)
+    runner.on_update(*recruit())
+    assert core_calls(display) == []
+
+    def boom(*_args):
+        raise RuntimeError("坏了")
+
+    monkeypatch.setattr(lscs.advisor.runner, "core_marks", boom)
+    runner = AdviceRunner(RULES, core_name, display, comps=core_comps)
+    runner.on_update(*recruit())
+    runner.on_update(*recruit(seq=2, shop_ids=(22,), event=EventType.SHOP_CHANGED))
+    assert core_calls(display) == [] and caplog.text.count("计算商店核心卡时出错") == 1
+    assert any(method == "show_rules" for method, _ in display.calls)  # 建议照常
