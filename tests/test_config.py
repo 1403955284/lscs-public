@@ -303,6 +303,14 @@ def test_all_opponents_defaults_on_and_can_be_switched_off(tmp_path):
     assert "\nall_opponents = true " in EXAMPLE.read_text(encoding="utf-8")
 
 
+def test_opponent_boards_default_on_and_can_be_switched_off(tmp_path):
+    assert load_config(tmp_path / "config.toml").overlay.opponent_boards is True
+    cfg = load_config(write(tmp_path, "[overlay]\nopponent_boards = false\n"))
+    assert cfg.overlay.opponent_boards is False
+    assert cfg.overlay.opponents is True  # 两个开关互不影响
+    assert "\nopponent_boards = true " in EXAMPLE.read_text(encoding="utf-8")
+
+
 def test_overlay_opponents_defaults_on_and_can_be_switched_off(tmp_path):
     assert load_config(tmp_path / "config.toml").overlay.opponents is True
     cfg = load_config(write(tmp_path, "[overlay]\nopponents = false\n"))

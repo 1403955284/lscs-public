@@ -134,6 +134,11 @@ Windows 上双击项目文件夹里的 `启动.bat` 等于 `uv run lscs watch`�
   面板右上角的"≡ 拖动"标签是单独的不穿透、不抢焦点的窗口（`overlay/grip.py`，面板本身照样整块穿透），
   按住它拖动面板，位置按客户区比例存在项目文件夹的 `overlay-position.json`（不进仓库，不改 `config.toml`），
   换分辨率照样跟着走；双击标签或删掉文件回到预设。Mac 预览也能拖，只是不保存。
+- 对手阵容卡图窗口（`[overlay] opponent_boards`）：拖动标签左边的"对手"标签（`overlay/tab.py`，和拖动标签同一个
+  骨架 `overlay/tag.py`）点一下开 / 关一个整块穿透的画布窗口（`overlay/boards_window.py`），默认贴在客户区左侧的
+  排行榜上，画每个对手上次交手时的阵容（`overlay/boards.py` 纯函数排版）。卡图是 HearthstoneJSON 的 256x 原画，
+  按需下载、按卡牌 ID 永久缓存，后台线程只解码（`cards/art.py`），Tk 线程裁成椭圆（`overlay/portraits.py`）；
+  所以多了 Pillow 依赖（没有时只画名字）。贴靠炉石时同一个 Tk 一共五个窗口：面板、画面高亮、两个标签和卡图窗口。
 - 画面高亮（`[highlight]`）：Windows 上贴靠炉石时，再开一个和面板同一个 Tk 的置顶窗口盖住炉石客户区，
   背景用 `-transparentcolor` 色键（完全透明），再加上穿透、不抢焦点的扩展样式（不调 `SetLayeredWindowAttributes`，
   否则会盖掉色键），只给"下一步"画四角括号（浅金线 + 深色衬底，`style = "frame"` 改成整圈细线框）和右上角的

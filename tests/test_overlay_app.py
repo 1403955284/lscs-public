@@ -258,10 +258,49 @@ def test_watch_window_remembers_its_position_in_the_project_file(monkeypatch):
     cfg, highlight = OverlayConfig(), HighlightConfig()
     app.create_tk_window(cfg, highlight=highlight)
     path = position.DEFAULT_PATH
-    assert created == [(cfg, {"highlight": highlight, "banner": False, "position_path": path})]
+    expected = {"highlight": highlight, "banner": False, "position_path": path, "art": None}
+    assert created == [(cfg, expected)]
     assert position.DEFAULT_PATH.name == "overlay-position.json"
     app.create_tk_window(cfg, highlight=highlight, banner=True)  # [combat_result] 交给窗口
     assert created[-1][1]["banner"] is True
+
+
+def test_watch_window_gets_an_art_cache_only_when_opponent_boards_are_on(monkeypatch, tmp_path):
+    """[overlay] opponent_boards 开着、给了缓存目录时开卡图缓存交给窗口；关着时一张都不下载
+    （不创建缓存）。窗口打不开时停掉缓存的线程。"""
+    import pytest
+
+    pytest.importorskip("tkinter")
+    from lscs.cards import art as art_module
+    from lscs.overlay import app, window
+
+    caches, created = [], []
+
+    class FakeArtCache:
+        def __init__(self, cache_dir):
+            self.cache_dir = cache_dir
+            self.stopped = False
+            caches.append(self)
+
+        def stop(self):
+            self.stopped = True
+
+    class FakeOverlayWindow:
+        def __init__(self, cfg, **kwargs):
+            created.append(kwargs)
+            if cfg.font_size == 33:
+                raise RuntimeError("打不开")
+
+    monkeypatch.setattr(art_module, "ArtCache", FakeArtCache)
+    monkeypatch.setattr(window, "OverlayWindow", FakeOverlayWindow)
+    app.create_tk_window(OverlayConfig(), art_dir=tmp_path / "art")
+    assert len(caches) == 1 and caches[0].cache_dir == tmp_path / "art"
+    assert created[-1]["art"] is caches[0] and not caches[0].stopped
+    app.create_tk_window(OverlayConfig(opponent_boards=False), art_dir=tmp_path / "art")
+    assert len(caches) == 1 and created[-1]["art"] is None
+    with pytest.raises(RuntimeError):
+        app.create_tk_window(OverlayConfig(font_size=33), art_dir=tmp_path / "art")
+    assert caches[-1].stopped
 
 
 def _banner(expires_at=None):

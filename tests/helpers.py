@@ -89,8 +89,8 @@ def fixture_stats(cards: bool = True, **cfg):
 
 def keep_away_from_real_files(monkeypatch, home):
     """命令行默认读项目目录下的 config.toml、把复盘写进 reviews/、把 AI 调用记在 recordings/、
-    把面板拖到的位置写进 overlay-position.json、把本版本统计和 HSReplay 流派指南缓存在本机的缓存
-    目录：都换到 home 下面。也不让测试碰网络：urllib 的 urlopen 一调用就报错。conftest 的 autouse 守卫（每个用例）
+    把面板拖到的位置写进 overlay-position.json、把本版本统计、HSReplay 流派指南和对手阵容的卡图
+    缓存在本机的缓存目录：都换到 home 下面。也不让测试碰网络：urllib 的 urlopen 一调用就报错。conftest 的 autouse 守卫（每个用例）
     和在模块级 fixture 里回放录像的测试（守卫还没生效时）都用它。"""
     import urllib.request
 
@@ -101,6 +101,7 @@ def keep_away_from_real_files(monkeypatch, home):
     monkeypatch.setattr(lscs.cli, "REVIEW_BASE", home)
     monkeypatch.setattr(lscs.cli, "STATS_CACHE_DIR", home / "cache")
     monkeypatch.setattr(lscs.cli, "GUIDES_CACHE_DIR", home / "cache")
+    monkeypatch.setattr(lscs.cli, "ART_CACHE_DIR", home / "cache" / "art")
     monkeypatch.setattr(lscs.cli, "RECORDINGS_DIR", home / "recordings")
     monkeypatch.setattr(position, "DEFAULT_PATH", home / "overlay-position.json")
 

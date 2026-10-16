@@ -15,6 +15,7 @@ import signal
 import threading
 import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import Protocol
 
 from lscs.config import HighlightConfig, OverlayConfig
@@ -45,17 +46,32 @@ def _print(line: str) -> None:
 
 
 def create_tk_window(
-    cfg: OverlayConfig, highlight: HighlightConfig | None = None, banner: bool = False
+    cfg: OverlayConfig,
+    highlight: HighlightConfig | None = None,
+    banner: bool = False,
+    art_dir: Path | None = None,
 ) -> OverlayWindowLike:
     """highlight：config.toml 的 [highlight]（画面高亮）；None 时不画。banner：在棋盘顶部画战斗
     结果的横幅（config.toml 的 [combat_result]）。拖到的位置记在项目文件夹的
-    overlay-position.json（运行时才取 position.DEFAULT_PATH，测试里换成了临时目录）。"""
+    overlay-position.json（运行时才取 position.DEFAULT_PATH，测试里换成了临时目录）。
+    art_dir：对手阵容卡图的缓存目录；[overlay] opponent_boards 开着时在这里开卡图缓存（后台
+    下载线程）交给窗口，None 时不下载（卡图窗口只画名字）。"""
     from lscs.overlay import position
     from lscs.overlay.window import OverlayWindow  # 没有 tkinter 时在这里抛出 ImportError
 
-    return OverlayWindow(
-        cfg, highlight=highlight, banner=banner, position_path=position.DEFAULT_PATH
-    )
+    art = None
+    if cfg.opponent_boards and art_dir is not None:
+        from lscs.cards.art import ArtCache
+
+        art = ArtCache(art_dir)
+    try:
+        return OverlayWindow(
+            cfg, highlight=highlight, banner=banner, position_path=position.DEFAULT_PATH, art=art
+        )
+    except BaseException:
+        if art is not None:
+            art.stop()
+        raise
 
 
 class Controller:

@@ -67,6 +67,7 @@ from lscs.advisor.opponents import (
     OpponentOverview,
     OpponentSummary,
     eliminated_names,
+    opponent_text,
     summarize_opponents,
 )
 from lscs.advisor.plan_check import key_cards_text, off_plan_note, plain_name
@@ -76,6 +77,7 @@ from lscs.advisor.runner import remaining_plan
 from lscs.llm.notices import AUTH_DISABLED, BUDGET_EXHAUSTED
 from lscs.llm.parse import MAX_ACTIONS  # 详细模式最多列几步：和 AI 回答的上限一致
 from lscs.overlay.banner import Banner, BannerTracker
+from lscs.overlay.boards import NO_GAME, OpponentBoards, build_boards
 from lscs.overlay.geometry import NAME_SEP, STEP_SEP
 from lscs.review.report import CIRCLED as REVIEW_NUMBERS
 from lscs.review.report import GameReview, saved_text
@@ -394,40 +396,6 @@ def _board_brief(s: OpponentSummary) -> str:
     return board if s.alive else f"残影 · {board}"
 
 
-def _opponent_text(
-    s: OpponentSummary, name: Namer, turn: int, *, place: bool, seen: bool, threat: bool
-) -> str:
-    """详细模式战斗中一个对手的写法：名字 血量+护甲 · N本 · 主种族×数 身材 S（· 第 T 回合见）
-    （· 威胁 N）；淘汰的只写"已淘汰"，残影写它最后的阵容有几个、多大。place：前面加名次。"""
-    hero = name(s.hero_card_id) if s.hero_card_id else "未知"
-    head = f"第{s.place if s.place is not None else '?'}名 {hero}" if place else hero
-    when = "本回合见" if s.seen_turn == turn else f"第 {s.seen_turn} 回合见"
-    if not s.alive:
-        if not s.next:
-            return f"{head} 已淘汰"
-        if s.seen_turn is None:
-            return f"{head} 已淘汰（残影）· 还没见过阵容"
-        if s.empty_board:
-            return f"{head} 已淘汰（残影）· {when}到空场"
-        return f"{head} 已淘汰（残影）· {when} {s.minions} 个 · 身材 {s.total_stats}"
-    tier = "?" if s.tavern_tier is None else s.tavern_tier
-    parts = [f"{head} {s.health}+{s.armor}", f"{tier}本"]
-    if s.seen_turn is None:
-        parts.append("还没见过阵容")
-    elif s.empty_board:
-        parts.append(f"{when}到空场" if seen else "见到空场")
-    else:
-        stats = f"身材 {s.total_stats}"
-        if s.main_tribe is not None:
-            stats = f"{tribe_zh(s.main_tribe)}×{s.tribe_count} {stats}"
-        parts.append(stats)
-        if seen:
-            parts.append(when)
-    if threat:
-        parts.append(f"威胁 {s.threat}")
-    return " · ".join(parts)
-
-
 def _look_for_text(look_for: tuple[str, ...], notes: tuple[PoolNote, ...]) -> str:
     """写成"要找 A（约 11 张）、B"：按整张牌截断，放得下几张写几张，后面还有就加"…"；一张都
     放不下时按字截。"""
@@ -562,6 +530,13 @@ class OverlayModel:
         self._stats_note: StatsNote | None = None  # 这组备选英雄或饰品的本版本统计
         self._game_plan: GamePlan | None = None  # 整局计划：换回合保留，新对局清空
         self._core_marks: CoreMarks | None = None  # 商店里的核心卡（换回合清空）
+        # 对手阵容卡图窗口（overlay.boards）：第几局（GAME_STARTED 累加，换局时窗口自动关上）、
+        # 上次整理的内容和版本（界面要的时候才整理，局面或局数变了才重算）
+        self._game = 0
+        self._boards = OpponentBoards(title=NO_GAME, rows=(), eliminated="", note="", game=0)
+        self._boards_version = 0
+        self._boards_input: tuple[GameState | None, int] | None = None
+        self._boards_failed = False
 
     # ---- 界面线程 ----
 
@@ -569,12 +544,34 @@ class OverlayModel:
         with self._lock:
             return replace(self._content, version=self._version)
 
+    def boards(self) -> OpponentBoards:
+        """对手阵容卡图窗口的内容：每个对手上次交手时的阵容。局面或局数变了才重新整理，内容
+        （按值比较）变了版本号才加一。整理出错时保留上次的内容（只记一次警告）。"""
+        with self._lock:
+            state, game = self._state, self._game
+            last = self._boards_input  # 每次状态更新都是新的局面对象：按身份比较
+            if last is None or last[0] is not state or last[1] != game:
+                self._boards_input = (state, game)
+                try:
+                    overview = self._overview(state) if state is not None else None
+                    content = build_boards(state, overview, self._name, game)
+                except Exception:
+                    if not self._boards_failed:
+                        self._boards_failed = True
+                        log.warning("整理对手阵容时出错，卡图窗口保留上次的内容", exc_info=True)
+                else:
+                    if content != self._boards:
+                        self._boards = content
+                        self._boards_version += 1
+            return replace(self._boards, version=self._boards_version)
+
     # ---- 监听线程 ----
 
     def on_update(self, state: GameState, events: list[Event]) -> None:
         with self._lock:
             self._state = state
             if any(e.type == EventType.GAME_STARTED for e in events):
+                self._game += 1  # 对手阵容卡图窗口看到局数变了就关上
                 if self._ai_off is not None and self._ai_off[1]:
                     self._ai_off = None
                 self._hero_rules, self._hero_ai = None, None  # 新对局（或重连）：重新开始
@@ -930,16 +927,16 @@ class OverlayModel:
         current = next((s for s in overview.opponents if s.next), None)
         best = next((s for s in overview.opponents if s.strongest), None)
         if current is not None:
-            text = _opponent_text(
+            text = opponent_text(
                 current, name, turn, place=True, seen=True, threat=current.strongest
             )
             lines.append(Line(f"{'对手·最强' if current.strongest else '对手'} {text}"))
         if best is not None and not best.next:
-            text = _opponent_text(best, name, turn, place=True, seen=False, threat=True)
+            text = opponent_text(best, name, turn, place=True, seen=False, threat=True)
             lines.append(Line(f"{STRONGEST} {text}"))
         for s in overview.opponents:
             if s.alive and not s.next and not s.strongest:
-                text = _opponent_text(s, name, turn, place=True, seen=True, threat=False)
+                text = opponent_text(s, name, turn, place=True, seen=True, threat=False)
                 lines.append(Line(text, "dim", "opponent", small=True))
         gone = eliminated_names(overview, name)
         if gone:

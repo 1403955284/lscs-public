@@ -8,6 +8,7 @@ dependencies = [
     "hearthstone>=9.22",
     "pydantic>=2.7",
     "openai>=3.28.0",
+    "pillow>=10",
 ]
 
 [project.scripts]

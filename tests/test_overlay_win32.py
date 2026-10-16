@@ -76,6 +76,13 @@ def test_should_show_only_when_hearthstone_or_panel_is_foreground():
     assert should_show(hearthstone=10, foreground=50, panel=20, minimized=False, grip=50)
     assert not should_show(hearthstone=10, foreground=50, panel=20, minimized=False, grip=None)
     assert not should_show(hearthstone=10, foreground=50, panel=20, minimized=True, grip=50)
+    # "对手"标签和卡图窗口万一成了前台窗口也算
+    assert should_show(hearthstone=10, foreground=60, panel=20, minimized=False, others=(50, 60))
+    assert should_show(hearthstone=10, foreground=60, panel=20, minimized=False, others=(None, 60))
+    assert not should_show(
+        hearthstone=10, foreground=70, panel=20, minimized=False, others=(50, 60)
+    )
+    assert not should_show(hearthstone=10, foreground=60, panel=20, minimized=True, others=(60,))
 
 
 class FakeWindows:

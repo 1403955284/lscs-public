@@ -2911,3 +2911,85 @@ def test_the_core_symbol_means_one_thing(detail):
                 assert b.kind == "choice" or line.label == "三连奖励", line
                 for part in line.text.split(" · "):
                     assert part.lstrip("★").lstrip().startswith("◆") or "◆" not in part, line
+
+
+# ---- 对手阵容卡图窗口（对手阵容卡图窗口设计文档第 4、5.4 节） ----
+
+
+def _rivals(health=30):
+    from lscs.state.models import OpponentView
+
+    seen = OpponentView(
+        player_id=2,
+        hero_card_id="H2",
+        health=health,
+        armor=0,
+        place=1,
+        tavern_tier=4,
+        last_board=(minion(30, "C", 5, 5),),
+        last_seen_turn=2,
+    )
+    unseen = OpponentView(
+        player_id=3, hero_card_id="H3", health=20, armor=0, place=2, tavern_tier=3
+    )
+    return {2: seen, 3: unseen}
+
+
+def _with_rivals(seq=1, health=30, next_id=2):
+    return make_state(turn=3, seq=seq).model_copy(
+        update={"opponents": _rivals(health), "next_opponent_id": next_id}
+    )
+
+
+def test_boards_follow_the_state_and_change_version_only_when_content_changes():
+    model = OverlayModel(name)
+    empty = model.boards()
+    assert empty.title == "还没有对局" and empty.rows == () and empty.version == 0
+    model.on_update(_with_rivals(), [])
+    first = model.boards()
+    assert first.title == "对手阵容（上次交手时）· 第 3 回合"
+    assert [r.player_id for r in first.rows] == [2, 3] and first.version == 1
+    assert first.rows[0].label == "下个对手·最强"
+    assert [p.name for p in first.rows[0].portraits] == ["蚀脑怪"]
+    assert model.boards() == first  # 没有新局面：不重算
+    model.on_update(_with_rivals(seq=2), [])  # 新的局面对象，内容一样：版本不变
+    assert model.boards().version == 1
+    model.on_update(_with_rivals(seq=3, health=12), [])
+    changed = model.boards()
+    assert changed.version == 2 and "12+0" in changed.rows[0].text
+
+
+def test_game_counter_counts_game_started_events():
+    model = OverlayModel(name)
+    assert model.boards().game == 0
+    model.on_update(make_state(turn=1), [Event(type=EventType.GAME_STARTED, turn=0)])
+    assert model.boards().game == 1
+    model.on_update(make_state(turn=1, seq=2), [])
+    assert model.boards().game == 1
+    model.on_update(make_state(turn=1, seq=3), [Event(type=EventType.GAME_STARTED, turn=0)])
+    after = model.boards()
+    assert after.game == 2 and after.version >= 1
+
+
+def test_boards_do_not_depend_on_the_opponents_switch():
+    model = OverlayModel(name, opponents=False)
+    model.on_update(_with_rivals(), [])
+    assert [r.player_id for r in model.boards().rows] == [2, 3]  # 卡图窗口不看 [overlay] opponents
+
+
+def test_boards_keep_the_last_content_when_building_fails(monkeypatch, caplog):
+    import lscs.overlay.model as model_module
+
+    model = OverlayModel(name)
+    model.on_update(_with_rivals(), [])
+    good = model.boards()
+
+    def broken(*_args):
+        raise ValueError("坏了")
+
+    monkeypatch.setattr(model_module, "build_boards", broken)
+    model.on_update(_with_rivals(seq=2, health=5), [])
+    assert model.boards() == good
+    model.on_update(_with_rivals(seq=3, health=4), [])
+    assert model.boards() == good
+    assert len([r for r in caplog.records if r.levelname == "WARNING"]) == 1

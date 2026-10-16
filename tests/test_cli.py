@@ -786,7 +786,7 @@ def test_watch_falls_back_to_terminal_when_overlay_cannot_start(
 ):
     import lscs.overlay.app
 
-    def no_tk(_cfg, highlight=None, banner=False):
+    def no_tk(_cfg, highlight=None, banner=False, art_dir=None):
         raise ImportError("No module named '_tkinter'")
 
     monkeypatch.setattr(lscs.overlay.app, "create_tk_window", no_tk)
@@ -801,7 +801,7 @@ def test_watch_falls_back_to_terminal_when_overlay_cannot_start(
 def test_watch_no_overlay_flag_keeps_terminal_only(monkeypatch, tmp_path, mini_lines, capsys):
     import lscs.overlay.app
 
-    def must_not_open(_cfg, highlight=None, banner=False):
+    def must_not_open(_cfg, highlight=None, banner=False, art_dir=None):
         raise AssertionError("不该打开面板")
 
     monkeypatch.setattr(lscs.overlay.app, "create_tk_window", must_not_open)
@@ -835,7 +835,7 @@ def test_watch_warns_about_old_highlight_values(
 ):
     import lscs.overlay.app
 
-    def no_tk(_cfg, highlight=None, banner=False):
+    def no_tk(_cfg, highlight=None, banner=False, art_dir=None):
         raise ImportError("No module named '_tkinter'")
 
     monkeypatch.setattr(lscs.overlay.app, "create_tk_window", no_tk)
@@ -861,7 +861,7 @@ def test_watch_without_old_highlight_values_or_highlight_prints_no_warning(
 ):
     import lscs.overlay.app
 
-    def no_tk(_cfg, highlight=None, banner=False):
+    def no_tk(_cfg, highlight=None, banner=False, art_dir=None):
         raise ImportError("No module named '_tkinter'")
 
     monkeypatch.setattr(lscs.overlay.app, "create_tk_window", no_tk)
@@ -969,8 +969,8 @@ def test_watch_with_overlay_feeds_panel_and_stops_on_ctrl_c(
 
     highlights = []
 
-    def create(_cfg, highlight=None, banner=False):
-        highlights.append((highlight, banner))
+    def create(_cfg, highlight=None, banner=False, art_dir=None):
+        highlights.append((highlight, banner, art_dir))
         return FakeWindow()
 
     import lscs.cli
@@ -989,6 +989,7 @@ def test_watch_with_overlay_feeds_panel_and_stops_on_ctrl_c(
     assert main(argv) == 0
     assert highlights[0][0].shop_y == 0.3  # config.toml 的 [highlight] 交给面板窗口
     assert highlights[0][1] is True  # [combat_result] 默认开：高亮窗口画战斗结果的横幅
+    assert highlights[0][2] == lscs.cli.ART_CACHE_DIR  # 对手阵容的卡图缓存（测试里是临时目录）
     # 面板按规则配置的买牌价判断"做得起"；[overlay] detail 交给面板的数据模型
     assert panels[0]["buy_cost"].__func__ is RulesConfig.buy_cost_for
     assert panels[0]["detail"] is False
@@ -1040,7 +1041,7 @@ def test_combat_result_switch_reaches_the_window(
 
     banners = []
 
-    def no_tk(_cfg, highlight=None, banner=False):
+    def no_tk(_cfg, highlight=None, banner=False, art_dir=None):
         banners.append(banner)
         raise ImportError("No module named '_tkinter'")
 

@@ -5,10 +5,13 @@ Windows 上贴靠炉石时，再开一个画面高亮窗口（overlay.highlight�
 
 面板右上角贴着拖动标签（overlay.grip，第三个 Toplevel，不穿透、不抢焦点）：按住它把面板拖走，
 松手后按炉石客户区的比例记在 overlay-position.json（overlay.position），双击恢复默认位置。
-面板和标签合起来叫"箱子"，标签在箱子右上角、面板在它下面，两者不重叠。
+拖动标签左边是"对手"标签（overlay.tab，同样不穿透、不抢焦点）：点一下打开对手阵容卡图窗口
+（overlay.boards_window，第五个 Toplevel，整块穿透；默认贴在客户区左侧），再点一下关掉。
+面板和标签合起来叫"箱子"，标签在箱子顶上一行、面板在它下面，两者不重叠。层次：高亮 < 卡图
+窗口 < 面板和标签（卡图窗口和面板不重叠）。
 
 只在主线程使用。定时器回调里的任何异常都只记日志，定时器照常继续；高亮出错只影响高亮，
-标签出错只是不能拖。
+拖动标签出错只是不能拖，"对手"标签或卡图窗口出错只是看不了对手阵容。
 """
 
 from __future__ import annotations
@@ -22,9 +25,12 @@ from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from typing import Protocol
 
+from lscs.cards.art import ArtCache, pillow_version
 from lscs.config import HighlightConfig, OverlayConfig
 from lscs.overlay import geometry, position, win32
 from lscs.overlay.banner import Banner
+from lscs.overlay.boards import OpponentBoards, Side, boards_layout, boards_rect, boards_side
+from lscs.overlay.boards_window import BoardsWindow
 from lscs.overlay.geometry import Anchor, Drag, Layout, Rect
 from lscs.overlay.grip import GripWindow
 from lscs.overlay.model import (
@@ -45,6 +51,8 @@ from lscs.overlay.model import (
     condense,
     reason_lines,
 )
+from lscs.overlay.portraits import Portraits
+from lscs.overlay.tab import TabWindow
 from lscs.overlay.theme import (
     AI_TAG,
     BG,
@@ -109,6 +117,28 @@ FOCUS_LOST = (
 )
 # 拖动标签已经关掉了：问题不在标签上，只请用户告诉开发者
 FOCUS_LOST_NO_GRIP = "注意：炉石失去了焦点（前台是 lscs 的面板）；如果反复出现，请告诉开发者"
+BOARDS_ON = '点面板上方的"对手"看所有对手上次交手时的阵容。'
+# Windows 上退回普通置顶窗口时卡图窗口没法穿透鼠标：关掉对手阵容（"对手"标签也一起去掉）
+BOARDS_OFF_PLAIN = "对手阵容已关闭：面板无法贴靠炉石，卡图窗口没法穿透鼠标"
+NO_PILLOW = "（没有 Pillow，卡图只显示名字；运行 uv sync 安装）"
+FOCUS_LOST_SWITCHES = (
+    "注意：炉石失去了焦点（前台是 lscs 的面板）；"
+    "如果反复出现，请把 [overlay] {switches} 设为 false 并告诉开发者"
+)
+
+
+def focus_lost_text(drag_handle: bool, opponent_boards: bool) -> str:
+    """提醒"炉石失去了焦点"：只叫用户关掉开着的标签（拖动标签、"对手"标签）；都关着时只请
+    用户告诉开发者。"""
+    switches = [
+        key
+        for key, on in (("drag_handle", drag_handle), ("opponent_boards", opponent_boards))
+        if on
+    ]
+    if not switches:
+        return FOCUS_LOST_NO_GRIP
+    return FOCUS_LOST_SWITCHES.format(switches=" 和 ".join(switches))
+
 
 Output = Callable[[str], None]
 HighlightFactory = Callable[[tk.Misc, HighlightConfig], "HighlightLike"]
@@ -176,12 +206,14 @@ class OverlayWindow:
         position_path: Path | None = None,
         banner: bool = False,
         clock: Callable[[], float] = time.monotonic,
+        art: ArtCache | None = None,
     ) -> None:
         """highlight：config.toml 的 [highlight]；None 时不开画面高亮窗口。
         banner：在高亮窗口上画战斗结果的横幅（config.toml 的 [combat_result]）。[highlight] 关掉
         但要横幅时照样开高亮窗口，只是不画"下一步"；两个都关才不开。clock 判断横幅到期没有。
         position_path：拖到的位置存在哪（lscs watch 用 position.DEFAULT_PATH）；None 时不读不写，
-        拖动只在这次有效。"""
+        拖动只在这次有效。art：对手阵容的卡图缓存（[overlay] opponent_boards 开着时
+        app.create_tk_window 开好交进来，窗口关闭时停掉它）；None 时卡图窗口只画名字。"""
         self._cfg = cfg
         self._out = out
         self._position_path = position_path
@@ -193,6 +225,7 @@ class OverlayWindow:
         self._clock = clock
         self._make_highlight = make_highlight
         self._highlight: HighlightLike | None = None
+        self._art = art
         previous = None
         if win32.IS_WINDOWS:
             try:
@@ -239,6 +272,13 @@ class OverlayWindow:
         self._native = False
         self._dock_failures = 0
         self._grip: GripWindow | None = None
+        self._tab: TabWindow | None = None  # "对手"标签
+        self._boards: BoardsWindow | None = None  # 对手阵容卡图窗口
+        self._boards_open = False  # 点开了卡图窗口（每次启动都是关着的）
+        self._boards_game: int | None = None  # 上次看到的局数：变了（换局）就关上
+        self._boards_data: OpponentBoards | None = None  # 最近一次从数据模型取到的内容
+        self._boards_side: Side | None = None  # 卡图窗口在客户区的哪边（拖动面板时不换边）
+        self._art_generation = 0  # 上次画卡图时缓存的 generation
         self._drag: Drag | None = None  # 正在拖动时：按下时鼠标和箱子的位置
         self._mouse = (0, 0)  # 拖动中鼠标现在的位置（屏幕坐标）
         self._motions = 0  # 收到过几次拖动的移动事件
@@ -259,6 +299,7 @@ class OverlayWindow:
             self.status += self._open_grip()
             if self._grip is not None:
                 self.status += DRAG_PREVIEW
+            self.status += self._open_tab()
             if self._highlight_cfg is not None:
                 self.status += HIGHLIGHT_ONLY_WINDOWS
             return
@@ -282,6 +323,7 @@ class OverlayWindow:
             if self._highlight_cfg is not None:
                 self.status += HIGHLIGHT_OFF_PLAIN + "。"
         self.status += self._open_grip()
+        self.status += self._open_tab()
         self._give_focus_back(previous)
 
     def _open_highlight(self) -> str:
@@ -331,11 +373,66 @@ class OverlayWindow:
             grip.destroy()
         self._out(f"拖动标签出错（{_reason(exc)}），面板不能拖动了，其余照常。")
 
+    def _open_tab(self) -> str:
+        """创建"对手"标签和对手阵容卡图窗口（都放在屏幕外，窗口关着），返回加在状态行后面的
+        说明。失败只是看不了对手阵容，面板和拖动标签照常。[overlay] opponent_boards = false 时
+        都不开（也不下载卡图）。"""
+        if not self._cfg.opponent_boards:
+            self._stop_art()
+            return ""
+        if win32.IS_WINDOWS and not self._native:  # 启动时就没贴上炉石（退路）
+            self._stop_art()
+            return BOARDS_OFF_PLAIN + "。"
+        try:
+            font = self._font(geometry.font_px(self._screen().height, self._cfg.font_size))
+            self._tab = TabWindow(
+                self._root,
+                font,
+                self._cfg.opacity,
+                self._native,
+                on_press=self._tab_press,
+                on_release=self._tab_release,
+            )
+            portraits = Portraits(self._art, self._root)
+            self._boards = BoardsWindow(
+                self._root, self._cfg.opacity, self._native, self._font, portraits
+            )
+        except Exception as exc:
+            log.warning("对手标签无法开启", exc_info=True)
+            self._drop_tab()
+            return f"看不了对手阵容（{_reason(exc)}）。"
+        return BOARDS_ON + (NO_PILLOW if pillow_version() is None else "")
+
+    def _drop_tab(self) -> None:
+        """关掉"对手"标签和卡图窗口，停掉卡图下载。"""
+        boards, self._boards = self._boards, None
+        tab, self._tab = self._tab, None
+        self._boards_open = False
+        for window in (boards, tab):
+            if window is not None:
+                window.destroy()  # 先于 root：标签的绑定引用着 self
+        self._stop_art()
+
+    def _stop_art(self) -> None:
+        art, self._art = self._art, None
+        if art is not None:
+            art.stop()
+
+    def _close_tab(self, exc: BaseException) -> None:
+        """对手标签或卡图窗口出错：两个都关掉（看不了对手阵容了），面板照常。"""
+        log.warning("对手标签出错，已关闭", exc_info=exc)
+        self._drop_tab()
+        self._out(f"对手标签出错（{_reason(exc)}），看不了对手阵容了，其余照常。")
+
     def _lift_panel(self) -> None:
-        """面板和标签都放到画面高亮上面（两者不重叠，谁上谁下无所谓）。"""
+        """卡图窗口、面板和标签都放到画面高亮上面；面板和标签再放到卡图窗口上面（彼此都不重叠，
+        谁上谁下无所谓）。"""
+        if self._boards is not None:
+            self._boards.lift()
         self._root.lift()
-        if self._grip is not None:
-            self._grip.lift()
+        for tag in (self._grip, self._tab):
+            if tag is not None:
+                tag.lift()
 
     def _close_highlight(self) -> None:
         highlight, self._highlight = self._highlight, None
@@ -359,14 +456,22 @@ class OverlayWindow:
         except Exception:
             self._report("画面高亮出错")
 
+    def _tag_hwnds(self) -> tuple[int | None, int | None, int | None]:
+        """拖动标签、"对手"标签、卡图窗口的句柄（没有的是 None）。"""
+        grip, tab, boards = self._grip, self._tab, self._boards
+        return (
+            grip.hwnd if grip is not None else None,
+            tab.hwnd if tab is not None else None,
+            boards.hwnd if boards is not None else None,
+        )
+
     def _give_focus_back(self, previous: int | None) -> None:
-        """面板（或画面高亮、拖动标签）第一次显示时可能抢走 PowerShell 的焦点
+        """面板（或画面高亮、两个标签、卡图窗口）第一次显示时可能抢走 PowerShell 的焦点
         （之后按 Ctrl+C 没反应），还给它。"""
         try:
             panel = win32.root_window(self._root.winfo_id())
             highlight = self._highlight.hwnd if self._highlight is not None else None
-            grip = self._grip.hwnd if self._grip is not None else None
-            ours = {hwnd for hwnd in (panel, highlight, grip) if hwnd}
+            ours = {hwnd for hwnd in (panel, highlight, *self._tag_hwnds()) if hwnd}
             if previous and ours and previous not in ours and win32.foreground_window() in ours:
                 win32.set_foreground(previous)
         except Exception:
@@ -388,6 +493,7 @@ class OverlayWindow:
     def _release(self) -> None:
         """销毁窗口并拆掉引用环，让 Tk 对象在主线程里就被释放。"""
         self._close_highlight()
+        self._drop_tab()  # 卡图窗口、"对手"标签，停掉卡图下载
         grip, self._grip = self._grip, None
         if grip is not None:
             grip.destroy()  # 先于 root：标签的绑定引用着 self
@@ -418,6 +524,11 @@ class OverlayWindow:
                 self._place()  # 内容变了，高度也可能变
         except Exception:
             self._report("刷新悬浮面板时出错")
+        try:
+            if self._refresh_boards():
+                self._place()
+        except Exception:
+            self._report("刷新对手阵容时出错")
         self._root.after(RENDER_MS, self._render_tick)
 
     def _place_tick(self) -> None:
@@ -470,6 +581,10 @@ class OverlayWindow:
                 self._grip.use_plain()
             except Exception as exc:
                 self._close_grip(exc)
+        if self._tab is not None or self._boards is not None:
+            # 普通置顶窗口没法穿透：卡图窗口会挡住游戏，关掉；没有它"对手"标签也没用，一起去掉
+            self._drop_tab()
+            self._out(BOARDS_OFF_PLAIN)
         if self._highlight is not None:  # 普通置顶窗口没法保证穿透：高亮不画了
             self._close_highlight()
             self._out(HIGHLIGHT_OFF_PLAIN)
@@ -502,10 +617,12 @@ class OverlayWindow:
         foreground = win32.foreground_window()
         if hearthstone is not None and foreground in self._own_windows():
             self._note_focus_lost()  # 面板和标签都不该成为前台：提醒一次，方便排查
-        # 高亮窗口偶尔在前台（比如刚创建时）也算：不然面板会隐藏一个周期
+        # 高亮窗口偶尔在前台（比如刚创建时）也算：不然面板会隐藏一个周期；标签、卡图窗口也一样
         highlight = self._highlight.hwnd if self._highlight is not None else None
-        grip = self._grip.hwnd if self._grip is not None else None
-        if not win32.should_show(hearthstone, foreground, self._hwnd, minimized, highlight, grip):
+        grip, tab, boards = self._tag_hwnds()
+        if not win32.should_show(
+            hearthstone, foreground, self._hwnd, minimized, highlight, grip, others=(tab, boards)
+        ):
             return None
         client = win32.client_rect(hearthstone)
         return (client, True) if client is not None else None
@@ -516,6 +633,7 @@ class OverlayWindow:
             self._placed = None
             self._update_highlight(None)  # 先清空高亮：它从不抛出异常
             self._check_grip_style()  # 隐藏时也检查（重新加样式会把它显示出来，下一行再藏好）
+            self._check_tab_style()
             self._set_visible(False)
             return
         area, docked = target
@@ -525,10 +643,15 @@ class OverlayWindow:
             self._draw()
             if self._grip is not None:
                 self._grip.set_font(self._font(layout.font_px))
+            if self._tab is not None:
+                self._tab.set_font(self._font(layout.font_px))
         panel_w, panel_h = self._size
         grip_w, grip_h = geometry.grip_size(layout) if self._grip is not None else (0, 0)
-        # 箱子 = 标签 + 面板；面板只有一行变窄时也不窄于标签
-        width, height = max(panel_w, grip_w), panel_h + grip_h
+        tab_w, tab_h = geometry.tab_size(layout) if self._tab is not None else (0, 0)
+        gap = geometry.tab_gap(layout) if grip_w and tab_w else 0
+        # 箱子 = 标签那一行 + 面板；面板只有一行变窄时也不窄于两个标签
+        tags_h = max(grip_h, tab_h)
+        width, height = geometry.box_width(panel_w, grip_w, tab_w, gap), panel_h + tags_h
         if docked:
             screen = (win32.virtual_screen() if self._native else None) or self._screen()
         else:
@@ -539,14 +662,16 @@ class OverlayWindow:
         else:
             preset = geometry.PRESETS[self._cfg.position] if docked else geometry.CORNER
             x, y = geometry.dock(area, screen, width, height, self._anchors[docked] or preset)
-        panel, grip = geometry.split_box(x, y, width, panel_h, grip_w, grip_h)
+        panel, grip, tab = geometry.split_box(x, y, width, panel_h, grip_w, tags_h, tab_w, gap)
         if (panel.width, panel.height, panel.x, panel.y) != self._geometry:
             self._geometry = (panel.width, panel.height, panel.x, panel.y)
             self._root.geometry(f"{panel.width}x{panel.height}+{panel.x}+{panel.y}")
         self._placed = (area, docked, Rect(x, y, width, height))
         self._place_grip(grip)
+        self._place_tab(tab)
         self._set_visible(True)
         self._update_highlight(area if docked else None)
+        self._place_boards(area, screen, docked, self._placed[2])
 
     def _check_grip_style(self) -> bool:
         """Windows 上每次定位（显示或隐藏）都检查标签的样式；Tk 重建了它的顶层窗口时把面板和它
@@ -569,6 +694,72 @@ class OverlayWindow:
         except Exception as exc:
             self._close_grip(exc)
 
+    def _check_tab_style(self) -> bool:
+        """和拖动标签一样：每次定位都检查"对手"标签和卡图窗口的样式，Tk 重建了它们的顶层窗口时
+        把卡图窗口、面板和标签放回高亮上面。返回 False 表示没有（出错时已经关掉了）。"""
+        if self._tab is None or self._boards is None:
+            return False
+        try:
+            rebuilt = self._tab.apply_style()
+            rebuilt = self._boards.apply_style() or rebuilt
+            if rebuilt:
+                self._lift_panel()
+        except Exception as exc:
+            self._close_tab(exc)
+            return False
+        return True
+
+    def _place_tab(self, rect: Rect) -> None:
+        if not self._check_tab_style():
+            return
+        try:
+            self._tab.place(rect)
+        except Exception as exc:
+            self._close_tab(exc)
+
+    def _place_boards(self, area: Rect, screen: Rect, docked: bool, box: Rect) -> None:
+        """面板显示着时：卡图窗口开着就放好、画好（位置、内容、卡图变了才改），关着就移到屏幕外。
+        拖动面板的过程中不换边（松手后下一次定位再按新位置算）。"""
+        boards, data = self._boards, self._boards_data
+        if boards is None or self._layout is None:
+            return
+        try:
+            if not self._boards_open or data is None:
+                boards.hide(offscreen=True)
+            else:
+                layout = boards_layout(area, self._layout.font_px, data)
+                if self._drag is None or self._boards_side is None:
+                    self._boards_side = boards_side(area, box)
+                rect = boards_rect(area, screen, box, layout, docked, self._boards_side)
+                boards.show(data, layout, rect)
+            if self._tab is not None:
+                self._tab.set_open(boards.shown)  # 窗口真的显示着才是"开着"的颜色
+        except Exception as exc:
+            self._close_tab(exc)
+
+    def _refresh_boards(self) -> bool:
+        """从数据模型取对手阵容（RENDER_MS 一次）：换局了就关上窗口；内容变了就要卡图（窗口
+        没打开也要，点开时图已经在了）。返回 True 表示要重新定位、重画（窗口开着、内容或卡图变了，
+        或者刚因为换局关上）。"""
+        if self._tab is None or self._boards is None or self._model is None:
+            return False
+        data = self._model.boards()
+        redraw = False
+        if self._boards_game is not None and data.game != self._boards_game and self._boards_open:
+            self._boards_open = False  # 新的一局：自动关上（标签的颜色在下一次定位时跟着变）
+            redraw = True
+        self._boards_game = data.game
+        if self._boards_data is None or data.version != self._boards_data.version:
+            self._boards_data = data
+            if self._art is not None:
+                self._art.request(data.card_ids())
+            redraw = redraw or self._boards_open
+        generation = self._art.generation if self._art is not None else 0
+        if generation != self._art_generation:
+            self._art_generation = generation
+            redraw = redraw or self._boards_open
+        return redraw
+
     def _set_visible(self, visible: bool) -> None:
         """只有贴靠炉石时才会隐藏，标签跟着面板一起。隐藏用透明度 0 而不是 withdraw()：窗口
         一直在，不会因为重新显示而抢走炉石的焦点，Tk 也不会重建顶层窗口、丢掉穿透样式；
@@ -585,20 +776,26 @@ class OverlayWindow:
                 self._grip.set_visible(visible)
             except Exception as exc:
                 self._close_grip(exc)
+        if self._tab is not None and self._boards is not None:
+            try:
+                self._tab.set_visible(visible)
+                if not visible:
+                    self._boards.hide(offscreen=False)  # 位置不动；再显示由 _place_boards 决定
+            except Exception as exc:
+                self._close_tab(exc)
 
     # ---- 拖动（标签的回调，屏幕坐标） ----
 
     def _own_windows(self) -> set[int]:
-        """面板和拖动标签的句柄。"""
-        grip = self._grip.hwnd if self._grip is not None else None
-        return {hwnd for hwnd in (self._hwnd, grip) if hwnd}
+        """面板、两个标签和卡图窗口的句柄。"""
+        return {hwnd for hwnd in (self._hwnd, *self._tag_hwnds()) if hwnd}
 
     def _note_focus_lost(self) -> None:
         if self._focus_warned:
             return
         self._focus_warned = True
-        log.warning("炉石失去了焦点：前台是 lscs 的面板或拖动标签")
-        self._out(FOCUS_LOST if self._cfg.drag_handle else FOCUS_LOST_NO_GRIP)
+        log.warning("炉石失去了焦点：前台是 lscs 的面板或标签")
+        self._out(focus_lost_text(self._cfg.drag_handle, self._cfg.opponent_boards))
 
     def _keep_hearthstone_in_front(self) -> None:
         """标签不抢焦点（WS_EX_NOACTIVATE）；万一按下、松开时前台还是成了面板或标签，马上还给
@@ -615,6 +812,29 @@ class OverlayWindow:
             win32.set_foreground(hearthstone)
         except Exception:
             log.debug("把焦点还给炉石时出错", exc_info=True)
+
+    # ---- "对手"标签（屏幕坐标） ----
+
+    def _tab_press(self, x: int, y: int) -> None:
+        self._keep_hearthstone_in_front()
+
+    def _tab_release(self, x: int, y: int) -> None:
+        """松手时指针还在标签里才算点了一下：开 / 关卡图窗口，马上放好或收起（不等 500 毫秒），
+        标签的颜色跟着窗口是不是真的显示着变。面板隐藏着时什么都不做。"""
+        self._keep_hearthstone_in_front()
+        tab = self._tab
+        if self._placed is None or tab is None or tab.geometry is None:
+            return
+        rect = tab.geometry
+        if not (rect.x <= x < rect.right and rect.y <= y < rect.bottom):
+            return
+        self._boards_open = not self._boards_open
+        if self._boards_open:
+            try:
+                self._refresh_boards()  # 用最新的数据画
+            except Exception:
+                self._report("刷新对手阵容时出错")
+        self._place_now()
 
     def _grip_press(self, x: int, y: int) -> None:
         self._keep_hearthstone_in_front()

@@ -70,6 +70,8 @@ class OverlayConfig(BaseModel):
     drag_handle: bool = True  # 面板右上角的"≡ 拖动"标签；false 不开（面板留在预设或上次拖到的位置）
     # 对手：战斗中的"最强"一行（详细模式还有招募时"留意"的对手和战斗中的对手一览）
     opponents: bool = True
+    # 面板上方的"对手"小标签：点一下在炉石左侧显示所有对手上次交手时的阵容卡图（和 opponents 无关）
+    opponent_boards: bool = True
     detail: bool = False  # 详细模式：分区列出本回合的每一步、要找、对子和对手；默认精简
 
     @field_validator("font_size")

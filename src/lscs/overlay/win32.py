@@ -78,11 +78,13 @@ def should_show(
     minimized: bool,
     highlight: int | None = None,
     grip: int | None = None,
+    others: Iterable[int | None] = (),
 ) -> bool:
-    """炉石（或面板自己、画面高亮窗口、拖动标签）在前台、而且没有最小化时才显示。"""
+    """炉石（或面板自己、画面高亮窗口、拖动标签、others 里的"对手"标签和卡图窗口）在前台、
+    而且没有最小化时才显示。"""
     if hearthstone is None or foreground is None or minimized:
         return False
-    return foreground in (hearthstone, panel, highlight, grip)
+    return foreground in (hearthstone, panel, highlight, grip, *others)
 
 
 class HearthstoneLocator:

@@ -25,6 +25,8 @@ BOTTOM_MARGIN = 0.02  # 左右位置：距客户区底边 2% 高度，向上长�
 TOP_MARGIN = 0.02  # 顶部位置：距客户区顶部 2% 高度
 CORNER_TOP = 0.05  # 没有炉石窗口可贴时放在屏幕右上角，距顶部 5% 高度（避开 Mac 菜单栏）
 GRIP_CHARS, GRIP_HEIGHT = 4.5, 1.4  # 拖动标签的宽、高（字号的倍数）
+TAB_CHARS = 3.2  # "对手"标签的宽（两个字加左右留白）；高同拖动标签
+TAB_GAP = 0.3  # "对手"标签和拖动标签之间空几个字宽
 DRAG_THRESHOLD = 3  # 按住标签移动这么多像素才算拖（点一下不写文件）
 
 STEP_SEP = "  "  # 方案各步之间的分隔
@@ -148,13 +150,40 @@ def grip_size(layout: Layout) -> tuple[int, int]:
     return round(layout.font_px * GRIP_CHARS), round(layout.font_px * GRIP_HEIGHT)
 
 
+def tab_size(layout: Layout) -> tuple[int, int]:
+    """对手标签（写着"对手"）的宽、高：约 3.2 个字宽、1.4 个字高（和拖动标签一样高）。"""
+    return round(layout.font_px * TAB_CHARS), round(layout.font_px * GRIP_HEIGHT)
+
+
+def tab_gap(layout: Layout) -> int:
+    """对手标签和拖动标签之间的间隔（像素）。"""
+    return round(layout.font_px * TAB_GAP)
+
+
+def box_width(panel_w: int, grip_w: int, tab_w: int, gap: int) -> int:
+    """箱子的宽：面板只有一行变窄时也不窄于上面的标签（两个标签都在时加上中间的间隔）。"""
+    tags = grip_w + tab_w + (gap if grip_w and tab_w else 0)
+    return max(panel_w, tags)
+
+
 def split_box(
-    x: int, y: int, width: int, panel_height: int, grip_w: int, grip_h: int
-) -> tuple[Rect, Rect]:
-    """(面板, 拖动标签)：标签贴在箱子右上角，面板在标签正下方，两者不重叠。"""
+    x: int,
+    y: int,
+    width: int,
+    panel_height: int,
+    grip_w: int,
+    grip_h: int,
+    tab_w: int = 0,
+    tab_gap: int = 0,
+) -> tuple[Rect, Rect, Rect]:
+    """(面板, 拖动标签, "对手"标签)：标签那一行在箱子顶上（grip_h 是这一行的高，两个标签一样
+    高），面板在它正下方，三者不重叠。拖动标签贴箱子右上角，"对手"在它左边隔 tab_gap；没有
+    拖动标签（grip_w 为 0）时"对手"自己贴右上角。没有的标签宽度为 0。"""
     panel = Rect(x, y + grip_h, width, panel_height)
     grip = Rect(x + width - grip_w, y, grip_w, grip_h)
-    return panel, grip
+    right = grip.x - tab_gap if grip_w else x + width
+    tab = Rect(right - tab_w, y, tab_w, grip_h)
+    return panel, grip, tab
 
 
 @dataclass(frozen=True)

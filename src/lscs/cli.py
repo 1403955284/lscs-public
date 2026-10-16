@@ -63,6 +63,8 @@ REVIEW_BASE = PROJECT_ROOT  # [review] dir 是相对路径时相对它（测试�
 STATS_CACHE_DIR: Path | None = None
 # HSReplay 流派指南的缓存目录；None 表示和本版本统计同一个目录（测试里换成临时目录）
 GUIDES_CACHE_DIR: Path | None = None
+# 对手阵容卡图的缓存目录；None 表示卡牌数据缓存目录下的 art/（测试里换成临时目录）
+ART_CACHE_DIR: Path | None = None
 POLL_INTERVAL = 0.2  # watch 默认的轮询间隔（秒）
 OVERLAY_REPLAY_SPEED = 20.0  # replay --overlay 没填 --speed 时的倍速（不等待的话面板一闪而过）
 RECOMMENDED_OUTPUT_TOKENS = 1500  # 快速建议要写分析和 JSON，800 容易截断
@@ -425,6 +427,13 @@ def _displays(
     return model, DisplayGroup(terminal, model)
 
 
+def _art_dir() -> Path:
+    from lscs.cards.art import ART_DIR
+    from lscs.cards.fetch import default_cache_dir
+
+    return ART_CACHE_DIR if ART_CACHE_DIR is not None else default_cache_dir() / ART_DIR
+
+
 def _run_overlay(
     work: overlay_app.Work, model: OverlayModel, cfg: AppConfig, finished_text: str
 ) -> None:
@@ -432,6 +441,7 @@ def _run_overlay(
         overlay_app.create_tk_window,
         highlight=cfg.highlight,
         banner=cfg.combat_result.enabled,  # 棋盘顶部的战斗结果横幅画在高亮窗口上
+        art_dir=_art_dir(),  # 对手阵容的卡图（[overlay] opponent_boards 关着时不用）
     )
     overlay_app.run_with_overlay(
         work, model, cfg.overlay, create_window=window, finished_text=finished_text

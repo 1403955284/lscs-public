@@ -47,9 +47,10 @@ def test_all_steps_pass(monkeypatch, fake_grip):
     api = windows_with_hearthstone(monkeypatch)
     out, root = [], FakeRoot()
     assert run_check(OverlayConfig(), out=out.append, make_root=lambda: root) is True
-    assert [line[:1] for line in out[:-1]] == ["√"] * 10
+    assert [line[:1] for line in out[:-1]] == ["√"] * 11
     assert "1600×900" in out[3]
-    assert out[-2] == "√ 拖动标签：不穿透、不抢焦点、不进任务栏"
+    assert out[-3] == "√ 拖动标签：不穿透、不抢焦点、不进任务栏"
+    assert out[-2].startswith("√ 卡图解码（Pillow）：Pillow ")
     assert root.destroyed and fake_grip[0].destroyed
     assert api.alpha[api.ancestor] == 217  # 检查完恢复成配置的不透明度
     assert out[-1].startswith("检查通过")
@@ -161,7 +162,7 @@ def test_panel_creation_failure_skips_the_rest(monkeypatch):
 
     assert run_check(OverlayConfig(), out=out.append, make_root=no_display) is False
     assert "× 创建面板窗口：no display" in out
-    assert sum(line.startswith("√") for line in out) == 4  # 前 4 项照常
+    assert sum(line.startswith("√") for line in out) == 5  # 前 4 项和 Pillow 照常
     assert any("跳过" in line for line in out)
 
 
@@ -172,3 +173,42 @@ def test_not_windows(monkeypatch):
     out = []
     assert run_check(OverlayConfig(), out=out.append, make_root=FakeRoot) is False
     assert out[0].startswith("× 不是 Windows")
+
+
+def test_missing_pillow_is_reported_but_not_critical(monkeypatch):
+    windows_with_hearthstone(monkeypatch)
+
+    def no_pillow():
+        raise RuntimeError(check.PILLOW_MISSING)
+
+    out = []
+    assert run_check(OverlayConfig(), out=out.append, make_root=FakeRoot, pillow=no_pillow)
+    assert "× 卡图解码（Pillow）：没有 Pillow：对手阵容只显示名字（运行 uv sync）" in out
+    assert out[-1].startswith("检查通过")
+
+
+def test_pillow_is_reported_with_its_version(monkeypatch):
+    windows_with_hearthstone(monkeypatch)
+    out = []
+    pillow = lambda: "Pillow 10.4.0"  # noqa: E731
+    assert run_check(OverlayConfig(), out=out.append, make_root=FakeRoot, pillow=pillow)
+    assert "√ 卡图解码（Pillow）：Pillow 10.4.0" in out
+
+
+def test_pillow_is_not_checked_when_opponent_boards_are_off(monkeypatch):
+    windows_with_hearthstone(monkeypatch)
+    out = []
+    cfg = OverlayConfig(opponent_boards=False)
+    assert run_check(cfg, out=out.append, make_root=FakeRoot)
+    assert not any("Pillow" in line for line in out)
+
+
+def test_default_pillow_check_reads_the_installed_version(monkeypatch):
+    import sys
+
+    import PIL
+
+    assert check._pillow() == f"Pillow {PIL.__version__}"
+    monkeypatch.setitem(sys.modules, "PIL", None)
+    with pytest.raises(RuntimeError, match="没有 Pillow"):
+        check._pillow()

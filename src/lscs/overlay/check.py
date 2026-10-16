@@ -1,7 +1,8 @@
 """lscs overlay-check：逐项检查悬浮面板在这台 Windows 电脑上能不能贴靠炉石、穿透鼠标。
 
 每一步打印一行"√/× 步骤：说明"（"!" 表示要注意、但不影响面板）。关键步骤都通过时返回 True。
-最后一步检查面板右上角的拖动标签（不穿透、不抢焦点），它失败时面板照常，只是不能拖。
+面板之后检查面板右上角的拖动标签（不穿透、不抢焦点），它失败时面板照常，只是不能拖；最后一步
+看有没有 Pillow（对手阵容卡图窗口解码卡图用），没有时卡图只显示名字。
 这些符号在中文 Windows 控制台（GBK、默认字体）里都能显示。
 """
 
@@ -27,6 +28,8 @@ PANEL_STEPS = (
     GRIP_STEP,
 )
 OFFSCREEN = "1x1+-32000+-32000"  # 放在屏幕外，检查时看不到
+PILLOW_STEP = "卡图解码（Pillow）"  # 不是关键步骤：没有时对手阵容只显示名字
+PILLOW_MISSING = "没有 Pillow：对手阵容只显示名字（运行 uv sync）"
 
 
 def _print(line: str) -> None:
@@ -145,8 +148,21 @@ def _hearthstone() -> str:
     return f"找到了，客户区 {rect.width}×{rect.height}，位置 ({rect.x}, {rect.y})"
 
 
+def _pillow() -> str:
+    """对手阵容卡图窗口要 Pillow 解码卡图；没有时只显示名字（不算关键失败）。"""
+    from lscs.cards.art import pillow_version
+
+    version = pillow_version()
+    if version is None:
+        raise RuntimeError(PILLOW_MISSING)
+    return f"Pillow {version}"
+
+
 def run_check(
-    cfg: OverlayConfig, out: Output = _print, make_root: Callable[[], Any] = _tk_root
+    cfg: OverlayConfig,
+    out: Output = _print,
+    make_root: Callable[[], Any] = _tk_root,
+    pillow: Callable[[], str] = _pillow,
 ) -> bool:
     if not win32.IS_WINDOWS:
         out("× 不是 Windows：贴靠炉石窗口和鼠标穿透只在 Windows 上可用（面板会固定在屏幕右上角）。")
@@ -172,6 +188,8 @@ def run_check(
             holder["root"].destroy()
     else:
         out(f"跳过：{'、'.join(PANEL_STEPS)}")
+    if cfg.opponent_boards:
+        check.step(PILLOW_STEP, False, pillow)
     if check.ok:
         out("检查通过：悬浮面板应该可以正常贴在炉石上、穿透鼠标。")
     else:

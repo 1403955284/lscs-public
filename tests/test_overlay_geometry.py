@@ -150,10 +150,11 @@ def test_anchor_from_rect_round_trips_through_dock(box):
 def test_grip_size_and_split_box():
     layout = Layout(width=669, font_px=26, pad=16, max_height=648)
     assert grip_size(layout) == (117, 36)  # 4.5 × 1.4 个字
-    panel, grip = split_box(10, 20, 400, 300, 117, 36)
+    panel, grip, tab = split_box(10, 20, 400, 300, 117, 36)
     assert grip == Rect(10 + 400 - 117, 20, 117, 36)  # 贴在箱子右上角
     assert panel == Rect(10, 20 + 36, 400, 300)  # 面板在标签正下方，不重叠
     assert panel.y == grip.bottom and panel.right == grip.right
+    assert tab.width == 0  # 没有"对手"标签
 
 
 def test_drag_follows_the_mouse_after_a_threshold():

@@ -474,8 +474,9 @@ def test_windows_path_with_fake_win32(monkeypatch):
     assert width == 359  # 900 高 → 14 像素字（900 / 70 ≈ 13，下限 14）→ 24.5 个字宽 + 内边距
     assert seen.get("hidden")
     assert out == [
+        "对手阵容已关闭：面板无法贴靠炉石，卡图窗口没法穿透鼠标",  # 退路里卡图窗口没法穿透
         "贴靠炉石窗口连续 5 次失败（GetForegroundWindow 坏了），"
-        "面板已移到屏幕右上角；不需要面板可以用 --no-overlay 关闭。"
+        "面板已移到屏幕右上角；不需要面板可以用 --no-overlay 关闭。",
     ]
 
 
@@ -620,7 +621,7 @@ def test_panel_drives_the_highlight_with_fake_win32(monkeypatch):
         )
     except tk.TclError as exc:
         pytest.skip(f"没有图形界面：{exc}")
-    assert window.status.endswith("游戏里会用金色框标出下一步要点的牌或按钮。")
+    assert "游戏里会用金色框标出下一步要点的牌或按钮。" in window.status
     model = OverlayModel(lambda c: NAMES.get(c, c))
     model.on_update(STATE, [Event(type=EventType.RECRUIT_STARTED, turn=3)])
     plan = Plan(source="rules", actions=(Action(type="buy", entity_id=20),))
@@ -665,8 +666,8 @@ def test_highlight_that_cannot_open_leaves_the_panel_alone(monkeypatch):
         pytest.skip(f"没有图形界面：{exc}")
     try:
         assert window.status.startswith("悬浮面板已打开：")
-        assert window.status.endswith(
-            '画面高亮无法开启（bad attribute "-transparentcolor"），只显示面板。'
+        assert (
+            '画面高亮无法开启（bad attribute "-transparentcolor"），只显示面板。' in window.status
         )
         assert window._highlight is None
     finally:
@@ -743,7 +744,7 @@ def test_banner_alone_still_opens_the_highlight_and_expires(monkeypatch):
     except tk.TclError as exc:
         pytest.skip(f"没有图形界面：{exc}")
     assert calls == [("open", False)]
-    assert window.status.endswith(BANNER_ON) and HIGHLIGHT_ON not in window.status
+    assert BANNER_ON in window.status and HIGHLIGHT_ON not in window.status
     model = OverlayModel(lambda c: NAMES.get(c, c), clock=lambda: now[0])
     dead = CombatResult(
         turn=3,
@@ -1199,9 +1200,9 @@ def test_highlight_preview_draws_the_move_badge():
 
 HS_EXE = r"C:\Program Files (x86)\Hearthstone\Hearthstone.exe"
 CLIENT = (100, 50, 1600, 900)  # 假炉石的客户区：x, y, 宽, 高
-FOCUS_LOST = (
+FOCUS_LOST = (  # 两个标签都开着（默认）
     "注意：炉石失去了焦点（前台是 lscs 的面板）；"
-    "如果反复出现，请把 [overlay] drag_handle 设为 false 并告诉开发者"
+    "如果反复出现，请把 [overlay] drag_handle 和 opponent_boards 设为 false 并告诉开发者"
 )
 
 
@@ -1227,11 +1228,12 @@ def _open_window(tk, **kwargs):
         pytest.skip(f"没有图形界面：{exc}")
 
 
-def _once_placed(window, scenario):
+def _once_placed(window, scenario, model=None):
     """面板第一次定位好以后，在 Tk 的回调里运行一次 scenario，然后关闭窗口。定时器会吞掉回调里
-    的异常，所以先存起来，回来再抛出。"""
-    model = OverlayModel(lambda c: NAMES.get(c, c))
-    model.on_update(STATE, [Event(type=EventType.RECRUIT_STARTED, turn=3)])
+    的异常，所以先存起来，回来再抛出。model：默认是第 3 回合招募、没有对手的局面。"""
+    if model is None:
+        model = OverlayModel(lambda c: NAMES.get(c, c))
+        model.on_update(STATE, [Event(type=EventType.RECRUIT_STARTED, turn=3)])
     result = {"polls": 0}
 
     def keep_running():
@@ -1583,8 +1585,8 @@ def test_drag_handle_can_be_switched_off(monkeypatch, tmp_path):
     _fake_hearthstone(monkeypatch)
     path = tmp_path / "p.json"
     position.save(path, Anchor(0.0625, 0.0556, "left", "top"))
-    try:
-        window = _window_with(OverlayConfig(drag_handle=False), path)
+    try:  # "对手"标签也关掉：面板上方一个标签都没有
+        window = _window_with(OverlayConfig(drag_handle=False, opponent_boards=False), path)
     except tk.TclError as exc:
         pytest.skip(f"没有图形界面：{exc}")
     assert window._grip is None
@@ -1612,7 +1614,10 @@ def test_drag_handle_off_on_mac_says_nothing_about_dragging(monkeypatch, tmp_pat
         pytest.skip(f"没有图形界面：{exc}")
     try:
         assert window._grip is None
-        assert window.status == "悬浮面板已打开（不是 Windows，放在屏幕右上角，不穿透鼠标）。"
+        assert window.status == (
+            "悬浮面板已打开（不是 Windows，放在屏幕右上角，不穿透鼠标）。"
+            '点面板上方的"对手"看所有对手上次交手时的阵容。'
+        )
     finally:
         window._release()
 
@@ -1789,28 +1794,33 @@ def test_dragging_after_falling_back_to_a_plain_window_is_not_saved(monkeypatch,
     assert (moved.x, moved.y) == (start.x - 100, start.y + 100)
     assert anchors[True] is None and anchors[False] is not None
     assert not path.exists()
-    assert len(out) == 1 and out[0].startswith("贴靠炉石窗口连续 5 次失败")
+    assert len(out) == 2 and out[1].startswith("贴靠炉石窗口连续 5 次失败")
+    assert out[0] == "对手阵容已关闭：面板无法贴靠炉石，卡图窗口没法穿透鼠标"
 
 
 @pytest.mark.parametrize(
-    ("drag_handle", "expected"),
-    [(True, "drag_handle 设为 false"), (False, "请告诉开发者")],
+    ("drag_handle", "opponent_boards", "expected"),
+    [
+        (True, True, "drag_handle 和 opponent_boards 设为 false"),
+        (True, False, "[overlay] drag_handle 设为 false"),
+        (False, True, "[overlay] opponent_boards 设为 false"),
+        (False, False, "请告诉开发者"),
+    ],
 )
-def test_focus_warning_only_mentions_drag_handle_when_the_grip_is_on(drag_handle, expected):
-    """拖动标签已经关掉时，提醒里不再叫用户去关它。"""
+def test_focus_warning_only_mentions_the_tags_that_are_on(drag_handle, opponent_boards, expected):
+    """拖动标签、"对手"标签已经关掉时，提醒里不再叫用户去关它。"""
     from types import SimpleNamespace
 
     from lscs.config import OverlayConfig
     from lscs.overlay.window import FOCUS_LOST_NO_GRIP, OverlayWindow
 
     out: list[str] = []
-    fake = SimpleNamespace(
-        _focus_warned=False, _out=out.append, _cfg=OverlayConfig(drag_handle=drag_handle)
-    )
+    cfg = OverlayConfig(drag_handle=drag_handle, opponent_boards=opponent_boards)
+    fake = SimpleNamespace(_focus_warned=False, _out=out.append, _cfg=cfg)
     OverlayWindow._note_focus_lost(fake)
     OverlayWindow._note_focus_lost(fake)  # 只提醒一次
     assert len(out) == 1 and expected in out[0]
-    assert (out[0] == FOCUS_LOST_NO_GRIP) is (not drag_handle)
+    assert (out[0] == FOCUS_LOST_NO_GRIP) is (not drag_handle and not opponent_boards)
 
 
 def test_highlight_draws_core_badges_without_brackets_or_breathing():
@@ -1933,3 +1943,723 @@ def test_panel_passes_the_core_targets_to_the_highlight(monkeypatch, core_marks)
     window.run(model, keep_running)
     expected = (Target(row="shop", index=1, count=2),) if core_marks else ()
     assert calls and calls[-1] == expected
+
+
+# ---- "对手"标签和对手阵容卡图窗口 ----
+
+BOARD_NAMES = {
+    "H2": "洛卡拉",
+    "H3": "恐龙大师布莱恩",
+    "H4": "古夫",
+    "H5": "詹迪斯",
+    "H6": "米尔豪斯",
+    "H7": "厄祖玛特",
+    "H8": "艾德温",
+}
+
+
+def board_name(card_id):
+    return BOARD_NAMES.get(card_id, f"随从{card_id[1:]}")
+
+
+def seven_rivals(health=30):
+    """7 个对手：第 8 名詹迪斯已淘汰、是正在打的残影；艾德温已淘汰；布莱恩没见过；米尔豪斯见到空场。
+    卡图的卡牌 ID 是 "C{对手}_{位置}"，一共 7 + 3 + 2 + 4 = 16 个。"""
+    from lscs.state.models import Minion, OpponentView
+
+    def board(pid, count, **kw):
+        return tuple(
+            Minion(
+                entity_id=pid * 100 + i,
+                card_id=f"C{pid}_{i}",
+                position=i,
+                tier=1,
+                races=(),
+                atk=2 + i,
+                health=3 + i,
+                golden=kw.get("golden", False) and i == 0,
+                keywords=("DIVINE_SHIELD", "TAUNT") if kw.get("shield") and i == 0 else (),
+            )
+            for i in range(count)
+        )
+
+    def opp(pid, hp, place, minions=(), seen=None):
+        return OpponentView(
+            player_id=pid,
+            hero_card_id=f"H{pid}",
+            health=hp,
+            armor=0,
+            place=place,
+            tavern_tier=4,
+            last_board=minions,
+            last_seen_turn=seen,
+        )
+
+    return {
+        2: opp(2, health, 1, board(2, 7), seen=9),
+        3: opp(3, 28, 2),
+        4: opp(4, 25, 3, board(4, 3), seen=7),
+        6: opp(6, 20, 4, (), seen=6),
+        7: opp(7, 15, 5, board(7, 2, golden=True, shield=True), seen=8),
+        5: opp(5, 0, 8, board(5, 4), seen=4),
+        8: opp(8, -2, 7, board(8, 1), seen=3),
+    }
+
+
+def combat7(seq=10, health=30):
+    return make_state(turn=10, phase=Phase.COMBAT, seq=seq).model_copy(
+        update={"opponents": seven_rivals(health), "next_opponent_id": 5}
+    )
+
+
+def boards_model(state=None):
+    model = OverlayModel(board_name)
+    model.on_update(state or combat7(), [])
+    return model
+
+
+def _tab_centre(window):
+    rect = window._tab.geometry
+    return rect.x + rect.width // 2, rect.y + rect.height // 2
+
+
+def _offscreen(boards):
+    return boards.geometry is None and boards._top.geometry().endswith("+-32000+-32000")
+
+
+class FakeArt:
+    """内存里的卡图缓存：放进 PIL 图、把 generation 加一，就像后台线程下载到了一张。"""
+
+    available = True
+
+    def __init__(self):
+        self.images = {}
+        self.generation = 0
+        self.requested = []
+        self.stopped = False
+
+    def request(self, card_ids):
+        self.requested.append(list(card_ids))
+
+    def image(self, card_id):
+        return self.images.get(card_id)
+
+    def stop(self):
+        self.stopped = True
+
+    def arrive(self, card_id, color=(200, 40, 40)):
+        from PIL import Image
+
+        self.images[card_id] = Image.new("RGB", (256, 256), color)
+        self.generation += 1
+
+
+def test_opponent_tab_toggles_the_boards_window_with_fake_win32(monkeypatch, tmp_path):
+    tk = pytest.importorskip("tkinter")
+    from lscs.overlay.geometry import Rect
+    from lscs.overlay.tab import CLOSED, OPEN
+    from lscs.overlay.win32 import (
+        WS_EX_LAYERED,
+        WS_EX_NOACTIVATE,
+        WS_EX_TOOLWINDOW,
+        WS_EX_TRANSPARENT,
+    )
+
+    api = _fake_hearthstone(monkeypatch)
+    out = []
+    window = _open_window(tk, out=out.append, position_path=tmp_path / "p.json")
+    assert '点面板上方的"对手"看所有对手上次交手时的阵容。' in window.status
+    assert "Pillow" not in window.status  # 装了 Pillow
+    tab, boards = window._tab, window._boards
+    assert tab.text() == "对手" and tab.colors() == CLOSED
+    wanted = WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
+    assert api.styles[tab.hwnd] & wanted == wanted
+    assert not api.styles[tab.hwnd] & WS_EX_TRANSPARENT  # 标签收得到鼠标
+    assert api.styles[boards.hwnd] & (wanted | WS_EX_TRANSPARENT) == wanted | WS_EX_TRANSPARENT
+    assert len({window._hwnd, window._grip.hwnd, tab.hwnd, boards.hwnd}) == 4
+    started = (_offscreen(boards), api.alpha[boards.hwnd])
+
+    def scenario():
+        seen = {"tab": tab.geometry, "grip": window._grip.geometry, "box": window._placed[2]}
+        seen["closed"] = (_offscreen(boards), api.alpha[boards.hwnd])
+        window._tab_release(*_tab_centre(window))
+        seen["open"] = (
+            boards.geometry,
+            api.alpha[boards.hwnd],
+            tab.colors(),
+            boards.texts(),
+            boards.shapes(),
+            boards.images(),
+        )
+        window._place()  # 之后的定位不动它
+        seen["again"] = (boards.geometry, api.alpha[boards.hwnd])
+        window._tab_release(*_tab_centre(window))
+        seen["closed_again"] = (_offscreen(boards), api.alpha[boards.hwnd], tab.colors())
+        return seen
+
+    seen = _once_placed(window, scenario, boards_model())
+    assert started == (True, 0)  # 启动时在屏幕外、透明
+    tab_rect, grip, box = seen["tab"], seen["grip"], seen["box"]
+    assert tab_rect.y == grip.y == box.y and tab_rect.height == grip.height
+    assert tab_rect.right == grip.x - round(0.3 * 14)  # 在拖动标签左边，隔 0.3 个字
+    assert (tab_rect.width, tab_rect.height) == (45, 20)  # 14 像素字：3.2 × 1.4 个字
+    assert seen["closed"] == (True, 0)
+    rect, alpha, colors, texts, shapes, images = seen["open"]
+    assert (rect.x, rect.y, rect.width) == (132, 158, 320) and alpha == 217
+    assert isinstance(rect, Rect) and rect.bottom <= 50 + round(0.9 * 900)
+    assert colors == OPEN
+    assert texts[0] == "对手阵容（上次交手时）· 第 10 回合"
+    assert "对手" in texts
+    assert any(t.startswith("第8名 詹迪斯 已淘汰（残影）") for t in texts)
+    assert any(t.startswith("第1名 洛卡拉 30+0") for t in texts)
+    assert "已淘汰：艾德温" in texts and "日志里只有交手时的阵容，对手之后可能变强了" in texts
+    assert not any("▶" in t or "★" in t for t in texts)
+    assert shapes["ring"] == 16 and shapes["placeholder"] == 16 and images == 0
+    assert shapes["badge"] == 32 and shapes["shield"] == 1 and shapes["mark"] == 1
+    assert seen["again"] == (rect, 217)
+    assert seen["closed_again"] == (True, 0, CLOSED)
+    assert out == []
+
+
+def test_boards_window_hides_with_the_panel_and_comes_back_open(monkeypatch, tmp_path):
+    tk = pytest.importorskip("tkinter")
+
+    api = _fake_hearthstone(monkeypatch)
+    window = _open_window(tk, out=lambda _l: None, position_path=tmp_path / "p.json")
+    hwnds = (window._hwnd, window._grip.hwnd, window._tab.hwnd, window._boards.hwnd)
+
+    def scenario():
+        window._tab_release(*_tab_centre(window))
+        shown_at = window._boards.geometry
+        api.foreground = 999  # 切到别的程序
+        window._place()
+        hidden = [api.alpha[h] for h in hwnds]
+        api.foreground = 1
+        window._place()
+        back = [api.alpha[h] for h in hwnds]
+        return shown_at, hidden, back, window._boards.geometry, window._boards_open
+
+    shown_at, hidden, back, back_at, still_open = _once_placed(window, scenario, boards_model())
+    assert hidden == [0, 0, 0, 0]  # 面板、两个标签、卡图窗口一起透明
+    assert back == [217, 217, 217, 217]
+    assert still_open and back_at == shown_at  # 仍开着、位置不变
+
+
+def test_boards_window_moves_to_the_right_when_the_panel_is_on_the_left(monkeypatch, tmp_path):
+    tk = pytest.importorskip("tkinter")
+
+    _fake_hearthstone(monkeypatch)
+    try:
+        window = _window_with(OverlayConfig(position="left"), tmp_path / "p.json")
+    except tk.TclError as exc:
+        pytest.skip(f"没有图形界面：{exc}")
+
+    def scenario():
+        window._tab_release(*_tab_centre(window))
+        return window._boards.geometry, window._placed[2]
+
+    rect, box = _once_placed(window, scenario, boards_model())
+    assert rect.right == 100 + 1600 - 32 and rect.y == 158
+    assert box.x == 100 + 32  # 面板在左下角
+    assert rect.x >= box.right or rect.bottom <= box.y  # 不和面板重叠
+
+
+def test_boards_window_redraws_when_opponents_change_and_when_art_arrives(monkeypatch, tmp_path):
+    tk = pytest.importorskip("tkinter")
+
+    _fake_hearthstone(monkeypatch)
+    art = FakeArt()
+    window = _open_window(tk, out=lambda _l: None, position_path=tmp_path / "p.json", art=art)
+    model = boards_model()
+    expected = {f"C{pid}_{i}" for pid, n in ((2, 7), (4, 3), (7, 2), (5, 4)) for i in range(n)}
+
+    def scenario():
+        seen = {"before_open": set(art.requested[-1]) if art.requested else None}
+        window._tab_release(*_tab_centre(window))
+        boards = window._boards
+        seen["placeholder"] = (boards.images(), "随从\n2_" in boards.texts())
+        art.arrive("C2_0")
+        seen["refresh"] = window._refresh_boards()
+        window._place()
+        seen["art"] = (boards.images(), boards.shapes().get("placeholder"))
+        model.on_update(combat7(seq=11, health=12), [])
+        window._refresh_boards()
+        window._place()
+        seen["changed"] = boards.texts()
+        return seen
+
+    seen = _once_placed(window, scenario, model)
+    assert seen["before_open"] == expected  # 窗口还没打开时就要了所有卡图
+    assert seen["placeholder"] == (0, True)  # 卡图没到：深色椭圆 + 两行名字
+    assert seen["refresh"] is True
+    assert seen["art"] == (1, 15)
+    assert any(t.startswith("第1名 洛卡拉 12+0") for t in seen["changed"])
+    assert art.stopped  # 窗口关闭时停掉下载线程
+
+
+def test_boards_window_closes_when_a_new_game_starts(monkeypatch, tmp_path):
+    tk = pytest.importorskip("tkinter")
+    from lscs.overlay.tab import CLOSED
+
+    api = _fake_hearthstone(monkeypatch)
+    window = _open_window(tk, out=lambda _l: None, position_path=tmp_path / "p.json")
+    model = boards_model()
+
+    def scenario():
+        window._tab_release(*_tab_centre(window))
+        opened = window._boards_open
+        new_game = [Event(type=EventType.GAME_STARTED, turn=0)]
+        model.on_update(make_state(turn=1, seq=20), new_game)
+        if window._refresh_boards():
+            window._place()
+        boards = window._boards
+        return (
+            opened,
+            window._boards_open,
+            window._tab.colors(),
+            _offscreen(boards),
+            api.alpha[boards.hwnd],
+            window._boards_data.title,
+        )
+
+    opened, still_open, colors, offscreen, alpha, title = _once_placed(window, scenario, model)
+    assert opened and not still_open
+    assert colors == CLOSED and offscreen and alpha == 0
+    assert title == "还没有对局"
+
+
+def test_pressing_the_tab_gives_focus_back_to_hearthstone(monkeypatch, tmp_path):
+    """万一点"对手"时炉石被切到了后台：按下和松开时都马上还给炉石，并提醒一次（提到两个开关）。
+    松手时指针不在标签里不算点了一下。"""
+    tk = pytest.importorskip("tkinter")
+
+    api = _fake_hearthstone(monkeypatch)
+    out = []
+    window = _open_window(tk, out=out.append, position_path=tmp_path / "p.json")
+
+    def scenario():
+        tx, ty = _tab_centre(window)
+        window._tab_press(tx, ty)  # 炉石在前台：不动焦点
+        quiet = (list(api.focus_calls), list(out))
+        api.foreground = window._tab.hwnd
+        window._tab_press(tx, ty)
+        after_press = (api.foreground, list(api.focus_calls))
+        window._tab_release(tx + 500, ty)  # 拖出去再松开：不算
+        outside = window._boards_open
+        api.foreground = window._boards.hwnd  # 卡图窗口在前台也算我们的
+        window._tab_release(tx, ty)
+        return quiet, after_press, outside, window._boards_open, list(api.focus_calls)
+
+    quiet, after_press, outside, opened, calls = _once_placed(window, scenario, boards_model())
+    assert quiet == ([], [])
+    assert after_press == (1, [1])
+    assert outside is False and opened is True
+    assert calls == [1, 1]
+    assert out == [FOCUS_LOST]  # 只提醒一次
+
+
+def test_opponent_boards_can_be_switched_off(monkeypatch, tmp_path):
+    tk = pytest.importorskip("tkinter")
+    from lscs.overlay.window import OverlayWindow
+
+    _fake_hearthstone(monkeypatch)
+    art = FakeArt()
+    try:
+        window = OverlayWindow(
+            OverlayConfig(opponent_boards=False),
+            out=lambda _l: None,
+            position_path=tmp_path / "p.json",
+            art=art,
+        )
+    except tk.TclError as exc:
+        pytest.skip(f"没有图形界面：{exc}")
+    assert window._tab is None and window._boards is None
+    assert "对手" not in window.status and art.stopped  # 一张卡图都不下载
+    box, grip = _once_placed(window, lambda: (window._placed[2], window._grip.geometry))
+    assert grip.right == box.right and grip.y == box.y
+    assert box.height == window._geometry[1] + grip.height  # 只有拖动标签那一行
+
+    try:
+        window = _window_with(OverlayConfig(drag_handle=False), tmp_path / "p.json")
+    except tk.TclError as exc:
+        pytest.skip(f"没有图形界面：{exc}")
+    assert window._grip is None and window._tab is not None
+    tab, box = _once_placed(window, lambda: (window._tab.geometry, window._placed[2]))
+    assert (tab.right, tab.y) == (box.right, box.y)  # "对手"自己贴右上角
+
+
+def test_tab_that_cannot_be_styled_leaves_the_panel_alone(monkeypatch, tmp_path):
+    tk = pytest.importorskip("tkinter")
+
+    api = _fake_hearthstone(monkeypatch)
+    real = api.SetLayeredWindowAttributes
+    first_two = []
+
+    def panel_and_grip_only(hwnd, key, alpha, flags):
+        if len(first_two) < 2 and hwnd not in first_two:
+            first_two.append(hwnd)  # 面板最先，拖动标签其次
+        return real(hwnd, key, alpha, flags) if hwnd in first_two else 0
+
+    api.SetLayeredWindowAttributes = panel_and_grip_only
+    window = _open_window(tk, out=lambda _l: None, position_path=tmp_path / "p.json")
+    assert window.status.startswith("悬浮面板已打开：炉石在前台时显示在游戏窗口右下角")
+    assert "看不了对手阵容（SetLayeredWindowAttributes 失败（错误码 5））。" in window.status
+    assert window._tab is None and window._boards is None and window._grip is not None
+    width, height, x, y = _once_placed(window, lambda: window._geometry)
+    assert (x + width, y + height) == (100 + 1568, 50 + 882)
+    assert window._native
+
+
+def test_tab_failure_while_running_only_stops_the_boards(monkeypatch, tmp_path):
+    tk = pytest.importorskip("tkinter")
+
+    api = _fake_hearthstone(monkeypatch)
+    out = []
+    art = FakeArt()
+    window = _open_window(tk, out=out.append, position_path=tmp_path / "p.json", art=art)
+
+    def scenario():
+        window._tab_release(*_tab_centre(window))
+        boards_hwnd = window._boards.hwnd
+        real = api.SetLayeredWindowAttributes
+        api.SetLayeredWindowAttributes = lambda h, k, a, f: (
+            0 if h == boards_hwnd else real(h, k, a, f)
+        )
+        api.foreground = 999
+        window._place()  # 隐藏：卡图窗口设不了透明度
+        api.foreground = 1
+        window._place()
+        return window._tab, window._boards, window._grip, window._visible
+
+    tab, boards, grip, visible = _once_placed(window, scenario, boards_model())
+    assert tab is None and boards is None and grip is not None and visible
+    assert art.stopped
+    assert out == [
+        "对手标签出错（SetLayeredWindowAttributes 失败（错误码 5）），看不了对手阵容了，其余照常。"
+    ]
+
+
+def test_focus_taken_by_the_tab_is_given_back(monkeypatch):
+    tk = pytest.importorskip("tkinter")
+    from lscs.overlay import tab as tab_module
+
+    api = _fake_hearthstone(monkeypatch)
+    api.foreground = 0x555  # 运行 watch 的 PowerShell
+    real_init = tab_module.TabWindow.__init__
+
+    def stealing(self, *args, **kwargs):
+        real_init(self, *args, **kwargs)
+        api.foreground = self.hwnd  # 第一次显示时抢走了焦点
+
+    monkeypatch.setattr(tab_module.TabWindow, "__init__", stealing)
+    window = _open_window(tk)
+    try:
+        assert api.focus_calls == [0x555]
+    finally:
+        window._release()
+
+
+def test_boards_window_reports_a_rebuilt_window_and_stays_hidden(monkeypatch):
+    tk = pytest.importorskip("tkinter")
+    from fake_win32 import FakeWin32Api
+
+    from lscs.overlay.boards_window import BoardsWindow
+    from lscs.overlay.portraits import Portraits
+    from lscs.overlay.win32 import WS_EX_NOACTIVATE, WS_EX_TRANSPARENT
+
+    try:
+        root = tk.Tk()
+    except tk.TclError as exc:
+        pytest.skip(f"没有图形界面：{exc}")
+    try:
+        root.withdraw()
+        api = FakeWin32Api().install(monkeypatch)
+        fonts = lambda px, bold: "TkDefaultFont"  # noqa: E731
+        boards = BoardsWindow(root, 0.85, True, fonts, Portraits(None, root))
+        assert boards.hwnd == 0xABC and api.alpha[0xABC] == 0  # 关着：透明
+        assert api.styles[0xABC] & WS_EX_TRANSPARENT
+        assert boards.apply_style() is False
+        api.styles[0xABC] &= ~WS_EX_TRANSPARENT  # 穿透位被清掉了：补上，但不算重建
+        assert boards.apply_style() is False and api.styles[0xABC] & WS_EX_TRANSPARENT
+        api.ancestor = 0xDEF  # Tk 重建了顶层窗口
+        assert boards.apply_style() is True
+        assert api.styles[0xDEF] & WS_EX_NOACTIVATE and api.alpha[0xDEF] == 0
+        boards.destroy()
+    finally:
+        root.destroy()
+
+
+def test_tab_and_boards_on_mac_open_left_of_the_box(monkeypatch, tmp_path):
+    """非 Windows：标签和卡图窗口是普通置顶窗口；点一下（Tk 的事件）窗口出现在箱子左边、顶边
+    对齐；卡图到了就从占位换成照片。"""
+    tk = pytest.importorskip("tkinter")
+    import sys
+
+    from lscs.overlay import win32
+
+    if sys.platform == "win32":
+        pytest.skip("只检查非 Windows")
+    monkeypatch.setattr(win32, "IS_WINDOWS", False)
+    art = FakeArt()
+    out = []
+    window = _open_window(tk, out=out.append, position_path=tmp_path / "p.json", art=art)
+    assert window.status.endswith(
+        '可以用右上角的"≡ 拖动"标签拖，位置不保存。点面板上方的"对手"看所有对手上次交手时的阵容。'
+    )
+    assert window._tab is not None and window._tab.hwnd is None
+
+    def scenario():
+        label = window._tab.label
+        tx, ty = _tab_centre(window)
+        label.event_generate("<ButtonPress-1>", x=5, y=5, rootx=tx, rooty=ty)
+        label.event_generate("<ButtonRelease-1>", x=5, y=5, rootx=tx, rooty=ty)
+        boards = window._boards
+        seen = (boards.geometry, window._placed[2], boards.images(), window._layout.font_px)
+        art.arrive("C2_3")
+        window._refresh_boards()
+        window._place()
+        return seen, boards.images(), boards._top.attributes("-alpha")
+
+    (rect, box, before, px), after, alpha = _once_placed(window, scenario, boards_model())
+    assert rect is not None and rect.y == box.y
+    assert rect.right == box.x - round(0.5 * px) or rect.x == 0
+    assert (before, after) == (0, 1)
+    assert alpha == pytest.approx(0.85, abs=0.01)
+    assert out == []
+
+
+def test_portraits_make_oval_photos_once_and_keep_them(monkeypatch):
+    tk = pytest.importorskip("tkinter")
+    from lscs.overlay import portraits as portraits_module
+    from lscs.overlay.portraits import Portraits
+
+    try:
+        root = tk.Tk()
+    except tk.TclError as exc:
+        pytest.skip(f"没有图形界面：{exc}")
+    try:
+        root.withdraw()
+        art = FakeArt()
+        portraits = Portraits(art, root)
+        assert portraits.available and portraits.photo("A", 40) is None  # 原图还没到
+        art.arrive("A")
+        photo = portraits.photo("A", 40)
+        assert photo is not None and (photo.width(), photo.height()) == (40, 50)
+        assert portraits.photo("A", 40) is photo  # 同一个 (card_id, d) 同一个对象
+        transparent = root.tk.call(str(photo), "transparency", "get", 0, 0)
+        middle = root.tk.call(str(photo), "transparency", "get", 20, 25)
+        assert root.tk.getboolean(transparent) and not root.tk.getboolean(middle)  # 椭圆四角透明
+        monkeypatch.setattr(portraits_module, "MAX_PHOTOS", 2)
+        art.arrive("B")
+        art.arrive("C")
+        portraits.photo("B", 40)
+        portraits.photo("C", 40)
+        assert len(portraits) == 2 and portraits.photo("A", 40) is not photo  # A 被挤掉了
+        portraits.clear()
+        assert len(portraits) == 0
+        assert Portraits(None, root).photo("A", 40) is None
+        art.available = False
+        assert Portraits(art, root).photo("A", 40) is None  # 没有 Pillow
+    finally:
+        root.destroy()
+
+
+def test_status_says_when_pillow_is_missing(monkeypatch, tmp_path):
+    tk = pytest.importorskip("tkinter")
+    from lscs.overlay import window as window_module
+
+    _fake_hearthstone(monkeypatch)
+    monkeypatch.setattr(window_module, "pillow_version", lambda: None)
+    window = _open_window(tk, out=lambda _l: None, position_path=tmp_path / "p.json")
+    try:
+        assert window.status.endswith(
+            '点面板上方的"对手"看所有对手上次交手时的阵容。'
+            "（没有 Pillow，卡图只显示名字；运行 uv sync 安装）"
+        )
+    finally:
+        window._release()
+
+
+def test_falling_back_to_a_plain_window_closes_the_opponent_boards(monkeypatch, tmp_path):
+    """Windows 上贴靠炉石连续失败、退回普通置顶窗口：卡图窗口没法穿透鼠标，会挡住游戏，开着也
+    关掉；没有它"对手"标签也没用，一起去掉，停掉卡图下载，在终端说一句。拖动标签照常。"""
+    tk = pytest.importorskip("tkinter")
+    from lscs.overlay.window import BOARDS_OFF_PLAIN
+
+    api = _fake_hearthstone(monkeypatch)
+    out = []
+    art = FakeArt()
+    window = _open_window(tk, out=out.append, position_path=tmp_path / "p.json", art=art)
+
+    def broken():
+        raise OSError("GetForegroundWindow 坏了")
+
+    def scenario():
+        window._tab_release(*_tab_centre(window))
+        opened = window._boards.shown
+        api.GetForegroundWindow = broken
+        for _ in range(5):
+            window._place()
+        area, docked, box = window._placed
+        grip = window._grip.geometry
+        return opened, window._tab, window._boards, window._boards_open, docked, box, grip
+
+    opened, tab, boards, still_open, docked, box, grip = _once_placed(
+        window, scenario, boards_model()
+    )
+    assert opened and not docked
+    assert tab is None and boards is None and not still_open and art.stopped
+    assert grip.y == box.y and grip.right == box.right  # 只剩拖动标签那一行
+    assert out[0] == BOARDS_OFF_PLAIN and out[1].startswith("贴靠炉石窗口连续 5 次失败")
+
+
+def test_no_opponent_boards_when_docking_fails_at_startup(monkeypatch, tmp_path):
+    tk = pytest.importorskip("tkinter")
+
+    api = _fake_hearthstone(monkeypatch)
+    api.layered_ok = False  # 面板一开始就加不上样式：退回普通置顶窗口
+    art = FakeArt()
+    window = _open_window(tk, out=lambda _l: None, position_path=tmp_path / "p.json", art=art)
+    try:
+        assert window.status.startswith("无法让悬浮面板贴靠炉石窗口")
+        assert "对手阵容已关闭：面板无法贴靠炉石，卡图窗口没法穿透鼠标。" in window.status
+        assert '点面板上方的"对手"' not in window.status
+        assert window._tab is None and window._boards is None and art.stopped
+    finally:
+        window._release()
+
+
+def test_boards_window_keeps_its_side_while_the_panel_is_dragged(monkeypatch, tmp_path):
+    tk = pytest.importorskip("tkinter")
+
+    _fake_hearthstone(monkeypatch)
+    window = _open_window(tk, out=lambda _l: None, position_path=tmp_path / "p.json")
+
+    def scenario():
+        window._tab_release(*_tab_centre(window))
+        start = window._boards.geometry
+        gx, gy = _grip_centre(window)
+        window._grip_press(gx, gy)
+        window._grip_motion(gx - 1200, gy)  # 面板拖到左半边
+        during = window._boards.geometry
+        window._grip_release(gx - 1200, gy)
+        window._place()
+        return start, during, window._boards.geometry, window._placed[2]
+
+    start, during, after, box = _once_placed(window, scenario, boards_model())
+    assert start.x == 132 and during == start  # 拖动中不换边
+    assert after.right == 100 + 1600 - 32  # 松手后按新位置：换到右边
+    assert box.x < 100 + 800
+
+
+def test_board_headers_always_keep_when_the_opponent_was_seen():
+    """2560×1440（真实的自动字号）、英雄名很长、标签是"下个对手·最强"：标题行放不下时先省掉阵容
+    的大小，"第 N 回合见"一定画出来；放得下的行照样带着阵容的大小。"""
+    tk = pytest.importorskip("tkinter")
+    import tkinter.font as tkfont
+
+    from factory import minion
+
+    from lscs.overlay.boards import boards_layout
+    from lscs.overlay.boards_window import BoardsWindow
+    from lscs.overlay.geometry import Rect, font_px
+    from lscs.overlay.portraits import Portraits
+    from lscs.overlay.window import _font_family
+    from lscs.state.models import OpponentView
+
+    long_name = "奥卡兹，永恒黑龙军团的大领主"
+    names = {"H2": long_name, "H3": "洛卡拉", "H5": "瓦格斯，堕落的银月城大魔导师"}
+
+    def opp(pid, hp, place, board, seen):
+        return OpponentView(
+            player_id=pid,
+            hero_card_id=f"H{pid}",
+            health=hp,
+            armor=12,
+            place=place,
+            tavern_tier=6,
+            last_board=board,
+            last_seen_turn=seen,
+        )
+
+    big = tuple(
+        minion(200 + i, f"C{i}", 120, 145, races=["ABERRATION"]).model_copy(update={"position": i})
+        for i in range(7)
+    )
+    small = (minion(300, "S", 2, 2, races=["BEAST"]),)
+    ghost = tuple(
+        minion(400 + i, f"G{i}", 30, 40, races=["DEMON"]).model_copy(update={"position": i})
+        for i in range(7)
+    )
+    opponents = {2: opp(2, 40, 1, big, 13), 3: opp(3, 9, 2, small, 12), 5: opp(5, 0, 8, ghost, 11)}
+
+    def boards_for(phase, next_id):
+        model = OverlayModel(lambda c: names.get(c, c))
+        state = make_state(turn=14, phase=phase).model_copy(
+            update={"opponents": opponents, "next_opponent_id": next_id}
+        )
+        model.on_update(state, [])
+        return model.boards()
+
+    recruit = boards_for(Phase.RECRUIT, 2)  # 长名字的最强也是下一个对手
+    fighting = boards_for(Phase.COMBAT, 5)  # 战斗中打的是长名字的残影
+    assert recruit.rows[0].label == "下个对手·最强" and fighting.rows[-1].label == "对手"
+    try:
+        root = tk.Tk()
+    except tk.TclError as exc:
+        pytest.skip(f"没有图形界面：{exc}")
+    try:
+        root.withdraw()
+        family = _font_family(root)
+        cache = {}
+
+        def fonts(px, bold):
+            key = (px, bold)
+            if key not in cache:
+                weight = "bold" if bold else "normal"
+                cache[key] = tkfont.Font(root=root, family=family, size=-px, weight=weight)
+            return cache[key]
+
+        boards = BoardsWindow(root, 0.85, False, fonts, Portraits(None, root))
+        client = Rect(0, 0, 2560, 1440)
+        drawn = []
+        for data in (recruit, fighting):
+            layout = boards_layout(client, font_px(1440), data)
+            boards.show(data, layout, Rect(51, 173, layout.width, layout.height))
+            root.update_idletasks()
+            drawn.append(boards.texts())
+        long_row = next(t for t in drawn[0] if t.startswith("第1名 奥卡兹"))
+        short_row = next(t for t in drawn[0] if t.startswith("第2名 洛卡拉"))
+        ghost_row = next(t for t in drawn[1] if "已淘汰（残影）" in t)
+        assert long_row.endswith("· 第 13 回合见") and "奥卡兹" in long_row
+        assert "…" in long_row and long_name not in long_row  # 英雄名缩短了，回合还在
+        assert "40+12 · 6本" in long_row
+        assert ghost_row.endswith("已淘汰（残影）· 第 11 回合见") and "瓦格斯" in ghost_row
+        assert short_row == "第2名 洛卡拉 9+12 · 6本 · 第 12 回合见 · 野兽×1 身材 4"
+        boards.destroy()
+    finally:
+        root.destroy()
+
+
+def test_tab_only_looks_open_while_the_boards_are_really_shown(monkeypatch, tmp_path):
+    """点开了但还没有内容可画（数据还没取到）：窗口没显示，标签也不变成"开着"的颜色；内容到了、
+    窗口真的显示出来，标签才换颜色。"""
+    tk = pytest.importorskip("tkinter")
+    from lscs.overlay.tab import CLOSED, OPEN
+
+    _fake_hearthstone(monkeypatch)
+    window = _open_window(tk, out=lambda _l: None, position_path=tmp_path / "p.json")
+
+    def scenario():
+        window._boards_data = None
+        window._refresh_boards = lambda: False  # 还没取到数据
+        window._tab_release(*_tab_centre(window))
+        waiting = (window._boards_open, window._boards.shown, window._tab.colors())
+        del window._refresh_boards  # 恢复：下一次刷新取到数据
+        if window._refresh_boards():
+            window._place()
+        return waiting, (window._boards.shown, window._tab.colors())
+
+    waiting, shown = _once_placed(window, scenario, boards_model())
+    assert waiting == (True, False, CLOSED)
+    assert shown == (True, OPEN)

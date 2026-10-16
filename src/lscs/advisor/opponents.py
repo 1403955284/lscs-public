@@ -169,3 +169,58 @@ def eliminated_names(overview: OpponentOverview, name: Namer) -> list[str]:
         for s in overview.opponents
         if not s.alive and not s.next
     ]
+
+
+def stats_text(s: OpponentSummary) -> str:
+    """opponent_text(stats=False) 省掉的那一段：活着的"畸变×5 身材 95"，残影"4 个 · 身材 29"；
+    没见过、空场、淘汰（不是残影）时为空。"""
+    if s.seen_turn is None or s.empty_board or (not s.alive and not s.next):
+        return ""
+    if not s.alive:
+        return f"{s.minions} 个 · 身材 {s.total_stats}"
+    stats = f"身材 {s.total_stats}"
+    if s.main_tribe is not None:
+        stats = f"{tribe_zh(s.main_tribe)}×{s.tribe_count} {stats}"
+    return stats
+
+
+def opponent_text(
+    s: OpponentSummary,
+    name: Namer,
+    turn: int,
+    *,
+    place: bool,
+    seen: bool,
+    threat: bool,
+    stats: bool = True,
+) -> str:
+    """一个对手的一行（面板详细模式战斗中的"对手"块和对手阵容卡图窗口的标题行共用）：
+    名字 血量+护甲 · N本 · 主种族×数 身材 S（· 第 T 回合见）（· 威胁 N）；淘汰的只写"已淘汰"，
+    残影写它最后的阵容有几个、多大。place：前面加名次。stats=False：不写阵容的大小（活着的
+    "主种族×数 身材 S"、残影的"N 个 · 身材 S"，见 stats_text），卡图窗口放不下时先省它。"""
+    hero = name(s.hero_card_id) if s.hero_card_id else "未知"
+    head = f"第{s.place if s.place is not None else '?'}名 {hero}" if place else hero
+    when = "本回合见" if s.seen_turn == turn else f"第 {s.seen_turn} 回合见"
+    size = stats_text(s) if stats else ""
+    if not s.alive:
+        if not s.next:
+            return f"{head} 已淘汰"
+        if s.seen_turn is None:
+            return f"{head} 已淘汰（残影）· 还没见过阵容"
+        if s.empty_board:
+            return f"{head} 已淘汰（残影）· {when}到空场"
+        return f"{head} 已淘汰（残影）· {when} {size}" if size else f"{head} 已淘汰（残影）· {when}"
+    tier = "?" if s.tavern_tier is None else s.tavern_tier
+    parts = [f"{head} {s.health}+{s.armor}", f"{tier}本"]
+    if s.seen_turn is None:
+        parts.append("还没见过阵容")
+    elif s.empty_board:
+        parts.append(f"{when}到空场" if seen else "见到空场")
+    else:
+        if size:
+            parts.append(size)
+        if seen:
+            parts.append(when)
+    if threat:
+        parts.append(f"威胁 {s.threat}")
+    return " · ".join(parts)
